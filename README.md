@@ -11,6 +11,10 @@ Openrouter is prepayed pay-as-you-go service without any monthly or yearly fees.
 Also, Openrouter allows you to limit each key's money usage so you cannot
 overspend.
 
+# Intro Video
+
+[![Inforno Intro Video](https://img.youtube.com/vi/oJyj0mroFtY/0.jpg)](https://youtu.be/oJyj0mroFtY)
+
 The Chats are stored locally in Sandbox files with the extension of .rno
 
 To use Openrouter, you need to provide an Openrouter key, which you can obtain
@@ -41,6 +45,5 @@ make win
 # or, without make:
 cargo build --target=x86_64-pc-windows-gnu --release
 rcedit target/x86_64-pc-windows-gnu/release/inforno.exe --set-icon assets/icon.ico
-
 
 
