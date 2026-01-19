@@ -1,0 +1,14 @@
+.*
+**/target
+**/*.rs.bk
+debug
+*.bk
+*.pdb
+perf.data
+perf.data.old
+flamegraph.svg
+*.code-workspace
+**/mutants.out*/
+packager.toml
+Packager.toml
+certs

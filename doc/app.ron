@@ -1,0 +1,268 @@
+{
+    "egui": "(
+        options: (
+            theme_preference: System,
+            fallback_theme: Dark,
+            zoom_factor: 1.0,
+            tessellation_options: (
+                feathering: true,
+                feathering_size_in_pixels: 1.0,
+                coarse_tessellation_culling: true,
+                prerasterized_discs: true,
+                round_text_to_pixels: true,
+                round_line_segments_to_pixels: true,
+                round_rects_to_pixels: true,
+                debug_paint_clip_rects: false,
+                debug_paint_text_rects: false,
+                debug_ignore_clip_rects: false,
+                bezier_tolerance: 0.1,
+                epsilon: 0.00001,
+                parallel_tessellation: true,
+                validate_meshes:false
+            ),
+            repaint_on_widget_change: false,
+            max_passes: 3,
+            screen_reader: false,
+            warn_on_id_clash: false,
+            input_options: (
+                line_scroll_speed: 40.0,
+                scroll_zoom_speed: 0.005,
+                max_click_dist: 6.0,
+                max_click_duration: 0.8,
+                max_double_click_delay: 0.3,
+                zoom_modifier: (
+                    alt: false,
+                    ctrl: false,
+                    shift: false,
+                    mac_cmd: false,
+                    command: true
+                ),
+                horizontal_scroll_modifier: (
+                    alt: false,
+                    ctrl: false,
+                    shift: true,
+                    mac_cmd: false,
+                    command: false
+                ),
+                vertical_scroll_modifier: (
+                    alt: true,
+                    ctrl: false,
+                    shift: false,
+                    mac_cmd: false,
+                    command: false
+                ),
+                surrender_focus_on: Clicks
+            ),
+            reduce_texture_memory: false
+            ),
+            data: (
+                [
+                    (
+                        1585433636466977898,
+                        (
+                            type_id: (
+                                10230950757244086369
+                            ),
+                            ron:\"(
+                                rect: (
+                                    min: (
+                                        x: 0.0,
+                                        y: 0.0
+                                    ),
+                                    max: (
+                                        x: 200.0,
+                                        y: 539.0
+                                    )
+                                )
+                            )\",
+                            generation: 1
+                        )
+                    ),
+                    (
+                        7268641663566184468,
+                        (
+                            type_id: (
+                                9700316332465396185
+                            ),
+                            ron:\"(
+                                open: true,
+                                open_height: Some(420.0)
+                            )\",
+                            generation: 1
+                        )
+                    ),
+                    (
+                        9730836956772522522,
+                        (
+                            type_id: (
+                                15720859204887909325
+                            ),
+                            ron:\"(
+                                desired_size: (
+                                    x: 500.0,
+                                    y: 420.0
+                                ),
+                                last_content_size: (
+                                    x: 500.0,
+                                    y: 420.0
+                                ),
+                                requested_size: None
+                            )\",
+                            generation: 1
+                        )
+                    ),
+                    (
+                        10316136914147832237,
+                        (
+                            type_id: (
+                                99669678409387743
+                            ),ron:\"(
+                                offset: (
+                                    x: 0.0,
+                                    y: 0.0
+                                ),
+                                offset_target: (
+                                    None,
+                                    None
+                                ),
+                                show_scroll: (
+                                    x: false,
+                                    y: true
+                                ),
+                                content_is_too_large: (
+                                    x: false,
+                                    y: true
+                                ),
+                                scroll_bar_interaction: (
+                                    x: false,
+                                    y: false
+                                ),
+                                scroll_start_offset_from_top_left: (
+                                    None,
+                                    None
+                                ),
+                                scroll_stuck_to_end: (
+                                    x: true,
+                                    y: false
+                                ),
+                                interact_rect: Some(
+                                    (
+                                        min: (
+                                            x: 223.0,
+                                            y: 56.6875
+                                        ),max:(
+                                            x: 723.0,
+                                            y: 476.6875
+                                        )
+                                    )
+                                )
+                            )\",
+                            generation: 1
+                        )
+                    )
+                ]
+            ),
+            to_global: {},
+            areas: {
+                (
+                    (
+                        18446744073709551615
+                    )
+                ): (
+                    areas: {
+                        (
+                            18153385668270798605
+                        ): (
+                            pivot_pos: Some(
+                                (
+                                    x: 216.0,
+                                    y: 16.0
+                                )
+                            ),
+                            pivot: (
+                                (
+                                    Min,
+                                    Min
+                                )
+                            ),
+                            interactable: true
+                        ),
+                        (
+                            4209038104994339390
+                        ): (
+                            pivot_pos: Some(
+                                (
+                                    x: 0.0,
+                                    y: 0.0
+                                )
+                            ),
+                            pivot: (
+                                (
+                                    Min,
+                                    Min
+                                )
+                            ),
+                            interactable: true
+                        )
+                    },
+                    visible_areas_last_frame: [
+                        (
+                            order: Middle,
+                            id: (
+                                18153385668270798605
+                            )
+                        ),
+                        (
+                            order: Background,
+                            id: (
+                                4209038104994339390
+                            )
+                        )
+                    ],
+                    visible_areas_current_frame: [],
+                    order: [
+                        (
+                            order: Background,
+                            id: (
+                                4209038104994339390
+                            )
+                        ),
+                        (
+                            order: Middle,
+                            id: (
+                                18153385668270798605
+                            )
+                        )
+                    ],
+                    order_map: {
+                        (
+                            order: Middle,
+                            id: (
+                                18153385668270798605
+                            )
+                        ): 1,
+                        (
+                            order: Background,
+                            id: (
+                                4209038104994339390
+                            )
+                        ): 0
+                    },
+                    wants_to_be_on_top: [],
+                    sublayers: {}
+                )
+            }
+        )",
+    "window": "(
+        inner_position_pixels: None,
+        outer_position_pixels: None,
+        fullscreen: false,
+        maximized: false,
+        inner_size_points: Some(
+            (
+                x: 953.0,
+                y: 539.0
+            )
+        )
+    )",
+}

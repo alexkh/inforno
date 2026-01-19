@@ -1,0 +1,43 @@
+[package]
+name = "inforno"
+version = "0.1.0"
+edition = "2024"
+default-run = "inforno"
+
+[dependencies]
+# only used in v04_async binary:
+reqwest = { version = "0.13.1", features = ["json"] }
+rand = "0.9.2"
+# walkers = "0.50.0"
+
+dotenv = "0.15.0"
+eframe = { version = "0.33.2", features = ["persistence"] }
+egui = "0.33.2"
+egui-async = "0.3.0"
+env_logger = "0.11.8"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.49.0", features = ["full"] }
+egui_commonmark = { version = "0.22.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
+ollama-rs = { version = "0.3.3", features = ["stream"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+directories = "6.0.0"
+thiserror = "2.0.17"
+secrecy = "0.10.3"
+keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native", "vendored"] }
+openrouter-rs = "0.4.6"
+clap = { version = "4.5.54", features = ["derive", "cargo"] }
+egui_extras = { version = "0.33.2", features = ["all_loaders", "default"] }
+image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
+egui_autocomplete = { version = "12.0.0", features = ["serde"] }
+chrono = "0.4.42"
+serde_json = "1.0.149"
+strum = { version = "0.27.2", features = ["derive"] }
+tokio-stream = { version = "0.1.18", features = ["io-util"] }
+rfd = "0.17.2"
+rust-i18n = "3.1.5"
+futures-util = "0.3.31"
+msix = "0.4.0"
+
+[[bin]]
+name = "inforno"
+path = "src/main.rs"

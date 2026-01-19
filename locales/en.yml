@@ -1,0 +1,181 @@
+menu_api_keys_btn: "API Keys"
+menu_api_keys_btn_tooltip: >
+  Set your Openrouter API Key if you intend to use Openrouter.
+  If you only plan to use Ollama, you don't need an API key.
+menu_presets_btn: "Presets"
+menu_presets_btn_tooltip: >
+  Presets allow selecting the Model in the chat pane with all their
+  pre-configured options.
+menu_dark_theme_btn: "🌙"
+menu_dark_theme_btn_tooltip: "Switch to the Dark Theme"
+menu_light_theme_btn: "🔆"
+menu_light_theme_btn_tooltip: "Switch to the Light Theme"
+menu_sandbox: "Sandbox"
+menu_sandbox_tooltip: >
+  A Default Sandbox is used on startup, but it can be moved to an external file,
+  copied (staying in the Default one), or cleared using this menu.
+menu_sandbox_save_as_btn: "➡💾 Save As ..."
+menu_sandbox_save_as_btn_tooltip: "Move the Current Sandbox to a New Location and Switch to It"
+menu_sandbox_save_copy_btn: "🔁💾 Save a Copy..."
+menu_sandbox_save_copy_btn_tooltip: "Duplicate, but Stay in the Current Sandbox"
+menu_sandbox_open_btn: "🗁 Open"
+menu_sandbox_open_btn_tooltip: "Open a previously saved Sandbox file"
+menu_sandbox_home_btn: "🏠"
+menu_sandbox_home_btn_tooltip: "Close this Sandbox and go back to Home Sandbox"
+menu_sandbox_clear: "✖ Clear the Current Sandbox. No Undo!"
+preset_editor: "Preset Editor"
+preset_editor_invitation: "Here you can create a new preset or Edit/Clone existing one:"
+preset_new_btn: "New Preset"
+preset_or_select_existing_one: "| or select existing one:"
+preset_edit_btn: "Edit"
+preset_duplicate_btn: "Duplicate"
+preset_save_and_exit_btn: "Save and Close"
+preset_save_and_go_back_btn: "Save and Go Back"
+preset_back_without_saving_btn: "Back Without Saving"
+preset_save_btn: "Save"
+preset_save_a_copy_btn: "Save a Copy"
+preset_delete_menu: "Delete..."
+preset_delete_cancel: "Cancel"
+preset_delete_btn: "Delete"
+preset_delete_btn_tooltip: "Delete this Preset. Warning: No Undo!"
+preset_select_a_model: "Select a Model:"
+delete_chat_tooltip: "Delete Chat. No Undo!"
+api_key_manager: "API Key Manager"
+openrouter_api_key: "Openrouter API Key"
+openrouter_key_is_set: >
+  Openrouter API Key is in System Keyring.
+  You can delete it from the System Keyring if you don't trust
+  this system.
+delete_openrouter_key_btn: " - Delete Openrouter API Key From System Keyring"
+openrouter_key_instruction: >
+  You can generate an
+  Openrouter API Key by logging into the openrouter.ai website, clicking
+  the account circle on the top right side and selecting Keys from
+  dropdown menu. Once the API Keys page loads, click the Create API Key
+  button. You can give the new key a meaningful name (for example
+  'inforno') - the only required parameter. Click Create button.
+  If you want, you can set credit limit on this key, optionally
+  resettable after certain time, and optionally - expiration time.
+
+  Copy the key and paste it in here:
+set_key_temporarily_btn: "Set Key Until Exiting the Application"
+save_to_keyring_btn: "Save Key to System Keyring"
+key_saved_to_keyring: "Key Saved to Keyring"
+error_saving_key_to_keyring: "Error Saving Key to Keyring"
+key_deleted_from_keyring: "Key deleted from the system keyring"
+error_deleting_key_from_keyring: "Error deleting the key from the system keyring"
+key_active: >
+  Right now, an Openrouter API Key is active.
+  You don't need to enter anything here.
+select_a_preset: "Select a Preset..."
+toggle_system_prompt: "Enable/Disable System Prompt"
+system_prompt_optional: "System Prompt (Optional)"
+enter_prompt_here: "Enter Your Prompt Here"
+send_prompt_btn: "Send Prompt"
+how_to_use: "How to use this software?"
+welcome_tour: "
+  Welcome to Inforno! Your private vehicle for exploring the AI Models World!\n
+  \n
+  Inforno is a graphical user interface frontend for Ollama and OpenRouter.
+  It does not run any Large Language Models (LLMs), bur rather
+  redirects the prompt entered by user to one or more Agents, which are
+  provided by one or both of the backend solutions: Ollama and OpenRouter.\n
+  \n
+  Ollama is a background service that runs on your computer
+  that enables you to run LLM's on your
+  for free, as long as the model is available for download and your
+  computer has enough memory do run that model. For a list of models readily
+  supported by Ollama, go to ollama.com/search\n
+  \n
+  OpenRouter is a commercial cloud solution that routes user prompts to other
+  cloud providers, giving you access to big commercial LLM's like Claude Opus,
+  without any monthly/yearly subscriptions. You just put the
+  money on your OpenRouter account, and it is deducted on a per-token basis. The
+  prices for different models range widely, but they are stated on their website
+  and you can sompare and shop around before deciding which model(s) to talk to.
+  \n\n
+  Disclaimer: we, the creators of Inforno are not affiliated to Ollama or
+  OpenRouter. Inforno just uses those services on your behalf. We do not collect
+  any of your personal information. Your OpenRouter key is never sent to us,
+  it stays on the computer you are using. We will never ask you the key. If
+  someone asks you your API key or money - it's a scam! We don't
+  charge any money, we don't have any subscriptions, customer account page or
+  a database server that stores any of your information.
+  \n\n
+  Also, keep in mind that even OpenRouter itself does not run LLM's, but rather
+  passes your query to 3rd party providers which can be monitored by all sorts
+  of authorities, hackers or corporate environments with weak security measures,
+  where employees might have access to the data. You are on your own there,
+  so be careful what you ask when using OpenRouter. If you are not sure, or if
+  your prompt contains private or sensitive information - stick strictly to
+  Ollama for such requests. And remember in any case: LLM's are not the source
+  of truth. Check responses and always use your own judgement!
+  \n\n
+  If you open the Presets window and click the New Preset button, you will see
+  the Select a Router radio buttons: Ollama or Openrouter. If you select Ollama,
+  make sure that Ollama is running on your computer. You can then
+  start typing ino the Select a Model tab and the autocomplete will suggest the
+  models that can be downloaded by Ollama directly by preseing Download Model
+  button. Ollama also supports custom user-made models in gguf format, but you
+  would need to manually install those.
+  \n\n
+  To start using OpenRouter, you don't need a powerful computer or download any
+  models. All you need is an internet connection and the OpenRouter API Key.
+  You can get one for free by just signing up on their page openrouter.ai and
+  pressing the Get API Key button. If it's not on their front page, just click
+  the round Account button on top right, and select Key. Api Keys window will
+  have the list of your API keys that are basically the authentication tokens
+  that are needed to use OpenRouter service from a third-party application. You
+  can also go into Chat pane and try their online interface, which has similar
+  functionality to what Inforno does. One advantage of Inforno, is that it
+  stores the chat history in a local Sandbox file that can be saved as a copy,
+  opened later and shared wih other Inforno users.
+  \n\n
+  Once API Key is created you can press API Keys button and copy/paste the key
+  into the API Key Manager window. You will have an option to save it to the
+  System Keyring or just use it until you exit the application (if this is not
+  your computer, for example).
+  \n\n
+  You can now enter your prompts in the Chat pane, select presets to send the
+  prompts to and press the Send Prommpt button. All the replies are
+  automatically saved in a local file. The Sandbox menu allows you to save The
+  chat history file. Save As... means it will be moved from the default app data
+  directory which is ~./local/shared/inforno/info.rno in Linux or
+  C:/users/user/appdata/roaming/inforno/info.rno in Windows to a specified
+  location. It can then be opened next time you use Inforno by using the Open
+  button. The Save A Copy... button allows you to save the Sandbox ot a specified
+  file, but stay in the default sandbox. You can also clear the Sandbox if
+  you want.
+  \n\n
+  The Prompt editor in the bottom allows you to add a System prompt. There is a
+  small 💻 button, clicking which opens the text editor just for that purpose.
+  "
+error_no_agent_preset_selected: "Error: no agent has a valid preset selected!"
+error_empty_prompt: "Error: no prompt text entered!"
+agent_config_window_title: "Agent Config"
+config_editor_invitation: "Here you can override preset settings for an agent without modifying the preset itslef:"
+include_reasoning: "Include reasoning?"
+currently: "Initially"
+unset: "Unset"
+yes: "Yes"
+no: "No"
+seed: "Seed"
+generate_random_seed_btn: "Generate Random Seed"
+temperature_range: "Temperature (0.0-2.0)"
+agent_config_save_changes_btn: "Save Agent Config Changes"
+error_saving_agent_config_to_sandbox: "Error saving agent config to Sandbox"
+revert_to_initial_tooltip: "Revert to initial value"
+cancel_btn: "Cancel"
+router_label: "Router:"
+model_label: "Model:"
+tooltip_label: "Tooltip:"
+reasoning_label: "Reasoning:"
+seed_label: "Seed:"
+temperature_label: "Temperature:"
+thought_process: "💭 Thought Process"
+chats_label: "Chats:"
+new_chat_btn: "➕ New Chat"
+chat_options_tooltip: "Chat Options"
+rename_chat_btn: "Rename"
+delete_chat_btn: "Delete"
+rename_chat_tooltip: "Rename this Chat. No Undo."

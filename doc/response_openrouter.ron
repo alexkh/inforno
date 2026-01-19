@@ -1,0 +1,42 @@
+CompletionsResponse {
+    id: "gen-1765019549-mJx59Ns9ne2ti0pcONPq",
+    choices: [
+        NonStreaming(
+            NonStreamingChoice {
+                finish_reason: Some(
+                    Stop,
+                ),
+                native_finish_reason: Some(
+                    "stop",
+                ),
+                message: Message {
+                    content: Some(
+                        "# Streaming with...",
+                    ),
+                    role: Some(
+                        "assistant",
+                    ),
+                    tool_calls: None,
+                    reasoning: None,
+                    reasoning_details: None,
+                },
+                error: None,
+            },
+        ),
+    ],
+    created: 1765019549,
+    model: "anthropic/claude-opus-4.5",
+    object_type: ChatCompletion,
+    provider: Some(
+        "Amazon Bedrock",
+    ),
+    system_fingerprint: None,
+    usage: Some(
+        ResponseUsage {
+            prompt_tokens: 21,
+            completion_tokens: 1087,
+            total_tokens: 1108,
+        },
+    ),
+}
+

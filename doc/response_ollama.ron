@@ -1,0 +1,15 @@
+GenerationResponse {
+    model: "deepseek-r1:8b",
+    created_at: "2025-12-05T11:08:24.9416657Z",
+    response: "...",
+    done: true,
+    context: ...,
+    total_duration: Some(8560875770),
+    load_duration: Some(1760549751),
+    prompt_eval_count: Some(13),
+    prompt_eval_duration: Some(22835947),
+    eval_count: Some(744),
+    eval_duration: Some(6591627541),
+    thinking: Some("...")
+}
+
