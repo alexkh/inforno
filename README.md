@@ -13,7 +13,7 @@ overspend.
 
 # Intro Video
 
-[![Inforno Intro Video](https://img.youtube.com/vi/oJyj0mroFtY/0.jpg)](https://youtu.be/oJyj0mroFtY)
+[![Inforno Intro Video](https://img.youtube.com/vi/oJyj0mroFtY/0.jpg)](https://www.youtube.com/watch?v=oJyj0mroFtY)
 
 The Chats are stored locally in Sandbox files with the extension of .rno
 
