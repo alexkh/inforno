@@ -1,6 +1,8 @@
 # inforno
 Desktop Application for Exploring Large Language Models
 
+![App Screenshot](doc/screenshot.png)
+
 The goal of the project is to create a desktop application for centralized
 access to any or all of the LLM models supported by Ollama and Openrouter. For
 simple tasks free models can do the job (they can even be run simultaneously).
