@@ -294,6 +294,7 @@ fn render_msg_content(
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
     } else {
+        // 1. Set the spacing to ensure no accidental indentation
         CommonMarkViewer::new()
         .max_image_width(Some(max_image_width))
         .show(ui, cache, &msg.content);

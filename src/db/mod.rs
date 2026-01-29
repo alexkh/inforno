@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf, sync::OnceLock};
+use regex::Regex;
 use rusqlite::{Connection, params, Result, ffi};
 use directories::ProjectDirs;
 use rust_i18n::t;
@@ -260,6 +261,28 @@ pub fn update_agent_preset_snapshot(
     Ok(())
 }
 
+// some LLMs produce code blocks where the initial triple tick is
+// indented. CommonMark creates squeezed boxes instead of a normal full-sized
+// box, which is annoying. This fix applies a regexp to remove any
+// indentation from triple backticks. In the database, we store verbatim original
+// data not to introduce any unforeseen issues.
+fn normalize_code_blocks(markdown: &str) -> String {
+    // Regex explanation:
+    // (?m) : Enable multiline mode (so ^ matches start of line).
+    // ^    : Start of a line.
+    // \s+  : One or more whitespace characters (the indentation we want to remove).
+    // (```): Capture group 1 - the triple backticks (and potentially language tag).
+    //
+    // We replace the whole match with just the capture group ($1) and a preceding newline.
+
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(?m)^[ \t]+(```)").unwrap());
+
+    // Replace "   ```" with "\n```"
+    // The \n ensures the block breaks out of previous paragraphs cleanly.
+    re.replace_all(markdown, "\n$1").to_string()
+}
+
 pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
             -> rusqlite::Result<()> {
     // 1. Serialize fields
@@ -282,6 +305,7 @@ pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
     )?;
 
     msg.id = conn.last_insert_rowid();
+    msg.content = normalize_code_blocks(&msg.content);
 
     Ok(())
 }
@@ -464,7 +488,9 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
         })?;
 
         for msg_res in msgs_iter {
-            let msg = msg_res?;
+            let mut msg = msg_res?;
+            // clean up the input immediately:
+            msg.content = normalize_code_blocks(&msg.content);
             msg_pool.insert(msg.id, msg);
         }
     }
