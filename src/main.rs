@@ -165,6 +165,50 @@ fn configure_fonts(ctx: &egui::Context) {
         vec.push("noto_sans_historical_regular".to_owned());
     }
 
+    // 2. Load the font data
+    // easiest way: embed it in the binary so you don't have file path issues
+    fonts.font_data.insert(
+        "noto_sans_cjk_regular".to_owned(),
+        egui::FontData::from_static(include_bytes!(
+                "../assets/fonts/NotoSansCJKsc-Regular.otf")).into(),
+    );
+
+    // 3. Add it to the font families
+    // Put it *last* in the list so it acts as a fallback.
+    // Egui will try the primary font first, then fallback to this one for missing glyphs.
+
+    // Add to Proportional (Standard Text)
+    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        vec.push("noto_sans_cjk_regular".to_owned());
+    }
+
+    // Add to Monospace (Code blocks)
+    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        vec.push("noto_sans_cjk_regular".to_owned());
+    }
+
+    // 2. Load the font data
+    // easiest way: embed it in the binary so you don't have file path issues
+    fonts.font_data.insert(
+        "noto_emoji_regular".to_owned(),
+        egui::FontData::from_static(include_bytes!(
+                "../assets/fonts/NotoEmoji-Regular.ttf")).into(),
+    );
+
+    // 3. Add it to the font families
+    // Put it *last* in the list so it acts as a fallback.
+    // Egui will try the primary font first, then fallback to this one for missing glyphs.
+
+    // Add to Proportional (Standard Text)
+    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        vec.push("noto_emoji_regular".to_owned());
+    }
+
+    // Add to Monospace (Code blocks)
+    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        vec.push("noto_emoji_regular".to_owned());
+    }
+
     // 4. Apply the new configuration
     ctx.set_fonts(fonts);
 }
