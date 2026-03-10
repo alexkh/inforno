@@ -31,6 +31,7 @@ mod key_manager;
 mod bottom_panel;
 mod chat;
 mod agent_config;
+pub mod math_render;
 
 pub struct MyAppPermanent {
     pub rt: Handle,
@@ -83,6 +84,7 @@ pub struct State {
     is_modal_open: bool,
     bottom_panel_state: BottomPanelState,
     agent_config_state: AgentConfigState,
+    math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
 }
 
 impl State {
@@ -93,7 +95,7 @@ impl State {
         new_sandbox: Option<PathBuf>,
         op_tx: Sender<FileOpMsg>
     ) -> Self {
-        let mut updated_sandbox = new_sandbox;
+        let updated_sandbox = new_sandbox;
         let mut is_home = true;
         if let Some(_) = updated_sandbox {
             is_home = false;
@@ -265,6 +267,7 @@ impl State {
             is_modal_open: false, // if file dialog is open this needs to be true
             bottom_panel_state: BottomPanelState::default(),
             agent_config_state: AgentConfigState::default(),
+            math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         }
     }
 

@@ -251,8 +251,11 @@ impl From<ChatMsg> for ChatMessage {
 impl From<ChatMsg> for Message {
     fn from(item: ChatMsg) -> Self {
         Message {
+            name: item.name,
             role: item.msg_role.into(),
-            content: item.content,
+            content: item.content.into(),
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 }

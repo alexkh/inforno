@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use egui::{Align, Key, Layout, Modifiers, RichText, Ui, Vec2b};
 use egui_autocomplete::AutoCompleteTextEdit;
 use ollama_rs::Ollama;
-use rand::Rng;
+use rand::RngExt;
 use rusqlite::Connection;
 use rust_i18n::t;
 use tokio_stream::StreamExt;
