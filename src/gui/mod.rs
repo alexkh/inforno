@@ -36,6 +36,7 @@ pub mod math_render;
 pub struct MyAppPermanent {
     pub rt: Handle,
     pub sandbox: Option<PathBuf>,
+    pub pending_project_init: Mutex<Option<PathBuf>>,
     pub app_language: Mutex<String>,
 }
 
@@ -85,6 +86,9 @@ pub struct State {
     bottom_panel_state: BottomPanelState,
     agent_config_state: AgentConfigState,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    show_project_init_modal: bool,
+    project_dir_to_init: Option<PathBuf>,
+    copy_presets_checked: bool,
 }
 
 impl State {
@@ -224,6 +228,10 @@ impl State {
         // create the communication channel for streaming chat messages
         let (chat_tx, chat_rx) = channel();
 
+        // Grab the init request from permanent state
+        let pending_init = permanent.pending_project_init.lock().unwrap().take();
+        let show_project_init = pending_init.is_some();
+
         // --- 4. Construct State ---
         Self {
             perma: permanent,
@@ -268,6 +276,9 @@ impl State {
             bottom_panel_state: BottomPanelState::default(),
             agent_config_state: AgentConfigState::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            show_project_init_modal: show_project_init,
+            project_dir_to_init: pending_init,
+            copy_presets_checked: true,
         }
     }
 
@@ -549,12 +560,60 @@ impl eframe::App for MyApp {
                 state.is_modal_open = false;
             }
         }
+
+        // Project Initialization Modal
+        if state.show_project_init_modal {
+            let mut open = true;
+
+            egui::Window::new("Initialize Project Sandbox")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("A project directory was provided, but no Sandbox was found.");
+                    ui.label("Would you like to initialize an '.inforno' directory here?");
+
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut state.copy_presets_checked, "Copy Presets from Home Sandbox");
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Create Sandbox").clicked() {
+                            if let Some(proj_dir) = &state.project_dir_to_init {
+                                if let Err(e) = crate::db::init_project_sandbox(proj_dir, state.copy_presets_checked) {
+                                    state.error_msg = Some(format!("Failed to create project sandbox: {}", e));
+                                    state.is_modal_open = true;
+                                } else {
+                                    // Success! Reload the state targeting the newly created database.
+                                    let db_path = proj_dir.join(".inforno").join("info.rno");
+
+                                    // Make sure we update permanent so it doesn't try to prompt again on next reload
+                                    // (Though State::new grabs it, so you can also just clear the project_dir_to_init)
+                                    state.reload(Some(db_path));
+                                }
+                            }
+                            state.show_project_init_modal = false;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            // Proceed using the default sandbox without creating the project one
+                            state.show_project_init_modal = false;
+                        }
+                    });
+                });
+
+            // If the user closes the window via the 'X'
+            if !open {
+                state.show_project_init_modal = false;
+            }
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Manually exit the process with code 0 (success).
         // This prevents the OS from attempting the faulty Wayland cleanup.
-        std::process::exit(0);
+        //std::process::exit(0);
     }
 }
 

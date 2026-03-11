@@ -1,12 +1,3 @@
-/*
-taffy demo
-[dependencies]
-eframe = "0.33.0"
-egui = "0.33.0"
-egui_taffy = "0.10.0"
-taffy = "0.9.1"
-*/
-
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
@@ -35,6 +26,9 @@ struct Args {
     sandbox: Option<String>,
     #[arg(long)]
     la: Option<String>,
+    // Optional project directory to load a local Sandbox from
+    #[arg(required = false)]
+    project_dir: Option<String>,
 }
 
 fn main() -> eframe::Result {
@@ -104,13 +98,29 @@ fn main() -> eframe::Result {
             });
 
             let sandbox_string = args.sandbox;
-            let sandbox: Option<PathBuf> = sandbox_string.map(PathBuf::from);
+            let mut sandbox: Option<PathBuf> = sandbox_string.map(PathBuf::from);
+            let mut pending_project_init: Option<PathBuf> = None;
+
+            if let Some(proj_str) = args.project_dir {
+                let proj_path = PathBuf::from(proj_str);
+                if proj_path.is_dir() {
+                    let db_path = proj_path.join(".inforno").join("info.rno");
+                    if db_path.exists() {
+                        // Project sandbox exists, load it directly
+                        sandbox = Some(db_path);
+                    } else {
+                        // Directory exists, but no sandbox yet. Flag for UI modal.
+                        pending_project_init = Some(proj_path);
+                    }
+                }
+            }
 
             configure_fonts(&cc.egui_ctx);
 
             Ok(Box::new(gui::MyApp::new(cc, MyAppPermanent {
                 rt: rt_handle,
                 sandbox,
+                pending_project_init: std::sync::Mutex::new(pending_project_init),
                 app_language: std::sync::Mutex::new(app_language),
             })))
         }),

@@ -9,6 +9,47 @@ pub mod cache;
 
 pub const CURRENT_SANDBOX_VERSION: i32 = 2;
 
+// Helper to securely find the user's home sandbox file
+pub fn get_home_sandbox_path() -> Option<PathBuf> {
+    if let Some(proj_dirs) = ProjectDirs::from("", "", "inforno") {
+        let file_path = PathBuf::from(proj_dirs.data_dir()).join("info.rno");
+        if file_path.exists() {
+            return Some(file_path);
+        }
+    }
+    None
+}
+
+// Creates the .inforno directory and database, optionally copying presets
+pub fn init_project_sandbox(proj_dir: &PathBuf, copy_presets: bool) -> Result<(), MyError> {
+    let inforno_dir = proj_dir.join(".inforno");
+
+    // Create the directory if it doesn't exist
+    if let Err(_) = fs::create_dir_all(&inforno_dir) {
+        return Err(MyError::ProjectDir);
+    }
+
+    let db_path = inforno_dir.join("info.rno");
+
+    // Open/create the new sandbox database
+    let new_conn = connect_sandbox_db(&db_path)?;
+
+    // If the user wants presets, fetch them from the home DB
+    if copy_presets {
+        if let Some(home_path) = get_home_sandbox_path() {
+            if let Ok(home_conn) = connect_sandbox_db(&home_path) {
+                if let Ok(presets) = load_presets_vec(&home_conn) {
+                    for mut preset in presets {
+                        preset.id = 0; // Set to 0 so `save_preset` treats it as a brand new insert!
+                        let _ = save_preset(&new_conn, &mut preset);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn get_sandbox_db_conn(sandbox: &Option<PathBuf>) ->
             Result<(Connection, PathBuf), MyError> {
     if let Some(sandbox) = sandbox {
