@@ -358,7 +358,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
 dependencies = [
  "clipboard-win",
- "image 0.25.9",
+ "image 0.25.10",
  "log",
  "objc2 0.6.3",
  "objc2-app-kit 0.3.2",
@@ -1960,7 +1960,7 @@ dependencies = [
  "glutin",
  "glutin-winit",
  "home",
- "image 0.25.9",
+ "image 0.25.10",
  "js-sys",
  "log",
  "objc2 0.5.2",
@@ -2121,7 +2121,7 @@ dependencies = [
  "egui",
  "ehttp",
  "enum-map",
- "image 0.25.9",
+ "image 0.25.10",
  "log",
  "mime_guess2",
  "profiling",
@@ -3120,7 +3120,7 @@ checksum = "048488ba88552bb0fb2a7e4001c64d5bed65d1a92167186a1bb9151571f32e60"
 dependencies = [
  "bytemuck",
  "hayro-interpret",
- "image 0.25.9",
+ "image 0.25.10",
  "kurbo 0.12.0",
 ]
 
@@ -3145,7 +3145,7 @@ dependencies = [
  "hayro-syntax",
  "kurbo 0.12.0",
  "log",
- "moxcms",
+ "moxcms 0.7.10",
  "phf 0.13.1",
  "rustc-hash 2.1.1",
  "siphasher",
@@ -3162,7 +3162,7 @@ checksum = "e8c673304cec6e0dfd3b4f71fccecd45646899aa70279b62d3f933842abc4ac5"
 dependencies = [
  "base64 0.22.1",
  "hayro-interpret",
- "image 0.25.9",
+ "image 0.25.10",
  "kurbo 0.12.0",
  "siphasher",
  "xmlwriter",
@@ -3748,9 +3748,9 @@ dependencies = [
 
 [[package]]
 name = "image"
-version = "0.25.9"
+version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
+checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
@@ -3758,7 +3758,7 @@ dependencies = [
  "exr",
  "gif",
  "image-webp",
- "moxcms",
+ "moxcms 0.8.1",
  "num-traits",
  "png 0.18.0",
  "qoi",
@@ -3826,7 +3826,7 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "futures-util",
- "image 0.25.9",
+ "image 0.25.10",
  "keyring",
  "mitex",
  "msix",
@@ -4527,6 +4527,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "moxcms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
+dependencies = [
+ "num-traits",
+ "pxfm",
+]
+
+[[package]]
 name = "msix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5155,9 +5165,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openrouter-rs"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b4c290524fe15f5f76046d1e771fa8868f76d70956bad6eb08d09ddb95dccb0"
+checksum = "6b869bbb374f5eb54189c064a76cce3ac96d216741b6c6e206faf7301daae103"
 dependencies = [
  "anyhow",
  "derive_builder",
@@ -6110,9 +6120,9 @@ dependencies = [
 
 [[package]]
 name = "ravif"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef69c1990ceef18a116855938e74793a5f7496ee907562bd0857b6ac734ab285"
+checksum = "e52310197d971b0f5be7fe6b57530dcd27beb35c1b013f29d66c1ad73fbbcc45"
 dependencies = [
  "avif-serialize",
  "imgref",
@@ -7650,16 +7660,16 @@ dependencies = [
 
 [[package]]
 name = "tiff"
-version = "0.10.3"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9605de7fee8d9551863fd692cce7637f548dbd9db9180fcc07ccc6d26c336f"
+checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
 dependencies = [
  "fax",
  "flate2",
  "half",
  "quick-error",
  "weezl",
- "zune-jpeg 0.4.21",
+ "zune-jpeg 0.5.6",
 ]
 
 [[package]]
@@ -8208,7 +8218,7 @@ dependencies = [
  "icu_properties 1.5.1",
  "icu_provider 1.5.0",
  "icu_provider_blob",
- "image 0.25.9",
+ "image 0.25.10",
  "indexmap",
  "kamadak-exif",
  "kurbo 0.12.0",
@@ -8293,7 +8303,7 @@ dependencies = [
  "flate2",
  "hayro",
  "hayro-svg",
- "image 0.25.9",
+ "image 0.25.10",
  "rustc-hash 2.1.1",
  "ttf-parser",
  "typst-assets",

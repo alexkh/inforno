@@ -85,7 +85,7 @@ async fn run_chat_stream(
     let chat_request = ChatCompletionRequest::builder()
         .model("deepseek/deepseek-r1-0528:free")
         //.model("cognitivecomputations/dolphin-mistral-24b-venice-edition:free")
-        .messages(vec![Message::new(Role::User, &user_prompt)])
+        .messages(vec![Message::new(Role::User, user_prompt)])
         .reasoning_effort(Effort::High)
         .build()?;
 
