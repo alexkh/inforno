@@ -1,8 +1,7 @@
 use std::{collections::HashMap, fs, path::PathBuf, sync::OnceLock};
-use regex::Regex;
+use regex::{Regex, Captures};
 use rusqlite::{Connection, params, Result, ffi};
 use directories::ProjectDirs;
-use rust_i18n::t;
 use crate::common::{Agent, Chat, ChatMsg, DbChat, MyError, Preset, PresetSelection, Presets};
 
 pub mod cache;
@@ -307,21 +306,96 @@ pub fn update_agent_preset_snapshot(
 // box, which is annoying. This fix applies a regexp to remove any
 // indentation from triple backticks. In the database, we store verbatim original
 // data not to introduce any unforeseen issues.
+// We also use this to safely pad display math ($$) and blockquotes (>)
+// with newlines to force proper block rendering in egui_commonmark.
 fn normalize_code_blocks(markdown: &str) -> String {
-    // Regex explanation:
-    // (?m) : Enable multiline mode (so ^ matches start of line).
-    // ^    : Start of a line.
-    // \s+  : One or more whitespace characters (the indentation we want to remove).
-    // (```): Capture group 1 - the triple backticks (and potentially language tag).
-    //
-    // We replace the whole match with just the capture group ($1) and a preceding newline.
+    static RE_CODE_UNINDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_BQ_UNINDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_MATH_UNINDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_MATH_PAD: OnceLock<Regex> = OnceLock::new();
 
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?m)^[ \t]+(```)").unwrap());
+    // 1. Unindent Code Blocks (and inject newline to ensure block separation)
+    let re_code = RE_CODE_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(`{3})").unwrap());
+    let step1 = re_code.replace_all(markdown, "\n$1");
 
-    // Replace "   ```" with "\n```"
-    // The \n ensures the block breaks out of previous paragraphs cleanly.
-    re.replace_all(markdown, "\n$1").to_string()
+    // 2. Unindent Blockquotes
+    // Stripping leading spaces snaps them to the left margin, breaking them out
+    // of restrictive list-item layouts and fixing the 1-character width bug.
+    let re_bq = RE_BQ_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(>)").unwrap());
+    let step2 = re_bq.replace_all(&step1, "$1");
+
+    // 3. Unindent Display Math
+    // Same fix as above to prevent list-squishing.
+    let re_math_un = RE_MATH_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\$\$)").unwrap());
+    let step3 = re_math_un.replace_all(&step2, "$1");
+
+    // 4. Pad Display Math with newlines to force block rendering (centering)
+    let re_math_pad = RE_MATH_PAD.get_or_init(|| {
+        Regex::new(r"(?x)
+            # Group 1: Code blocks (preserve entirely)
+            (`{3}(?s:.*?)`{3} | `[^`]*`)
+            |
+            # Group 2: Display Math (finds it anywhere on the line!)
+            (\$\$(?s:.*?)\$\$)
+        ").unwrap()
+    });
+
+    let mut result = String::with_capacity(step3.len() + 128);
+    let mut last_end = 0;
+
+    for caps in re_math_pad.captures_iter(&step3) {
+        let full_match = caps.get(0).unwrap();
+
+        // Push everything before the matched part
+        result.push_str(&step3[last_end..full_match.start()]);
+
+        if let Some(code) = caps.get(1) {
+            // Return code blocks untouched
+            result.push_str(code.as_str());
+
+        } else if let Some(math) = caps.get(2) {
+            // Find the prefix of the current line by looking backwards
+            let before_match = &step3[..full_match.start()];
+            let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = &before_match[last_newline..];
+
+            // Extract the blockquote prefix (e.g. "> " or "> > ")
+            let mut prefix = String::new();
+            for c in line_start.chars() {
+                if c == ' ' || c == '\t' || c == '>' {
+                    prefix.push(c);
+                } else {
+                    break;
+                }
+            }
+
+            // If it's just regular indentation, clear it out. We only care about blockquotes.
+            if !prefix.contains('>') {
+                prefix.clear();
+            }
+
+            let empty_prefix = prefix.trim_end();
+            let m = math.as_str().trim_matches(|c| c == '\n' || c == '\r');
+
+            // Determine if we need to append the prefix after the math block.
+            // (This prevents trailing inline text from accidentally escaping the blockquote).
+            let next_char = step3[full_match.end()..].chars().next();
+            let append_prefix = match next_char {
+                Some('\n') | Some('\r') | None => "",
+                _ => prefix.as_str(),
+            };
+
+            // Surround the math with dynamically generated, context-aware empty lines
+            let padded = format!("\n{empty_prefix}\n{prefix}{m}\n{empty_prefix}\n{append_prefix}");
+            result.push_str(&padded);
+        }
+
+        last_end = full_match.end();
+    }
+
+    // Push the remaining part of the string
+    result.push_str(&step3[last_end..]);
+    result
 }
 
 pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
