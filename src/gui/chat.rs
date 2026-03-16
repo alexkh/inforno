@@ -2,6 +2,10 @@ use egui::{Margin, RichText, Stroke};
 use egui_commonmark::CommonMarkViewer;
 use rust_i18n::t;
 use crate::gui::math_render::compile_math_to_svg_embedded;
+use regex::Regex;
+use std::sync::OnceLock;
+
+use crate::bulat::editor::{CodeEditor, Syntax, ColorTheme};
 
 use crate::{
     common::{
@@ -9,6 +13,47 @@ use crate::{
     },
     gui::{State},
 };
+
+// --- Markdown Chunker ---
+
+enum ContentChunk<'a> {
+    Markdown(&'a str),
+    RustCode(&'a str),
+}
+
+fn parse_chunks(text: &str) -> Vec<ContentChunk> {
+    static RE_RUST_BLOCK: OnceLock<Regex> = OnceLock::new();
+
+    // (?m) multi-line mode: ^ and $ match line boundaries.
+    // (?s) dot-all mode: . matches newlines.
+    // This strictly enforces that both the opening and closing triple backticks
+    // are on their own separate lines, ignoring inline backticks.
+    let re = RE_RUST_BLOCK.get_or_init(|| {
+        Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}(?:rust|rs)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*$").unwrap()
+    });
+
+    let mut chunks = Vec::new();
+    let mut last_end = 0;
+
+    for caps in re.captures_iter(text) {
+        let full_match = caps.get(0).unwrap();
+        let code_match = caps.get(1).unwrap();
+
+        if full_match.start() > last_end {
+            chunks.push(ContentChunk::Markdown(&text[last_end..full_match.start()]));
+        }
+
+        chunks.push(ContentChunk::RustCode(code_match.as_str()));
+        last_end = full_match.end();
+    }
+
+    if last_end < text.len() {
+        chunks.push(ContentChunk::Markdown(&text[last_end..]));
+    }
+
+    chunks
+}
+
 
 // --- Main Entry Point ---
 
@@ -239,48 +284,74 @@ fn render_msg_content(
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
     } else {
-        // Take ownership of the cloned Rc
-        let local_math_cache = math_cache;
+        // Break the content into pieces
+        let chunks = parse_chunks(&msg.content);
 
-        CommonMarkViewer::new()
-            .max_image_width(Some(max_image_width))
-            // The 'move' keyword safely moves the local_math_cache into the closure
-            .render_math_fn(Some(&mut move |ui, math, is_inline| {
-                // ==========================================
-                // THE MATH RENDERER INTEGRATION
-                // ==========================================
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            match chunk {
+                ContentChunk::Markdown(md_text) => {
+                    // Only render markdown if there's actually text to render
+                    if md_text.trim().is_empty() {
+                        continue;
+                    }
 
-                // Borrow mutably inside the closure
-                let mut cache_map = local_math_cache.borrow_mut();
-                let svg_bytes = cache_map.entry(math.to_string()).or_insert_with(|| {
-                    let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
-                    bytes.into()
-                });
+                    let local_math_cache = math_cache.clone();
 
-                let uri = format!("bytes://math_{}.svg", egui::Id::new(math).value());
+                    CommonMarkViewer::new()
+                        .max_image_width(Some(max_image_width))
+                        .render_math_fn(Some(&mut move |ui, math, is_inline| {
+                            let mut cache_map = local_math_cache.borrow_mut();
+                            let svg_bytes = cache_map.entry(math.to_string()).or_insert_with(|| {
+                                let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
+                                bytes.into()
+                            });
 
-                let mut image = egui::Image::new(egui::ImageSource::Bytes {
-                    uri: uri.into(),
-                    bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
-                });
+                            let uri = format!("bytes://math_{}.svg", egui::Id::new(math).value());
 
-                image = image.tint(ui.visuals().text_color());
+                            let mut image = egui::Image::new(egui::ImageSource::Bytes {
+                                uri: uri.into(),
+                                bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
+                            });
 
-                let egui_font_size = ui.text_style_height(&egui::TextStyle::Body);
-                let optical_adjustment = 0.8;
-                let scale_factor = (egui_font_size / 11.0) * optical_adjustment;
+                            image = image.tint(ui.visuals().text_color());
 
-                image = image.fit_to_original_size(scale_factor);
+                            let egui_font_size = ui.text_style_height(&egui::TextStyle::Body);
+                            let optical_adjustment = 0.8;
+                            let scale_factor = (egui_font_size / 11.0) * optical_adjustment;
 
-                let actually_inline = is_inline && !math.contains("\\displaystyle");
+                            image = image.fit_to_original_size(scale_factor);
 
-                if !actually_inline {
-                    image = image.max_width(ui.available_width());
+                            let actually_inline = is_inline && !math.contains("\\displaystyle");
+
+                            if !actually_inline {
+                                image = image.max_width(ui.available_width());
+                            }
+
+                            ui.add(image);
+                        }))
+                        .show(ui, cache, md_text);
                 }
+                ContentChunk::RustCode(rust_text) => {
+                    // Create a transient String buffer for the editor
+                    // Edits will be lost immediately on the next frame (simulating read-only)
+                    let mut code_buffer = rust_text.to_string();
+                    let num_lines = code_buffer.lines().count().max(1);
 
-                ui.add(image);
-            }))
-            .show(ui, cache, &msg.content);
+                    ui.add_space(6.0);
+
+                    CodeEditor::default()
+                        .id_source(format!("code_block_{}_{}", msg.id, i))
+                        .with_theme(ColorTheme::SV)
+                        .with_syntax(Syntax::rust())
+                        .with_rows(num_lines)
+                        // Disable internal scroll so the parent chat window handles scrolling natively
+                        .vscroll(false)
+                        .show(ui, &mut code_buffer);
+
+                    ui.add_space(6.0);
+                }
+            }
+        }
     }
 }
 

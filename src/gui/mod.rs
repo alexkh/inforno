@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use dotenv::dotenv;
 use eframe::egui::{self};
-use egui_async::{Bind, EguiAsyncPlugin};
 use egui_commonmark::CommonMarkCache;
 use keyring::Entry;
 use rusqlite::Connection;
@@ -330,7 +329,6 @@ impl eframe::App for MyApp {
             colors.err = visuals.error_fg_color;
         }
 
-        ctx.plugin_or_default::<EguiAsyncPlugin>();
         let state = &mut self.state;
 
         if state.error_msg.is_some() {
