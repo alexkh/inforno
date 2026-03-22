@@ -343,7 +343,8 @@ fn render_msg_content(
                         .id_source(format!("code_block_{}_{}", msg.id, i))
                         .with_theme(ColorTheme::SV)
                         .with_syntax(Syntax::rust())
-                        .with_rows(num_lines)
+                        .with_numlines(false)
+                        //.with_rows(num_lines)
                         // Disable internal scroll so the parent chat window handles scrolling natively
                         .vscroll(false)
                         .show(ui, &mut code_buffer);
