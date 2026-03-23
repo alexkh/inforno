@@ -88,6 +88,7 @@ pub struct State {
     show_project_init_modal: bool,
     project_dir_to_init: Option<PathBuf>,
     copy_presets_checked: bool,
+    project_root: Option<PathBuf>,
 }
 
 impl State {
@@ -121,6 +122,15 @@ impl State {
                 std::process::exit(1); // Quit immediately
             }
         };
+
+        let mut project_root = None;
+        if let Some(parent) = sandbox.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some(".inforno") {
+                if let Some(root) = parent.parent() {
+                    project_root = Some(root.to_path_buf());
+                }
+            }
+        }
 
         // 2. Load Initial Data (using the valid 'conn')
         load_presets(&conn, &mut presets);
@@ -278,6 +288,7 @@ impl State {
             show_project_init_modal: show_project_init,
             project_dir_to_init: pending_init,
             copy_presets_checked: true,
+            project_root,
         }
     }
 

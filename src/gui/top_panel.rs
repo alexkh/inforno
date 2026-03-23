@@ -1,5 +1,6 @@
 use egui::{Color32, RichText};
 use rust_i18n::t;
+use std::path;
 
 use crate::{common::{FileOp, FileOpMsg, err_color}, db::reset_sandbox_db, gui::State, mybtn};
 
@@ -223,6 +224,26 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                 .clicked() {
                     state.reload(None);
                 };
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(root) = &state.project_root {
+                    // 1. Get the absolute path (fallback to the original root if it fails)
+                    let abs_path = std::path::absolute(root).unwrap_or_else(|_| root.clone());
+
+                    // 2. Extract JUST the folder name from the absolute path
+                    let folder_name = abs_path
+                        .file_name()           // Returns Option<&OsStr>
+                        .unwrap_or_default()   // Safely unwraps to an empty OsStr if it fails
+                        .to_string_lossy();    // Converts OsStr to a usable string type
+
+                    ui.label(egui::RichText::new(format!("📁 {}", folder_name)).strong())
+                        .on_hover_text(format!("Active Project Root:\n{}", abs_path.display()));
+                } else {
+                    ui.label(egui::RichText::new("🏠 No Project").weak())
+                        .on_hover_text("No active project. Using default global sandbox.");
+                }
+            });
+
         });
     });
 }
