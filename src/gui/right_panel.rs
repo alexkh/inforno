@@ -10,11 +10,11 @@ pub fn ui_right_panel(ctx: &egui::Context, state: &mut State) {
     if let Some(active_merge) = &mut state.active_merge {
         egui::SidePanel::right("merge_tool_panel")
             .resizable(true)
-            .default_width(ctx.screen_rect().width() * 0.5)
-            .width_range(200.0..=ctx.screen_rect().width() * 0.9)
+            .default_width(ctx.viewport_rect().width() * 0.5)
+            .width_range(200.0..=ctx.viewport_rect().width() * 0.9)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("Bulat Merge Tool");
+                    ui.heading(format!("Merging {}", active_merge.path.display()));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("❌ Close").clicked() {
