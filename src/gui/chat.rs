@@ -18,11 +18,15 @@ use crate::{
 
 enum ContentChunk<'a> {
     Markdown(&'a str),
-    RustCode(&'a str),
+    RustCode {
+        code: &'a str,
+        filepath: Option<String>,
+    },
 }
 
 fn parse_chunks(text: &str) -> Vec<ContentChunk> {
     static RE_RUST_BLOCK: OnceLock<Regex> = OnceLock::new();
+    static RE_FILEPATH: OnceLock<Regex> = OnceLock::new();
 
     // (?m) multi-line mode: ^ and $ match line boundaries.
     // (?s) dot-all mode: . matches newlines.
@@ -32,6 +36,11 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
         Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}(?:rust|rs)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*$").unwrap()
     });
 
+    // Matches strings ending in ".rs", ignoring trailing markdown bold/italics/backticks or colons.
+    let re_filepath = RE_FILEPATH.get_or_init(|| {
+        Regex::new(r"(?im)([a-z0-9_/\.\-]+\.rs)\s*[\*`:]*\s*$").unwrap()
+    });
+
     let mut chunks = Vec::new();
     let mut last_end = 0;
 
@@ -39,11 +48,23 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
         let full_match = caps.get(0).unwrap();
         let code_match = caps.get(1).unwrap();
 
+        let mut filepath = None;
+
         if full_match.start() > last_end {
-            chunks.push(ContentChunk::Markdown(&text[last_end..full_match.start()]));
+            let md_text = &text[last_end..full_match.start()];
+            chunks.push(ContentChunk::Markdown(md_text));
+
+            // NEW: Try to extract a file path from the very end of this markdown chunk
+            if let Some(path_caps) = re_filepath.captures(md_text) {
+                filepath = Some(path_caps.get(1).unwrap().as_str().to_string());
+            }
         }
 
-        chunks.push(ContentChunk::RustCode(code_match.as_str()));
+        chunks.push(ContentChunk::RustCode {
+            code: code_match.as_str(),
+            filepath,
+        });
+
         last_end = full_match.end();
     }
 
@@ -83,6 +104,9 @@ fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) 
     let cache = &mut state.common_mark_cache;
     let msg_pool = &state.chat.msg_pool;
 
+    let project_root = &state.project_root;
+    let active_merge = &mut state.active_merge;
+
     // We clone the Rc pointer here (very cheap)
     let math_cache = state.math_cache.clone();
 
@@ -110,14 +134,16 @@ fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) 
                         if !assistant_batch.is_empty() {
                             // Pass a clone of the cache pointer
                             render_assistant_grid(ui, cache, msg_pool,
-                                msg_ui_map, &assistant_batch, total_width, math_cache.clone());
+                                msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
+                            project_root, &mut *active_merge);
                             assistant_batch.clear();
                         }
 
                         let msg_ui = msg_ui_map.entry(msg_id)
                                 .or_insert(ChatMsgUi::default());
                         // Pass a clone of the cache pointer
-                        render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone());
+                        render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
+                            project_root, &mut *active_merge);
                     }
                     _ => {
                         assistant_batch.push(msg_id);
@@ -129,7 +155,8 @@ fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) 
         if !assistant_batch.is_empty() {
             // Pass a clone of the cache pointer
             render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
-                    &assistant_batch, total_width, math_cache.clone());
+                    &assistant_batch, total_width, math_cache.clone(),
+                    project_root, &mut *active_merge);
         }
     }
 }
@@ -142,6 +169,8 @@ fn render_assistant_grid(
     batch_ids: &[i64],
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    project_root: &Option<std::path::PathBuf>,
+    active_merge: &mut Option<crate::gui::ActiveMerge>,
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
@@ -171,7 +200,8 @@ fn render_assistant_grid(
                         |ui| {
                             ui.set_width(item_width);
                             render_assistant_msg(
-                                    ui, cache, msg, msg_ui, item_width, math_cache.clone());
+                                    ui, cache, msg, msg_ui, item_width, math_cache.clone(),
+                                    project_root, &mut *active_merge);
                         }
                     );
                 }
@@ -193,6 +223,8 @@ fn render_user_msg(
     msg_ui: &mut ChatMsgUi,
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    project_root: &Option<std::path::PathBuf>,
+    active_merge: &mut Option<crate::gui::ActiveMerge>,
 ) {
     let effective_width = total_width - 30.0;
 
@@ -209,7 +241,8 @@ fn render_user_msg(
             .fill(ui.visuals().extreme_bg_color)
             .show(ui, |ui| {
                 render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg.id);
-                render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache);
+                render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache,
+                    project_root, active_merge);
             });
         });
         ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
@@ -223,6 +256,8 @@ fn render_assistant_msg(
     msg_ui: &mut ChatMsgUi,
     item_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    project_root: &Option<std::path::PathBuf>,
+    active_merge: &mut Option<crate::gui::ActiveMerge>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -246,7 +281,8 @@ fn render_assistant_msg(
         }
 
         let content_width = (item_width - 20.0).max(100.0);
-        render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache);
+        render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
+            project_root, active_merge);
     });
 }
 
@@ -280,6 +316,8 @@ fn render_msg_content(
     msg_ui: &ChatMsgUi,
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    project_root: &Option<std::path::PathBuf>,
+    active_merge: &mut Option<crate::gui::ActiveMerge>,
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -331,13 +369,36 @@ fn render_msg_content(
                         }))
                         .show(ui, cache, md_text);
                 }
-                ContentChunk::RustCode(rust_text) => {
-                    // Create a transient String buffer for the editor
-                    // Edits will be lost immediately on the next frame (simulating read-only)
-                    let mut code_buffer = rust_text.to_string();
+
+                ContentChunk::RustCode { code, filepath } => { // Update destructuring
+                    let mut code_buffer = code.to_string();
                     let num_lines = code_buffer.lines().count().max(1);
 
                     ui.add_space(6.0);
+
+                    // --- NEW: Merge Tool Button ---
+                    if let Some(path) = filepath {
+                        if let Some(root) = project_root {
+                            let full_path = root.join(&path);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
+                                if ui.button("🛠 Open in Merge Tool").clicked() {
+                                    let original_content = std::fs::read_to_string(&full_path)
+                                        .unwrap_or_else(|_| String::new());
+
+                                    // --- NEW: Wrap it in ActiveMerge ---
+                                    *active_merge = Some(crate::gui::ActiveMerge {
+                                        app: crate::bulat::DiffApp::new(
+                                            original_content,
+                                            code_buffer.clone()
+                                        ),
+                                        path: full_path,
+                                    });
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    }
 
                     CodeEditor::default()
                         .id_source(format!("code_block_{}_{}", msg.id, i))

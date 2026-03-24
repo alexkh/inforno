@@ -52,10 +52,10 @@ struct DiffBlock {
     height_in_lines: usize,
 }
 
-struct DiffApp {
+pub struct DiffApp {
     // The "True" content of the files
-    left_code_real: String,
-    right_code_real: String,
+    pub left_code_real: String,
+    pub right_code_real: String,
 
     // The "View" content (padded with gaps for visual alignment)
     left_view: String,
@@ -82,7 +82,7 @@ struct DiffApp {
 }
 
 impl DiffApp {
-    fn new(_cc: &eframe::CreationContext, mut left_code: String, mut right_code: String) -> Self {
+    pub fn new(mut left_code: String, mut right_code: String) -> Self {
         // --- NEW LINE SANITIZATION ---
         // Ensure both files end with a newline to prevent un-mergeable
         // EOF (End of File) diffs caused by missing '\n' characters.
@@ -327,166 +327,167 @@ impl DiffApp {
         real
     }
 
-}
-
-impl eframe::App for DiffApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    pub fn show(&mut self, ui: &mut egui::Ui) {
         let mut left_changed = false;
         let mut right_changed = false;
-        let row_height = 16.0;
+        let row_height = 12.0;
 
         // prepare the horizontal offset we will apply next frame
         let mut next_hscroll_ratio = self.hscroll_ratio;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // 1. Single Outer ScrollArea for everything
-            egui::ScrollArea::vertical()
-                .id_salt("global_scroll")
-                .show(ui, |ui| {
+        // 1. Single Outer ScrollArea for everything
+        egui::ScrollArea::vertical()
+            .id_salt("global_scroll")
+            .show(ui, |ui| {
 
-                    let middle_width = 20.0;
-                    let spacing = ui.spacing().item_spacing.x * 2.0;
-                    let side_width = (ui.available_width() - middle_width - spacing) / 2.0;
+                // Set our spacing FIRST so we know exactly what we are dealing with
+                ui.spacing_mut().item_spacing.x = 5.0;
 
-                    // 2. Setup the Grid
-                    // spacing.x is the gap between columns
-                    ui.spacing_mut().item_spacing.x = 5.0;
+                // Calculate the EXACT overhead.
+                // We have 5 elements in the horizontal layout, which means 4 gaps of 5.0 (20.0 total).
+                // We have two manual ui.add_space() calls of 5.0 and 1.0 (6.0 total).
+                // We have the middle column (20.0).
+                // Total fixed overhead: 20.0 + 6.0 + 20.0 = 46.0
+                let middle_width = 20.0;
+                let fixed_overhead = 46.0;
 
-                    // 2. Setup the Horizontal Layout (Replacing the Grid)
-                    ui.horizontal_top(|ui| {
+                // Subtract overhead, divide by 2, and floor() it to prevent rounding loops
+                let side_width = ((ui.available_width() - fixed_overhead) / 2.0).max(50.0).floor();
 
-                        // --- COLUMN 1: LEFT EDITOR ---
-                        ui.vertical(|ui| {
-                            // Enforce the width of this column
-                            ui.set_min_width(side_width);
-                            ui.set_max_width(side_width);
-                            ui.heading("File 1 (Original)");
+                // 2. Setup the Horizontal Layout (Replacing the Grid)
+                ui.horizontal_top(|ui| {
 
-                            let expected_left_offset = self.hscroll_ratio * self.left_max_hscroll;
+                    // --- COLUMN 1: LEFT EDITOR ---
+                    ui.vertical(|ui| {
+                        // Enforce the width of this column
+                        ui.set_min_width(side_width);
+                        ui.set_max_width(side_width);
+                        ui.heading("File 1 (Original)");
 
-                            let left_out = CodeEditor::default()
-                                .id_source("left_editor")
-                                .with_rows(self.left_line_map.len()) // Grow to fit content
-                                .with_fontsize(14.0)
-                                .with_row_height(row_height)
-                                .with_theme(self.theme)
-                                .with_syntax(self.syntax.clone())
-                                .vscroll(false) // IMPORTANT: No internal scroll
-                                .with_diff(self.left_diff_map.clone())
-                                .with_line_numbers(self.left_line_map.clone())
-                                // Optional but good practice: tell the editor its desired width
-                                .desired_width(side_width)
-                                .with_hscroll_offset(expected_left_offset)
-                                .show(ui, &mut self.left_view);
+                        let expected_left_offset = self.hscroll_ratio * self.left_max_hscroll;
 
-                            if left_out.output.response.changed() {
-                                left_changed = true;
+                        let left_out = CodeEditor::default()
+                            .id_source("left_editor")
+                            .with_rows(self.left_line_map.len()) // Grow to fit content
+                            //.with_fontsize(14.0)
+                            .with_row_height(row_height)
+                            .with_theme(self.theme)
+                            .with_syntax(self.syntax.clone())
+                            .vscroll(false) // IMPORTANT: No internal scroll
+                            .with_diff(self.left_diff_map.clone())
+                            .with_line_numbers(self.left_line_map.clone())
+                            // Optional but good practice: tell the editor its desired width
+                            .desired_width(side_width)
+                            .with_hscroll_offset(expected_left_offset)
+                            .show(ui, &mut self.left_view);
+
+                        if left_out.output.response.changed() {
+                            left_changed = true;
+                        }
+
+                        // 2. Save the max width for the next frame's calculation
+                        self.left_max_hscroll = left_out.max_hscroll_offset;
+
+                        // 3. Did the user scroll? (Using > 1.0 to ignore float precision noise)
+                        if (left_out.hscroll_offset - expected_left_offset).abs() > 1.0 {
+                            if left_out.max_hscroll_offset > 0.0 {
+                                // Calculate the new global ratio based on user's manual scroll
+                                next_hscroll_ratio = left_out.hscroll_offset / left_out.max_hscroll_offset;
                             }
+                        }
+                    });
 
-                            // 2. Save the max width for the next frame's calculation
-                            self.left_max_hscroll = left_out.max_hscroll_offset;
+                    // Add spacing between Column 1 and Column 2
+                    ui.add_space(5.0);
 
-                            // 3. Did the user scroll? (Using > 1.0 to ignore float precision noise)
-                            if (left_out.hscroll_offset - expected_left_offset).abs() > 1.0 {
-                                if left_out.max_hscroll_offset > 0.0 {
-                                    // Calculate the new global ratio based on user's manual scroll
-                                    next_hscroll_ratio = left_out.hscroll_offset / left_out.max_hscroll_offset;
-                                }
-                            }
-                        });
+                    // --- COLUMN 2: MERGE ACTIONS ---
+                    ui.vertical(|ui| {
+                        // Enforce the smaller width for the buttons column
+                        ui.set_min_width(middle_width);
+                        ui.set_max_width(middle_width);
 
-                        // Add spacing between Column 1 and Column 2
-                        ui.add_space(5.0);
+                        ui.add_sized([middle_width, 20.0], egui::Label::new(" "));
 
-                        // --- COLUMN 2: MERGE ACTIONS ---
-                        ui.vertical(|ui| {
-                            // Enforce the smaller width for the buttons column
-                            ui.set_min_width(middle_width);
-                            ui.set_max_width(middle_width);
+                        // Allocate a space that matches the editors' height
+                        let total_height = self.left_line_map.len() as f32 * row_height;
+                        let (rect, _) = ui.allocate_at_least(
+                            Vec2::new(middle_width, total_height),
+                            egui::Sense::hover()
+                        );
 
-                            ui.add_sized([middle_width, 20.0], egui::Label::new(" "));
+                        let mut action_to_perform = None;
 
-                            // Allocate a space that matches the editors' height
-                            let total_height = self.left_line_map.len() as f32 * row_height;
-                            let (rect, _) = ui.allocate_at_least(
-                                Vec2::new(middle_width, total_height),
-                                egui::Sense::hover()
+                        for block in &self.diff_blocks {
+                            let y_pos = rect.min.y + (block.visual_line_idx as f32 * row_height);
+                            let block_height = block.height_in_lines as f32 * row_height;
+
+                            // Center button in the vertical block of the diff
+                            let button_rect = Rect::from_center_size(
+                                Pos2::new(rect.center().x, y_pos + (block_height / 2.0)),
+                                Vec2::new(24.0, block_height)
                             );
 
-                            let mut action_to_perform = None;
+                            ui.put(button_rect, |ui: &mut egui::Ui| {
+                                let (label, color) = match block.op {
+                                    DiffOp::Delete { .. } => ("❌", Color32::DARK_RED),
+                                    DiffOp::Insert { .. } => ("⬅", Color32::DARK_GREEN),
+                                    DiffOp::Replace { .. } => ("⬅", Color32::DARK_BLUE),
+                                    _ => ("", Color32::TRANSPARENT),
+                                };
 
-                            for block in &self.diff_blocks {
-                                let y_pos = rect.min.y + (block.visual_line_idx as f32 * row_height);
-                                let block_height = block.height_in_lines as f32 * row_height;
-
-                                // Center button in the vertical block of the diff
-                                let button_rect = Rect::from_center_size(
-                                    Pos2::new(rect.center().x, y_pos + (block_height / 2.0)),
-                                    Vec2::new(24.0, block_height)
-                                );
-
-                                ui.put(button_rect, |ui: &mut egui::Ui| {
-                                    let (label, color) = match block.op {
-                                        DiffOp::Delete { .. } => ("❌", Color32::DARK_RED),
-                                        DiffOp::Insert { .. } => ("⬅", Color32::DARK_GREEN),
-                                        DiffOp::Replace { .. } => ("⬅", Color32::DARK_BLUE),
-                                        _ => ("", Color32::TRANSPARENT),
-                                    };
-
-                                    if !label.is_empty() {
-                                        if ui.add(egui::Button::new(label).fill(color)).clicked() {
-                                            action_to_perform = Some(block.op.clone());
-                                        }
+                                if !label.is_empty() {
+                                    if ui.add(egui::Button::new(label).fill(color)).clicked() {
+                                        action_to_perform = Some(block.op.clone());
                                     }
-                                    ui.response()
-                                });
-                            }
-
-                            if let Some(op) = action_to_perform {
-                                self.apply_merge(op);
-                            }
-                        });
-
-                        // Add spacing between Column 2 and Column 3
-                        ui.add_space(1.0);
-
-                        // --- COLUMN 3: RIGHT EDITOR ---
-                        ui.vertical(|ui| {
-                            // Enforce the width of this column
-                            ui.set_min_width(side_width);
-                            ui.set_max_width(side_width);
-                            ui.heading("File 2 (Modified)");
-
-                            let expected_right_offset = self.hscroll_ratio * self.right_max_hscroll;
-
-                            let right_out = CodeEditor::default()
-                                .id_source("right_editor")
-                                .with_rows(self.right_line_map.len())
-                                .with_fontsize(14.0)
-                                .with_row_height(row_height)
-                                .with_theme(self.theme)
-                                .with_syntax(self.syntax.clone())
-                                .vscroll(false) // IMPORTANT: No internal scroll
-                                .with_diff(self.right_diff_map.clone())
-                                .with_line_numbers(self.right_line_map.clone())
-                                .desired_width(side_width)
-                                .with_hscroll_offset(expected_right_offset)
-                                .show(ui, &mut self.right_view);
-
-                            if right_out.output.response.changed() {
-                                right_changed = true;
-                            }
-
-                            // 2. Save the max width
-                            self.right_max_hscroll = right_out.max_hscroll_offset;
-
-                            // 3. Did the user scroll?
-                            if (right_out.hscroll_offset - expected_right_offset).abs() > 1.0 {
-                                if right_out.max_hscroll_offset > 0.0 {
-                                    next_hscroll_ratio = right_out.hscroll_offset / right_out.max_hscroll_offset;
                                 }
+                                ui.response()
+                            });
+                        }
+
+                        if let Some(op) = action_to_perform {
+                            self.apply_merge(op);
+                        }
+                    });
+
+                    // Add spacing between Column 2 and Column 3
+                    ui.add_space(1.0);
+
+                    // --- COLUMN 3: RIGHT EDITOR ---
+                    ui.vertical(|ui| {
+                        // Enforce the width of this column
+                        ui.set_min_width(side_width);
+                        ui.set_max_width(side_width);
+                        ui.heading("File 2 (Modified)");
+
+                        let expected_right_offset = self.hscroll_ratio * self.right_max_hscroll;
+
+                        let right_out = CodeEditor::default()
+                            .id_source("right_editor")
+                            .with_rows(self.right_line_map.len())
+                            //.with_fontsize(14.0)
+                            .with_row_height(row_height)
+                            .with_theme(self.theme)
+                            .with_syntax(self.syntax.clone())
+                            .vscroll(false) // IMPORTANT: No internal scroll
+                            .with_diff(self.right_diff_map.clone())
+                            .with_line_numbers(self.right_line_map.clone())
+                            .desired_width(side_width)
+                            .with_hscroll_offset(expected_right_offset)
+                            .show(ui, &mut self.right_view);
+
+                        if right_out.output.response.changed() {
+                            right_changed = true;
+                        }
+
+                        // 2. Save the max width
+                        self.right_max_hscroll = right_out.max_hscroll_offset;
+
+                        // 3. Did the user scroll?
+                        if (right_out.hscroll_offset - expected_right_offset).abs() > 1.0 {
+                            if right_out.max_hscroll_offset > 0.0 {
+                                next_hscroll_ratio = right_out.hscroll_offset / right_out.max_hscroll_offset;
                             }
-                        });
+                        }
                     });
                 });
         });

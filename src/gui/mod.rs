@@ -18,6 +18,7 @@ use crate::gui::bottom_panel::{BottomPanelState, ui_bottom_panel};
 use crate::gui::chat::ui_chat;
 use crate::gui::key_manager::ui_key_manager;
 use crate::gui::preset_editor::{PresetEditorState, ui_preset_editor};
+use crate::gui::right_panel::ui_right_panel;
 use crate::gui::side_panel::ui_side_panel;
 use crate::gui::top_panel::ui_top_panel;
 use crate::ollama::ollama_fetch_models;
@@ -25,6 +26,7 @@ use crate::openr::openr_fetch_models;
 
 mod top_panel;
 mod side_panel;
+mod right_panel;
 mod preset_editor;
 mod key_manager;
 mod bottom_panel;
@@ -49,6 +51,11 @@ pub struct ChatStreamingState {
     pub rx: Receiver<ChatStreamEvent>,
     pub tx: Sender<ChatStreamEvent>,
  }
+
+ pub struct ActiveMerge {
+    pub app: crate::bulat::DiffApp,
+    pub path: PathBuf,
+}
 
 //#[derive(serde::Deserialize, serde::Serialize)]
 //#[serde(default)]
@@ -89,6 +96,7 @@ pub struct State {
     project_dir_to_init: Option<PathBuf>,
     copy_presets_checked: bool,
     project_root: Option<PathBuf>,
+    active_merge: Option<ActiveMerge>,
 }
 
 impl State {
@@ -289,6 +297,7 @@ impl State {
             project_dir_to_init: pending_init,
             copy_presets_checked: true,
             project_root,
+            active_merge: None,
         }
     }
 
@@ -533,6 +542,8 @@ impl eframe::App for MyApp {
         ui_agent_config(ctx, state);
 
         ui_bottom_panel(ctx, state);
+
+        ui_right_panel(ctx, state);
 
         ui_chat(ctx, state);
 
