@@ -362,7 +362,14 @@ impl DiffApp {
                         // Enforce the width of this column
                         ui.set_min_width(side_width);
                         ui.set_max_width(side_width);
-                        ui.heading("File 1 (Original)");
+                        ui.horizontal(|ui| {
+                            ui.heading("File 1 (Filesystem)");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗐").on_hover_text("Copy original file").clicked() {
+                                    ui.ctx().copy_text(self.left_code_real.clone());
+                                }
+                            });
+                        });
 
                         let expected_left_offset = self.hscroll_ratio * self.left_max_hscroll;
 
@@ -457,7 +464,14 @@ impl DiffApp {
                         // Enforce the width of this column
                         ui.set_min_width(side_width);
                         ui.set_max_width(side_width);
-                        ui.heading("File 2 (Modified)");
+                        ui.horizontal(|ui| {
+                            ui.heading("File 2 (Diff)");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗐").on_hover_text("Copy modified file").clicked() {
+                                    ui.ctx().copy_text(self.right_code_real.clone());
+                                }
+                            });
+                        });
 
                         let expected_right_offset = self.hscroll_ratio * self.right_max_hscroll;
 

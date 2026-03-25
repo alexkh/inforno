@@ -4,7 +4,7 @@ use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use crate::{common::{Agent, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
+use crate::{common::{Agent, Attachment, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
 
 pub struct BottomPanelState {
     pub col1_width: f32,
@@ -16,6 +16,7 @@ pub struct BottomPanelState {
     pub system_prompt_edited: String,
     pub prompt_edited: String,
     pub show_system_prompt: bool,
+    pub pending_attachments: Vec<Attachment>,
 }
 
 impl Default for BottomPanelState {
@@ -30,6 +31,7 @@ impl Default for BottomPanelState {
             system_prompt_edited: String::new(),
             prompt_edited: String::new(),
             show_system_prompt: false,
+            pending_attachments: Vec::new(),
         }
     }
 }
@@ -56,15 +58,67 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 let panel_height = ui.available_height();
 
-                // Toggle Button
-                if ui.add(egui::Button::new("💻").small().selected(
-                        state.bottom_panel_state.show_system_prompt))
-                        .on_hover_text(t!("toggle_system_prompt"))
-                        .clicked()
-                {
-                    state.bottom_panel_state.show_system_prompt =
-                            !state.bottom_panel_state.show_system_prompt;
-                }
+                ui.vertical(|ui| {
+                    // Toggle Button (System prompt)
+                    if ui.add(egui::Button::new("💻").small().selected(
+                            state.bottom_panel_state.show_system_prompt))
+                            .on_hover_text(t!("toggle_system_prompt"))
+                            .clicked()
+                    {
+                        state.bottom_panel_state.show_system_prompt =
+                                !state.bottom_panel_state.show_system_prompt;
+                    }
+
+                    ui.add_space(4.0);
+
+                    // Attachment Menu Button
+                    let attach_count = state.bottom_panel_state.pending_attachments.len();
+                    let attach_text = if attach_count > 0 {
+                        egui::RichText::new(format!("📎 {}", attach_count)).color(egui::Color32::GREEN)
+                    } else {
+                        egui::RichText::new("📎")
+                    };
+
+                    ui.menu_button(attach_text, |ui| {
+                        if ui.button("Attach 'src/' (.rs)").clicked() {
+                            if let Some(root) = &state.project_root {
+                                let src_path = root.join("src");
+
+                                // Recursive helper to read .rs files into Attachments
+                                fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path) {
+                                    if let Ok(entries) = std::fs::read_dir(dir) {
+                                        for entry in entries.flatten() {
+                                            let path = entry.path();
+                                            if path.is_dir() {
+                                                read_dir_recursive(&path, out, root_path);
+                                            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                                    // Get relative path for cleaner display
+                                                    let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
+                                                    out.push(Attachment {
+                                                        filename: relative_path,
+                                                        mime_type: "text/rust".to_string(),
+                                                        content,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
+                            }
+                            ui.close();
+                        }
+
+                        if !state.bottom_panel_state.pending_attachments.is_empty() {
+                            if ui.button("Clear Attachments").clicked() {
+                                state.bottom_panel_state.pending_attachments.clear();
+                                ui.close();
+                            }
+                        }
+                    }).response.on_hover_text("Attachments");
+                });
 
                 // --- Column 1: System Prompt ---
                 if state.bottom_panel_state.show_system_prompt {
@@ -524,6 +578,16 @@ fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         }
     }
 
+    // Serialize the attachments to JSON if we have any
+    let details_json = if !state.bottom_panel_state.pending_attachments.is_empty() {
+        serde_json::to_string(&state.bottom_panel_state.pending_attachments).ok()
+    } else {
+        None
+    };
+
+    // Clear the pending attachments for the next prompt
+    state.bottom_panel_state.pending_attachments.clear();
+
     // ---------------------------------------------------------
     // 3. Create & Save User Message
     // ---------------------------------------------------------
@@ -531,6 +595,7 @@ fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         id: 0, // Placeholder, will be updated from DB
         msg_role: MsgRole::User,
         content: prompt_text.clone(), // or .to_string()
+        details: details_json,
         // Defaults (preset_id=0, preset=None, etc.) are handled by Default
         ..Default::default()
     };

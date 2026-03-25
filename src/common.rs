@@ -73,6 +73,12 @@ pub fn router_color(router: &ChatRouter) -> Color32 {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    pub filename: String,
+    pub mime_type: String, // e.g., "text/rust", "image/png"
+    pub content: String,   // Raw text or base64 encoded data
+}
 
 // when streaming a chat, this structure is passed to the GUI
 pub enum ChatStreamEvent {
@@ -237,9 +243,24 @@ pub struct ChatMsg {
 // convert inhouse ChatMsg to Ollama's ChatMessage:
 impl From<ChatMsg> for ChatMessage {
     fn from(item: ChatMsg) -> Self {
+        let mut full_content = item.content;
+
+        // Deserialize the JSON array and append text attachments
+        if let Some(details) = item.details {
+            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&details) {
+                for att in attachments {
+                    if att.mime_type.starts_with("text/") {
+                        full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
+                        full_content.push_str(&att.content);
+                    }
+                    // Future: Handle "image/" types if Ollama_rs supports multimodal!
+                }
+            }
+        }
+
         ChatMessage {
             role: item.msg_role.into(),
-            content: item.content,
+            content: full_content,
             tool_calls: vec![],
             images: None,
             thinking: item.reasoning,
@@ -250,10 +271,25 @@ impl From<ChatMsg> for ChatMessage {
 // convert inhouse ChatMsg to OpenRouter's Message
 impl From<ChatMsg> for Message {
     fn from(item: ChatMsg) -> Self {
+        let mut full_content = item.content;
+
+        // Deserialize the JSON array and append text attachments
+        if let Some(details) = item.details {
+            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&details) {
+                for att in attachments {
+                    if att.mime_type.starts_with("text/") {
+                        full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
+                        full_content.push_str(&att.content);
+                    }
+                    // Future: Handle OpenRouter multimodal image arrays here!
+                }
+            }
+        }
+
         Message {
             name: item.name,
             role: item.msg_role.into(),
-            content: item.content.into(),
+            content: full_content.into(),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -621,6 +657,7 @@ pub struct OllamaDownloading {
     pub progress_text: String,
     pub is_downloading: bool,
     pub error_msg: Option<String>,
+	pub abort_flag: Arc<AtomicBool>,
 }
 
 #[derive(Default, Clone, serde::Deserialize, serde::Serialize)]

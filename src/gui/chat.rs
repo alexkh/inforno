@@ -1,6 +1,7 @@
 use egui::{Margin, RichText, Stroke};
 use egui_commonmark::CommonMarkViewer;
 use rust_i18n::t;
+use crate::common::Attachment;
 use crate::gui::math_render::compile_math_to_svg_embedded;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -240,9 +241,41 @@ fn render_user_msg(
             .corner_radius(5.0)
             .fill(ui.visuals().extreme_bg_color)
             .show(ui, |ui| {
-                render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg.id);
+                render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
                 render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache,
                     project_root, active_merge);
+
+                // --- NEW: Render JSON Attachments as Spoilers ---
+                if let Some(details_json) = &msg.details {
+                    if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(details_json) {
+                        if !attachments.is_empty() {
+                            ui.add_space(8.0);
+                            egui::CollapsingHeader::new(egui::RichText::new(format!("📎 {} Attached Files", attachments.len())).strong())
+                                .id_salt(format!("details_collapse_{}", msg.id))
+                                .show(ui, |ui| {
+                                    // Iterate through the array of attachments
+                                    for att in attachments {
+                                        egui::CollapsingHeader::new(egui::RichText::new(&att.filename).weak())
+                                            .id_salt(format!("att_collapse_{}_{}", msg.id, att.filename))
+                                            .show(ui, |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt(format!("att_scroll_{}_{}", msg.id, att.filename))
+                                                    .max_height(300.0)
+                                                    .show(ui, |ui| {
+                                                        let mut code = att.content.as_str();
+                                                        ui.add(
+                                                            egui::TextEdit::multiline(&mut code)
+                                                                .desired_width(f32::INFINITY)
+                                                                .font(egui::TextStyle::Monospace)
+                                                                .interactive(false)
+                                                        );
+                                                    });
+                                            });
+                                    }
+                                });
+                        }
+                    }
+                }
             });
         });
         ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
@@ -267,7 +300,7 @@ fn render_assistant_msg(
     .fill(ui.visuals().faint_bg_color)
     .show(ui, |ui| {
         let label = format!("{}:", msg.name.as_deref().unwrap_or("assistant"));
-        render_msg_header(ui, msg_ui, &label, msg.id);
+        render_msg_header(ui, msg_ui, &label, msg);
 
         if let Some(reasoning) = &msg.reasoning {
             if !reasoning.is_empty() {
@@ -290,17 +323,22 @@ fn render_msg_header(
     ui: &mut egui::Ui,
     msg_ui: &mut ChatMsgUi,
     label: &str,
-    msg_id: i64,
+    msg: &ChatMsg, // Changed from msg_id: i64 to msg: &ChatMsg
 ) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).strong());
 
         #[cfg(debug_assertions)]
-        ui.label(RichText::new(format!("msg_id: {}", msg_id)).strong());
+        ui.label(RichText::new(format!("msg_id: {}", msg.id)).strong());
 
         ui.with_layout(
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
+                // Add the Copy button first (it will be on the far right)
+                if ui.button("🗐").on_hover_text("Copy raw message to clipboard").clicked() {
+                    ui.ctx().copy_text(msg.content.clone());
+                }
+
                 if ui.toggle_value(&mut msg_ui.show_raw, "Raw").clicked() {
                     println!("Raw button clicked");
                 }
@@ -370,23 +408,23 @@ fn render_msg_content(
                         .show(ui, cache, md_text);
                 }
 
-                ContentChunk::RustCode { code, filepath } => { // Update destructuring
+                ContentChunk::RustCode { code, filepath } => {
                     let mut code_buffer = code.to_string();
                     let num_lines = code_buffer.lines().count().max(1);
 
                     ui.add_space(6.0);
 
-                    // --- NEW: Merge Tool Button ---
-                    if let Some(path) = filepath {
-                        if let Some(root) = project_root {
-                            let full_path = root.join(&path);
-                            ui.horizontal(|ui| {
+                    // --- HEADER: Path, Merge Tool, and Copy Button ---
+                    ui.horizontal(|ui| {
+                        // Left side: Filepath and Merge button
+                        if let Some(path) = filepath {
+                            if let Some(root) = project_root {
+                                let full_path = root.join(&path);
                                 ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
                                 if ui.button("🛠 Open in Merge Tool").clicked() {
                                     let original_content = std::fs::read_to_string(&full_path)
                                         .unwrap_or_else(|_| String::new());
 
-                                    // --- NEW: Wrap it in ActiveMerge ---
                                     *active_merge = Some(crate::gui::ActiveMerge {
                                         app: crate::bulat::DiffApp::new(
                                             original_content,
@@ -395,17 +433,26 @@ fn render_msg_content(
                                         path: full_path,
                                     });
                                 }
-                            });
-                            ui.add_space(4.0);
+                            } else {
+                                ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("🦀 Rust").weak());
                         }
-                    }
+
+                        // Right side: Copy Button
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
+                                ui.ctx().copy_text(code.to_string());
+                            }
+                        });
+                    });
 
                     CodeEditor::default()
                         .id_source(format!("code_block_{}_{}", msg.id, i))
                         .with_theme(ColorTheme::SV)
                         .with_syntax(Syntax::rust())
                         .with_numlines(false)
-                        //.with_rows(num_lines)
                         // Disable internal scroll so the parent chat window handles scrolling natively
                         .vscroll(false)
                         .show(ui, &mut code_buffer);

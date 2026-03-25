@@ -530,62 +530,103 @@ fn render_ollama_download_button(
 ) {
     let is_dl = substate.ollama_downloading.lock().unwrap().is_downloading;
 
-    if ui.add_enabled(!is_dl, egui::Button::new("Download Model")).clicked() {
-        {
+    // Change button text based on the current state
+    let btn_text = if is_dl { "Stop Download" } else { "Download Model" };
+
+    if ui.button(btn_text).clicked() {
+        if is_dl {
+            // --- CANCEL LOGIC ---
             let mut oll_dl = substate.ollama_downloading.lock().unwrap();
-            oll_dl.is_downloading = true;
-            oll_dl.progress = 0.0;
-            oll_dl.error_msg = None;
-            oll_dl.status_text = "Starting...".to_string();
-        }
+            oll_dl.abort_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            oll_dl.status_text = "Canceling...".to_string();
+        } else {
+            // --- START DOWNLOAD LOGIC ---
+            {
+                let mut oll_dl = substate.ollama_downloading.lock().unwrap();
+                oll_dl.is_downloading = true;
+                oll_dl.progress = 0.0;
+                oll_dl.error_msg = None;
+                oll_dl.status_text = "Starting...".to_string();
+                // Reset the abort flag in case it was previously cancelled
+                oll_dl.abort_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
 
-        let state_clone = substate.ollama_downloading.clone();
-        let ctx_clone = ctx.clone();
-        let model_name = substate.edited_preset.model.clone();
+            let state_clone = substate.ollama_downloading.clone();
+            let ctx_clone = ctx.clone();
+            let model_name = substate.edited_preset.model.clone();
 
-        tokio::spawn(async move {
-            let ollama = Ollama::default();
-            match ollama.pull_model_stream(model_name, false).await {
-                Ok(mut stream) => {
-                    while let Some(res) = stream.next().await {
-                        let mut oll_dl = state_clone.lock().unwrap();
-                        match res {
-                            Ok(status) => {
-                                oll_dl.status_text = status.message.clone();
-                                if let Some(total) = status.total {
-                                    if let Some(comp) = status.completed {
-                                        oll_dl.progress =
-                                            comp as f32 / total as f32;
-                                        oll_dl.progress_text = format!(
-                                            "{} / {}",
-                                            format_bytes(comp),
-                                            format_bytes(total)
-                                        );
-                                    }
-                                }
-                                ctx_clone.request_repaint();
+tokio::spawn(async move {
+                let ollama = Ollama::default();
+                let mut was_aborted = false;
+
+                match ollama.pull_model_stream(model_name.clone(), false).await {
+                    Ok(mut stream) => {
+                        while let Some(res) = stream.next().await {
+
+                            // 1. Check if the user clicked "Stop Download"
+                            if state_clone.lock().unwrap().abort_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                was_aborted = true;
+                                break; // Breaks the loop, which drops the stream and halts the download
                             }
-                            Err(e) => {
-                                oll_dl.error_msg = Some(e.to_string());
-                                oll_dl.is_downloading = false;
-                                break;
+
+                            // 2. Process standard stream updates
+                            let mut oll_dl = state_clone.lock().unwrap();
+                            match res {
+                                Ok(status) => {
+                                    oll_dl.status_text = status.message.clone();
+                                    if let Some(total) = status.total {
+                                        if let Some(comp) = status.completed {
+                                            oll_dl.progress =
+                                                comp as f32 / total as f32;
+                                            oll_dl.progress_text = format!(
+                                                "{} / {}",
+                                                format_bytes(comp),
+                                                format_bytes(total)
+                                            );
+                                        }
+                                    }
+                                    ctx_clone.request_repaint();
+                                }
+                                Err(e) => {
+                                    oll_dl.error_msg = Some(e.to_string());
+                                    oll_dl.is_downloading = false;
+                                    break;
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        let mut oll_dl = state_clone.lock().unwrap();
+                        oll_dl.error_msg = Some(format!("Failed start: {}", e));
+                        oll_dl.is_downloading = false;
+                        ctx_clone.request_repaint();
+                        return; // Exit early on failure
+                    }
+                }
+
+                // 3. Post-stream handling (Cleanup or Success)
+                if was_aborted {
+                    // Because we are out of the `match` block, the stream is fully dropped.
+                    // Now we can safely tell Ollama to delete the partial model data.
+                    let _ = ollama.delete_model(model_name).await;
+
                     let mut oll_dl = state_clone.lock().unwrap();
                     oll_dl.is_downloading = false;
-                    oll_dl.status_text = "Done!".to_string();
-                    oll_dl.progress = 1.0;
+                    oll_dl.error_msg = Some("Download cancelled and files removed.".to_string());
+                    oll_dl.status_text = "Aborted".to_string();
                     ctx_clone.request_repaint();
-                }
-                Err(e) => {
+                } else {
+                    // Set "Done" ONLY if the task finished naturally
                     let mut oll_dl = state_clone.lock().unwrap();
-                    oll_dl.error_msg = Some(format!("Failed start: {}", e));
-                    oll_dl.is_downloading = false;
+                    if oll_dl.is_downloading {
+                        oll_dl.is_downloading = false;
+                        oll_dl.status_text = "Done!".to_string();
+                        oll_dl.progress = 1.0;
+                    }
                     ctx_clone.request_repaint();
                 }
-            }
-        });
+            });
+        }
     }
 }
 
