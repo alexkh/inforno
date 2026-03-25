@@ -69,8 +69,16 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                     // --- CHAT SELECTION BUTTON ---
                     let is_selected = state.chat.id == db_chat.id;
-                    if clipped_button(ui, &db_chat.title, is_selected)
-                            .clicked() {
+
+                    let btn_response = clipped_button(ui, &db_chat.title, is_selected)
+                        .on_hover_text(
+                            egui::RichText::new(&db_chat.title)
+                                .heading() // Makes it large
+                                .strong()  // Makes it bold
+                                .color(ui.visuals().strong_text_color()) // Ensures it's bright in both light/dark themes
+                        );
+
+                    if btn_response.clicked() {
                         println!("You selected chat {} {}",
                         db_chat.title, db_chat.id);
                         println!("Fetching chat...");
