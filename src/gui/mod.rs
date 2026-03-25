@@ -97,6 +97,7 @@ pub struct State {
     copy_presets_checked: bool,
     project_root: Option<PathBuf>,
     active_merge: Option<ActiveMerge>,
+    file_dialog: egui_file_dialog::FileDialog,
 }
 
 impl State {
@@ -298,6 +299,7 @@ impl State {
             copy_presets_checked: true,
             project_root,
             active_merge: None,
+            file_dialog: egui_file_dialog::FileDialog::new(),
         }
     }
 
@@ -450,6 +452,13 @@ impl eframe::App for MyApp {
                         state.reload(Some(state.sandbox.clone()));
                     }
                 }
+                FileOp::Attach => {
+                    if !file_op_msg.cancelled {
+                        if let Some(mut atts) = file_op_msg.attachments {
+                            state.bottom_panel_state.pending_attachments.append(&mut atts);
+                        }
+                    }
+                }
             }
         }
 
@@ -546,6 +555,66 @@ impl eframe::App for MyApp {
         ui_right_panel(ctx, state);
 
         ui_chat(ctx, state);
+
+        // File Dialog Start
+        state.file_dialog.update(ctx);
+
+        // Check if the user confirmed their selection
+        if let Some(paths) = state.file_dialog.take_picked_multiple() {
+            let tx_clone = state.op_tx.clone();
+            let ctx_clone = ctx.clone();
+
+            tokio::spawn(async move {
+                let mut attachments = Vec::new();
+
+                for path in paths {
+                    if path.is_dir() {
+                        // Recursively read directory
+                        fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<crate::common::Attachment>, root_path: &std::path::Path) {
+                            if let Ok(entries) = std::fs::read_dir(dir) {
+                                for entry in entries.flatten() {
+                                    let p = entry.path();
+                                    if p.is_dir() {
+                                        read_dir_recursive(&p, out, root_path);
+                                    } else {
+                                        // Implicit text filter
+                                        if let Ok(content) = std::fs::read_to_string(&p) {
+                                            let relative_path = p.strip_prefix(root_path).unwrap_or(&p).display().to_string();
+                                            out.push(crate::common::Attachment {
+                                                filename: relative_path,
+                                                mime_type: "text/plain".to_string(),
+                                                content,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        read_dir_recursive(&path, &mut attachments, &path);
+                    } else {
+                        // Read single file
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            attachments.push(crate::common::Attachment {
+                                filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                                mime_type: "text/plain".to_string(),
+                                content,
+                            });
+                        }
+                    }
+                }
+
+                // Send the payload back to the UI thread
+                let _ = tx_clone.send(crate::common::FileOpMsg {
+                    op: crate::common::FileOp::Attach,
+                    cancelled: false,
+                    path: None,
+                    attachments: Some(attachments),
+                });
+
+                ctx_clone.request_repaint();
+            });
+        }
+        // File Dialog End
 
         // 3. Draw the Modal (Foreground)
         if let Some(msg) = &state.error_msg {

@@ -103,12 +103,14 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                 op: FileOp::SaveAs,
                                 cancelled: false,
                                 path: Some(handle.path().to_path_buf()),
+                                attachments: None,
                             });
                         } else {
                             let _ = tx_clone.send(FileOpMsg {
                                 op: FileOp::SaveAs,
                                 cancelled: true,
                                 path: None,
+                                attachments: None,
                             });
                         }
                         ctx_clone.request_repaint();
@@ -137,12 +139,14 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                 op: FileOp::SaveCopy,
                                 cancelled: false,
                                 path: Some(handle.path().to_path_buf()),
+                                attachments: None,
                             });
                         } else {
                             let _ = tx_clone.send(FileOpMsg {
                                 op: FileOp::SaveCopy,
                                 cancelled: true,
                                 path: None,
+                                attachments: None,
                             });
                         }
                         ctx_clone.request_repaint();
@@ -164,6 +168,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                         op: FileOp::Clear,
                         cancelled: false,
                         path: None,
+                        attachments: None,
                     });
                 }
             }).response.on_hover_text(
@@ -200,12 +205,14 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                             op: FileOp::Open,
                             cancelled: false,
                             path: Some(handle.path().to_path_buf()),
+                            attachments: None,
                         });
                     } else {
                         let _ = tx_clone.send(FileOpMsg {
                             op: FileOp::Open,
                             cancelled: true,
                             path: None,
+                            attachments: None,
                         });
                     }
                     ctx_clone.request_repaint();

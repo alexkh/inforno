@@ -4,7 +4,7 @@ use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use crate::{common::{Agent, Attachment, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
+use crate::{common::{Agent, Attachment, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, FileOp, FileOpMsg, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
 
 pub struct BottomPanelState {
     pub col1_width: f32,
@@ -108,6 +108,21 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
 
                                 read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
                             }
+                            ui.close();
+                        }
+
+                        // Attach Multiple Files and or Folders
+                        if ui.button("📄 Attach Files/Folders...").clicked() {
+                            // 1. Reconfigure the dialog with the project root (if active)
+                            if let Some(root) = &state.project_root {
+                                state.file_dialog = egui_file_dialog::FileDialog::new()
+                                    .initial_directory(root.clone());
+                            } else {
+                                state.file_dialog = egui_file_dialog::FileDialog::new();
+                            }
+
+                            // 2. Trigger the multi-select dialog
+                            state.file_dialog.pick_multiple();
                             ui.close();
                         }
 

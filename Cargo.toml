@@ -43,6 +43,7 @@ mitex = "0.2.4"
 typst-assets = { version = "0.14.2", features = ["fonts"] }
 logos = "0.16.1"
 similar = "2.7.0"
+egui-file-dialog = "0.12.0"
 
 [[bin]]
 name = "inforno"

@@ -95,6 +95,7 @@ pub enum FileOp {
     SaveAs,
     SaveCopy,
     Clear,
+    Attach,
 }
 
 #[derive(Default, Clone)]
@@ -102,6 +103,7 @@ pub struct FileOpMsg {
     pub op: FileOp,
     pub cancelled: bool,
     pub path: Option<PathBuf>,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Default, Clone)]
