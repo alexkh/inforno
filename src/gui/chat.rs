@@ -228,57 +228,63 @@ fn render_user_msg(
     active_merge: &mut Option<crate::gui::ActiveMerge>,
 ) {
     let effective_width = total_width - 30.0;
+    let max_w = effective_width.clamp(400.0, 800.0);
 
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            let max_w = effective_width.clamp(400.0, 800.0);
-            ui.set_max_width(max_w);
+    let scroll_area = egui::ScrollArea::horizontal();
 
-            egui::Frame::default()
-            .stroke(Stroke { width: 1.0, color: ui.visuals().strong_text_color() })
-            .outer_margin(Margin { top: 0, right: 0, bottom: 15, left: 127 })
-            .inner_margin(10.0)
-            .corner_radius(5.0)
-            .fill(ui.visuals().extreme_bg_color)
-            .show(ui, |ui| {
-                render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
-                render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache,
-                    project_root, active_merge);
+    scroll_area.show(ui, |ui| {
+        ui.set_max_width(max_w);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                let max_w = effective_width.clamp(400.0, 800.0);
+                ui.set_max_width(max_w);
 
-                // --- NEW: Render JSON Attachments as Spoilers ---
-                if let Some(details_json) = &msg.details {
-                    if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(details_json) {
-                        if !attachments.is_empty() {
-                            ui.add_space(8.0);
-                            egui::CollapsingHeader::new(egui::RichText::new(format!("📎 {} Attached Files", attachments.len())).strong())
-                                .id_salt(format!("details_collapse_{}", msg.id))
-                                .show(ui, |ui| {
-                                    // Iterate through the array of attachments
-                                    for att in attachments {
-                                        egui::CollapsingHeader::new(egui::RichText::new(&att.filename).weak())
-                                            .id_salt(format!("att_collapse_{}_{}", msg.id, att.filename))
-                                            .show(ui, |ui| {
-                                                egui::ScrollArea::vertical()
-                                                    .id_salt(format!("att_scroll_{}_{}", msg.id, att.filename))
-                                                    .max_height(300.0)
-                                                    .show(ui, |ui| {
-                                                        let mut code = att.content.as_str();
-                                                        ui.add(
-                                                            egui::TextEdit::multiline(&mut code)
-                                                                .desired_width(f32::INFINITY)
-                                                                .font(egui::TextStyle::Monospace)
-                                                                .interactive(false)
-                                                        );
-                                                    });
-                                            });
-                                    }
-                                });
+                egui::Frame::default()
+                .stroke(Stroke { width: 1.0, color: ui.visuals().strong_text_color() })
+                .outer_margin(Margin { top: 0, right: 0, bottom: 15, left: 127 })
+                .inner_margin(10.0)
+                .corner_radius(5.0)
+                .fill(ui.visuals().extreme_bg_color)
+                .show(ui, |ui| {
+                    render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
+                    render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache,
+                        project_root, active_merge);
+
+                    // --- NEW: Render JSON Attachments as Spoilers ---
+                    if let Some(details_json) = &msg.details {
+                        if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(details_json) {
+                            if !attachments.is_empty() {
+                                ui.add_space(8.0);
+                                egui::CollapsingHeader::new(egui::RichText::new(format!("📎 {} Attached Files", attachments.len())).strong())
+                                    .id_salt(format!("details_collapse_{}", msg.id))
+                                    .show(ui, |ui| {
+                                        // Iterate through the array of attachments
+                                        for att in attachments {
+                                            egui::CollapsingHeader::new(egui::RichText::new(&att.filename).weak())
+                                                .id_salt(format!("att_collapse_{}_{}", msg.id, att.filename))
+                                                .show(ui, |ui| {
+                                                    egui::ScrollArea::vertical()
+                                                        .id_salt(format!("att_scroll_{}_{}", msg.id, att.filename))
+                                                        .max_height(300.0)
+                                                        .show(ui, |ui| {
+                                                            let mut code = att.content.as_str();
+                                                            ui.add(
+                                                                egui::TextEdit::multiline(&mut code)
+                                                                    .desired_width(f32::INFINITY)
+                                                                    .font(egui::TextStyle::Monospace)
+                                                                    .interactive(false)
+                                                            );
+                                                        });
+                                                });
+                                        }
+                                    });
+                            }
                         }
                     }
-                }
+                });
             });
+            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
         });
-        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
     });
 }
 
@@ -299,23 +305,30 @@ fn render_assistant_msg(
     .corner_radius(5.0)
     .fill(ui.visuals().faint_bg_color)
     .show(ui, |ui| {
-        let label = format!("{}:", msg.name.as_deref().unwrap_or("assistant"));
-        render_msg_header(ui, msg_ui, &label, msg);
+        let scroll_area = egui::ScrollArea::horizontal()
+            .id_salt(format!("assistant_message_scroll_{}", msg.id));
 
-        if let Some(reasoning) = &msg.reasoning {
-            if !reasoning.is_empty() {
-                if msg_ui.show_raw {
-                    ui.label(format!("{}: \n{}", t!("thought_process"), reasoning));
-                    ui.separator();
-                } else {
-                    render_reasoning_block(ui, reasoning, msg.id);
+        scroll_area.show(ui, |ui| {
+            ui.set_max_width(item_width - 25.0);
+
+            let label = format!("{}:", msg.name.as_deref().unwrap_or("assistant"));
+            render_msg_header(ui, msg_ui, &label, msg);
+
+            if let Some(reasoning) = &msg.reasoning {
+                if !reasoning.is_empty() {
+                    if msg_ui.show_raw {
+                        ui.label(format!("{}: \n{}", t!("thought_process"), reasoning));
+                        ui.separator();
+                    } else {
+                        render_reasoning_block(ui, reasoning, msg.id);
+                    }
                 }
             }
-        }
 
-        let content_width = (item_width - 20.0).max(100.0);
-        render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-            project_root, active_merge);
+            let content_width = (item_width - 25.0).max(100.0);
+            render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
+                project_root, active_merge);
+        });
     });
 }
 
@@ -365,7 +378,7 @@ fn render_msg_content(
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             match chunk {
-                ContentChunk::Markdown(md_text) => {
+ContentChunk::Markdown(md_text) => {
                     // Only render markdown if there's actually text to render
                     if md_text.trim().is_empty() {
                         continue;
@@ -373,39 +386,42 @@ fn render_msg_content(
 
                     let local_math_cache = math_cache.clone();
 
-                    CommonMarkViewer::new()
-                        .max_image_width(Some(max_image_width))
-                        .render_math_fn(Some(&mut move |ui, math, is_inline| {
-                            let mut cache_map = local_math_cache.borrow_mut();
-                            let svg_bytes = cache_map.entry(math.to_string()).or_insert_with(|| {
-                                let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
-                                bytes.into()
-                            });
+                    // Wrap the viewer in a unique egui ID context
+                    ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
+                        CommonMarkViewer::new()
+                            .max_image_width(Some(max_image_width))
+                            .render_math_fn(Some(&mut move |ui, math, is_inline| {
+                                let mut cache_map = local_math_cache.borrow_mut();
+                                let svg_bytes = cache_map.entry(math.to_string()).or_insert_with(|| {
+                                    let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
+                                    bytes.into()
+                                });
 
-                            let uri = format!("bytes://math_{}.svg", egui::Id::new(math).value());
+                                let uri = format!("bytes://math_{}.svg", egui::Id::new(math).value());
 
-                            let mut image = egui::Image::new(egui::ImageSource::Bytes {
-                                uri: uri.into(),
-                                bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
-                            });
+                                let mut image = egui::Image::new(egui::ImageSource::Bytes {
+                                    uri: uri.into(),
+                                    bytes: egui::load::Bytes::Shared(svg_bytes.clone()),
+                                });
 
-                            image = image.tint(ui.visuals().text_color());
+                                image = image.tint(ui.visuals().text_color());
 
-                            let egui_font_size = ui.text_style_height(&egui::TextStyle::Body);
-                            let optical_adjustment = 0.8;
-                            let scale_factor = (egui_font_size / 11.0) * optical_adjustment;
+                                let egui_font_size = ui.text_style_height(&egui::TextStyle::Body);
+                                let optical_adjustment = 0.8;
+                                let scale_factor = (egui_font_size / 11.0) * optical_adjustment;
 
-                            image = image.fit_to_original_size(scale_factor);
+                                image = image.fit_to_original_size(scale_factor);
 
-                            let actually_inline = is_inline && !math.contains("\\displaystyle");
+                                let actually_inline = is_inline && !math.contains("\\displaystyle");
 
-                            if !actually_inline {
-                                image = image.max_width(ui.available_width());
-                            }
+                                if !actually_inline {
+                                    image = image.max_width(ui.available_width());
+                                }
 
-                            ui.add(image);
-                        }))
-                        .show(ui, cache, md_text);
+                                ui.add(image);
+                            }))
+                            .show(ui, cache, md_text);
+                    });
                 }
 
                 ContentChunk::RustCode { code, filepath } => {

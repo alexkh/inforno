@@ -312,24 +312,33 @@ fn normalize_code_blocks(markdown: &str) -> String {
     static RE_CODE_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_BQ_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_MATH_UNINDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_TABLE_UNINDENT: OnceLock<Regex> = OnceLock::new();
+    static RE_TABLE_PAD: OnceLock<Regex> = OnceLock::new();
     static RE_MATH_PAD: OnceLock<Regex> = OnceLock::new();
 
-    // 1. Unindent Code Blocks (and inject newline to ensure block separation)
+    // 1. Unindent Code Blocks
     let re_code = RE_CODE_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(`{3})").unwrap());
     let step1 = re_code.replace_all(markdown, "\n$1");
 
     // 2. Unindent Blockquotes
-    // Stripping leading spaces snaps them to the left margin, breaking them out
-    // of restrictive list-item layouts and fixing the 1-character width bug.
     let re_bq = RE_BQ_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(>)").unwrap());
     let step2 = re_bq.replace_all(&step1, "$1");
 
     // 3. Unindent Display Math
-    // Same fix as above to prevent list-squishing.
     let re_math_un = RE_MATH_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\$\$)").unwrap());
     let step3 = re_math_un.replace_all(&step2, "$1");
 
-    // 4. Pad Display Math with newlines to force block rendering (centering)
+    // 4. Unindent Tables (Strips leading whitespace before pipes)
+    let re_table_un = RE_TABLE_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\|)").unwrap());
+    let step4 = re_table_un.replace_all(&step3, "$1");
+
+    // 5. Ensure an empty line BEFORE tables
+    let re_table_pad = RE_TABLE_PAD.get_or_init(|| {
+        Regex::new(r"(?m)^([ \t]*[^|\s][^\n]*)\r?\n(\|)").unwrap()
+    });
+    let step5 = re_table_pad.replace_all(&step4, "$1\n\n$2");
+
+    // 6. Pad Display Math with newlines to force block rendering
     let re_math_pad = RE_MATH_PAD.get_or_init(|| {
         Regex::new(r"(?x)
             # Group 1: Code blocks (preserve entirely)
@@ -340,26 +349,24 @@ fn normalize_code_blocks(markdown: &str) -> String {
         ").unwrap()
     });
 
-    let mut result = String::with_capacity(step3.len() + 128);
+    let mut result = String::with_capacity(step5.len() + 128);
     let mut last_end = 0;
 
-    for caps in re_math_pad.captures_iter(&step3) {
+    for caps in re_math_pad.captures_iter(&step5) {
         let full_match = caps.get(0).unwrap();
 
         // Push everything before the matched part
-        result.push_str(&step3[last_end..full_match.start()]);
+        result.push_str(&step5[last_end..full_match.start()]);
 
         if let Some(code) = caps.get(1) {
             // Return code blocks untouched
             result.push_str(code.as_str());
 
         } else if let Some(math) = caps.get(2) {
-            // Find the prefix of the current line by looking backwards
-            let before_match = &step3[..full_match.start()];
+            let before_match = &step5[..full_match.start()];
             let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
             let line_start = &before_match[last_newline..];
 
-            // Extract the blockquote prefix (e.g. "> " or "> > ")
             let mut prefix = String::new();
             for c in line_start.chars() {
                 if c == ' ' || c == '\t' || c == '>' {
@@ -369,7 +376,6 @@ fn normalize_code_blocks(markdown: &str) -> String {
                 }
             }
 
-            // If it's just regular indentation, clear it out. We only care about blockquotes.
             if !prefix.contains('>') {
                 prefix.clear();
             }
@@ -377,15 +383,12 @@ fn normalize_code_blocks(markdown: &str) -> String {
             let empty_prefix = prefix.trim_end();
             let m = math.as_str().trim_matches(|c| c == '\n' || c == '\r');
 
-            // Determine if we need to append the prefix after the math block.
-            // (This prevents trailing inline text from accidentally escaping the blockquote).
-            let next_char = step3[full_match.end()..].chars().next();
+            let next_char = step5[full_match.end()..].chars().next();
             let append_prefix = match next_char {
                 Some('\n') | Some('\r') | None => "",
                 _ => prefix.as_str(),
             };
 
-            // Surround the math with dynamically generated, context-aware empty lines
             let padded = format!("\n{empty_prefix}\n{prefix}{m}\n{empty_prefix}\n{append_prefix}");
             result.push_str(&padded);
         }
@@ -393,8 +396,7 @@ fn normalize_code_blocks(markdown: &str) -> String {
         last_end = full_match.end();
     }
 
-    // Push the remaining part of the string
-    result.push_str(&step3[last_end..]);
+    result.push_str(&step5[last_end..]);
     result
 }
 
