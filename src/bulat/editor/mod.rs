@@ -316,6 +316,8 @@ impl CodeEditor {
         }
         .max(self.rows) as isize;
 
+        let exact_height = total as f32 * self.row_height.unwrap_or(16.0);
+
         // Calculate max indentation based on the largest REAL line number,
         // not visual total
         let max_indent = if let Some(map) = &self.line_numbers {
@@ -364,16 +366,29 @@ impl CodeEditor {
             ui.fonts_mut(|f| f.layout_job(layout_job))
         };
 
-        ui.add(
-            egui::TextEdit::multiline(&mut counter)
-                .id_source(format!("{}_numlines", self.id))
-                .font(egui::TextStyle::Monospace)
-                .interactive(false)
-                .frame(true)
-                .desired_rows(self.rows)
-                .desired_width(width)
-                .layouter(&mut layouter),
-        );
+        egui::Frame::new()
+            .inner_margin(0.0)
+            .fill(self.theme.bg())
+            .show(ui, |ui| {
+                // --- THE TRUNCATION FIX ---
+                // A ScrollArea with scrolling disabled acts as a strict clipping mask.
+                // It will mercilessly chop off the runaway line numbers at `exact_height`.
+                egui::ScrollArea::vertical()
+                    .max_height(exact_height)
+                    .vscroll(false) // Disable scrolling entirely
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut counter)
+                                .id_source(format!("{}_numlines", self.id))
+                                .font(egui::TextStyle::Monospace)
+                                .interactive(false)
+                                .frame(false)
+                                .desired_width(width)
+                                .layouter(&mut layouter),
+                        );
+                    });
+            });
     }
 
     /// Show Code Editor with auto-completion feature

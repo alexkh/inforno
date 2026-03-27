@@ -79,6 +79,7 @@ pub struct DiffApp {
 
     // NEW: List of diff blocks to render buttons
     diff_blocks: Vec<DiffBlock>,
+    calculated_row_height: f32,
 }
 
 impl DiffApp {
@@ -110,6 +111,7 @@ impl DiffApp {
             left_max_hscroll: 0.0,
             right_max_hscroll: 0.0,
             diff_blocks: Vec::new(),
+            calculated_row_height: 14.0,
         };
 
         // compute initial diffs
@@ -330,7 +332,7 @@ impl DiffApp {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let mut left_changed = false;
         let mut right_changed = false;
-        let row_height = 12.0;
+        let row_height = self.calculated_row_height;
 
         // prepare the horizontal offset we will apply next frame
         let mut next_hscroll_ratio = self.hscroll_ratio;
@@ -390,6 +392,22 @@ impl DiffApp {
 
                         if left_out.output.response.changed() {
                             left_changed = true;
+                        }
+
+                        // Now that the text is laid out, let's measure its exact bounds.
+                        let total_lines = self.left_line_map.len() as f32;
+                        if total_lines > 0.0 {
+                            // galley.rect.height() gives the exact pixel height of the text block
+                            let measured_total_height = left_out.output.galley.rect.height();
+                            let measured_row_height = measured_total_height / total_lines;
+
+                            // If our guess differs from reality by more than a tiny fraction of a pixel,
+                            // update it and immediately ask egui to draw the next frame.
+                            if (self.calculated_row_height - measured_row_height).abs() > 0.05 {
+                                self.calculated_row_height = measured_row_height;
+                                ui.ctx().request_repaint();
+                                // println!("Calculated row height: {}", self.calculated_row_height);
+                            }
                         }
 
                         // 2. Save the max width for the next frame's calculation
