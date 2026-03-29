@@ -121,8 +121,8 @@ make xwin
 
 ### Async Runtime
 - Tokio runtime created in `main()` with `_enter` guard kept alive
-- GUI uses `egui-async` plugin for async operations within egui context
-- Streaming uses `tokio::sync::mpsc` channels for GUI updates
+- Async tasks spawned via `tokio::spawn` using the runtime handle
+- Streaming uses `std::sync::mpsc` channels for GUI updates
 
 ### Code Block Rendering Fix
 When rendering markdown from LLMs, some models produce indented triple backticks which break CommonMark rendering. The `normalize_code_blocks()` function (src/db/mod.rs:269) uses regex to strip leading whitespace from ` ``` ` markers, applied when:
@@ -178,10 +178,19 @@ This is stored in DB verbatim; fix applied only at read time.
 ## Dependencies Notes
 
 - **egui 0.33.2**: Immediate mode GUI framework
-- **egui_commonmark**: Markdown rendering with syntax highlighting
-- **rusqlite 0.38.0**: SQLite with bundled library
-- **ollama-rs 0.3.3**: Ollama API client with streaming
-- **openrouter-rs 0.4.6**: OpenRouter API client
-- **tokio 1.49.0**: Async runtime with full features
+- **egui_commonmark 0.22.0**: Markdown rendering with syntax highlighting
+- **rusqlite 0.39.0**: SQLite with bundled library
+- **ollama-rs 0.3.4**: Ollama API client with streaming
+- **openrouter-rs 0.6.1**: OpenRouter API client
+- **tokio 1.50.0**: Async runtime with full features
 - **keyring 3.6.3**: Cross-platform secure credential storage
+- **typst 0.14.2 / mitex 0.2.4**: Math rendering (LaTeX to SVG)
 - Uses Rust edition 2024
+
+## Ollama Configuration
+
+By default, Ollama is expected at `http://localhost:11434`. To use a different
+host or port, set the `OLLAMA_HOST` environment variable:
+```
+OLLAMA_HOST=http://192.168.1.100:11434
+```
