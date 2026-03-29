@@ -30,6 +30,33 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     ui.menu_button("🔧", |ui| {
                         ui.set_min_width(80.0);
 
+                        // --- NEW: 0. New Similar Option ---
+                        if ui.button(egui::RichText::new("New, copying Agents")) // Replace with t!("new_similar_btn") if you add it to locales
+                            .on_hover_text(egui::RichText::new("Create a new chat with the same agents")
+                            .heading())
+                        .clicked() {
+                            // 1. Fetch the selected chat as a template
+                            let mut template = fetch_chat(&state.db_conn, db_chat.id, &state.presets)
+                                .unwrap_or_else(|_| Chat::default());
+
+                            // 2. Strip its identity and message history
+                            template.id = 0;
+                            template.title = "Unnamed Chat".to_string();
+                            template.msg_pool.clear();
+
+                            // 3. Reset all agents so they are saved as new rows later
+                            for agent in &mut template.agents {
+                                agent.id = 0;
+                                agent.msg_ids.clear();
+                            }
+
+                            // 4. Make it the active chat!
+                            state.chat = template;
+                            ui.close();
+                        }
+
+                        ui.separator();
+
                         // 1. Rename Option
                         if ui.button(egui::RichText::new(t!("rename_chat_btn")))
                             .on_hover_text(egui::RichText::new(

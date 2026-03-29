@@ -31,39 +31,47 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
     // (?m) multi-line mode: ^ and $ match line boundaries.
     // (?s) dot-all mode: . matches newlines.
-    // This strictly enforces that both the opening and closing triple backticks
-    // are on their own separate lines, ignoring inline backticks.
     let re = RE_RUST_BLOCK.get_or_init(|| {
         Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}(?:rust|rs)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*$").unwrap()
     });
 
-    // Matches strings ending in ".rs", ignoring trailing markdown bold/italics/backticks or colons.
+    // Broadened regex: Matches strings ending in ".rs" ANYWHERE in the text.
     let re_filepath = RE_FILEPATH.get_or_init(|| {
-        Regex::new(r"(?im)([a-z0-9_/\.\-]+\.rs)\s*[\*`:]*\s*$").unwrap()
+        Regex::new(r"(?i)([a-z0-9_/\.\-]+\.rs)").unwrap()
     });
 
     let mut chunks = Vec::new();
     let mut last_end = 0;
 
+    // NEW: State variable to remember the filename across multiple code blocks
+    let mut current_filepath: Option<String> = None;
+
     for caps in re.captures_iter(text) {
         let full_match = caps.get(0).unwrap();
         let code_match = caps.get(1).unwrap();
-
-        let mut filepath = None;
 
         if full_match.start() > last_end {
             let md_text = &text[last_end..full_match.start()];
             chunks.push(ContentChunk::Markdown(md_text));
 
-            // NEW: Try to extract a file path from the very end of this markdown chunk
-            if let Some(path_caps) = re_filepath.captures(md_text) {
-                filepath = Some(path_caps.get(1).unwrap().as_str().to_string());
+            // Search the entire markdown chunk for filepaths
+            let mut found_in_chunk = None;
+            for path_caps in re_filepath.captures_iter(md_text) {
+                // Keep overwriting so we end up with the LAST match (closest to the code block)
+                found_in_chunk = Some(path_caps.get(1).unwrap().as_str().to_string());
+            }
+
+            // If we found a filename in this intermediate text, update our active tracker.
+            // If we didn't, `current_filepath` retains whatever file it was already tracking!
+            if found_in_chunk.is_some() {
+                current_filepath = found_in_chunk;
             }
         }
 
         chunks.push(ContentChunk::RustCode {
             code: code_match.as_str(),
-            filepath,
+            // Clone the persistent state into this chunk
+            filepath: current_filepath.clone(),
         });
 
         last_end = full_match.end();
@@ -75,7 +83,6 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
     chunks
 }
-
 
 // --- Main Entry Point ---
 
@@ -378,7 +385,7 @@ fn render_msg_content(
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             match chunk {
-ContentChunk::Markdown(md_text) => {
+                ContentChunk::Markdown(md_text) => {
                     // Only render markdown if there's actually text to render
                     if md_text.trim().is_empty() {
                         continue;
@@ -387,7 +394,7 @@ ContentChunk::Markdown(md_text) => {
                     let local_math_cache = math_cache.clone();
 
                     // Wrap the viewer in a unique egui ID context
-                    ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
+ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
                         CommonMarkViewer::new()
                             .max_image_width(Some(max_image_width))
                             .render_math_fn(Some(&mut move |ui, math, is_inline| {
@@ -396,6 +403,23 @@ ContentChunk::Markdown(md_text) => {
                                     let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
                                     bytes.into()
                                 });
+
+                                // --- NEW: Graceful fallback for failed math compilation ---
+                                if svg_bytes.is_empty() {
+                                    // Render the raw LaTeX text so it isn't lost, using a warning color
+                                    let raw_math = if is_inline {
+                                        format!("${}$", math)
+                                    } else {
+                                        format!("$${}$$", math)
+                                    };
+                                    ui.label(egui::RichText::new(raw_math)
+                                        .monospace()
+                                        .color(ui.visuals().warn_fg_color));
+
+                                    // Abort so we don't try to render an empty image!
+                                    return;
+                                }
+                                // ----------------------------------------------------------
 
                                 let uri = format!("bytes://math_{}.svg", egui::Id::new(math).value());
 
@@ -441,15 +465,20 @@ ContentChunk::Markdown(md_text) => {
                                     let original_content = std::fs::read_to_string(&full_path)
                                         .unwrap_or_else(|_| String::new());
 
+                                    // Attempt to seamlessly splice the function
+                                    // If splicing fails (e.g. multiple functions, function not found),
+                                    // it elegantly falls back to opening the raw snippet.
+                                    let right_content = try_splice_snippet(&original_content, &code_buffer)
+                                        .unwrap_or_else(|| code_buffer.clone());
+
                                     *active_merge = Some(crate::gui::ActiveMerge {
                                         app: crate::bulat::DiffApp::new(
                                             original_content,
-                                            code_buffer.clone()
+                                            right_content
                                         ),
                                         path: full_path,
                                     });
-                                }
-                            } else {
+                                }                            } else {
                                 ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
                             }
                         } else {
@@ -499,4 +528,122 @@ fn render_reasoning_block(ui: &mut egui::Ui, text: &str,
             });
     });
     ui.add_space(10.0);
+}
+
+// when LLM sends only one function, we want to pre-merge it with the target
+// file before sending it to the GUI merge tool
+fn find_function_spans(code: &str, fn_name: &str) -> Vec<(usize, usize)> {
+    // Looks for: fn my_function_name( or fn my_function_name<
+    let pattern = format!(r"(?m)^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{}(?:\s|<|\()", regex::escape(fn_name));
+    let re = match Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    let mut spans = Vec::new();
+    for mat in re.find_iter(code) {
+        let start_idx = mat.start();
+        let mut brace_count = 0;
+        let mut found_first_brace = false;
+
+        let mut chars = code[start_idx..].char_indices().peekable();
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut in_comment = false;
+        let mut in_multi_comment = false;
+
+        // A lightweight lexer to safely count braces without tripping on strings/comments
+        while let Some((i, c)) = chars.next() {
+            if in_comment {
+                if c == '\n' { in_comment = false; }
+                continue;
+            }
+            if in_multi_comment {
+                if c == '*' {
+                    if let Some(&(_, '/')) = chars.peek() {
+                        chars.next();
+                        in_multi_comment = false;
+                    }
+                }
+                continue;
+            }
+            if in_string {
+                if c == '\\' { chars.next(); } // skip escaped char
+                else if c == '"' { in_string = false; }
+                continue;
+            }
+            if in_char {
+                if c == '\\' { chars.next(); }
+                else if c == '\'' { in_char = false; }
+                continue;
+            }
+
+            match c {
+                '"' => in_string = true,
+                '\'' => in_char = true,
+                '/' => {
+                    if let Some(&(_, '/')) = chars.peek() {
+                        in_comment = true;
+                        chars.next();
+                    } else if let Some(&(_, '*')) = chars.peek() {
+                        in_multi_comment = true;
+                        chars.next();
+                    }
+                },
+                '{' => {
+                    brace_count += 1;
+                    found_first_brace = true;
+                },
+                '}' => {
+                    brace_count -= 1;
+                    if found_first_brace && brace_count == 0 {
+                        spans.push((start_idx, start_idx + i + 1));
+                        break;
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    spans
+}
+
+fn try_splice_snippet(original: &str, snippet: &str) -> Option<String> {
+    static RE_FN: OnceLock<Regex> = OnceLock::new();
+    let re_fn = RE_FN.get_or_init(|| Regex::new(r"(?m)^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z0-9_]+)(?:\s|<|\()").unwrap());
+
+    let mut fn_names = Vec::new();
+    for caps in re_fn.captures_iter(snippet) {
+        if let Some(name) = caps.get(1) {
+            fn_names.push(name.as_str());
+        }
+    }
+
+    // Safety check: Only attempt splice if there is EXACTLY one function in the snippet
+    if fn_names.len() == 1 {
+        let fn_name = fn_names[0];
+
+        let orig_spans = find_function_spans(original, fn_name);
+        let snip_spans = find_function_spans(snippet, fn_name);
+
+        println!("orig_spans: {:?}", orig_spans);
+        println!("snip_spans: {:?}", snip_spans);
+
+        // Safety check: Only splice if the function name is completely unique in BOTH strings
+        // (This prevents accidentally overwriting the wrong `fn new()` in a file with multiple structs)
+        if orig_spans.len() == 1 && snip_spans.len() == 1 {
+            let (orig_start, orig_end) = orig_spans[0];
+            let (snip_start, snip_end) = snip_spans[0];
+
+            let spliced_function = &snippet[snip_start..snip_end];
+
+            let mut new_code = String::with_capacity(original.len() + spliced_function.len());
+            new_code.push_str(&original[..orig_start]);
+            new_code.push_str(spliced_function);
+            new_code.push_str(&original[orig_end..]);
+
+            return Some(new_code);
+        }
+    }
+    None
 }

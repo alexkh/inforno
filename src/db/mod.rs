@@ -313,7 +313,13 @@ fn normalize_code_blocks(markdown: &str) -> String {
     static RE_BQ_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_MATH_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_TABLE_UNINDENT: OnceLock<Regex> = OnceLock::new();
-    static RE_TABLE_PAD: OnceLock<Regex> = OnceLock::new();
+    static RE_TABLE_PRE_PAD: OnceLock<Regex> = OnceLock::new();
+    static RE_TABLE_POST_PAD: OnceLock<Regex> = OnceLock::new();
+
+    // NEW: Regexes for native LaTeX delimiters
+    static RE_LATEX_DISPLAY: OnceLock<Regex> = OnceLock::new();
+    static RE_LATEX_INLINE: OnceLock<Regex> = OnceLock::new();
+
     static RE_MATH_PAD: OnceLock<Regex> = OnceLock::new();
 
     // 1. Unindent Code Blocks
@@ -328,17 +334,38 @@ fn normalize_code_blocks(markdown: &str) -> String {
     let re_math_un = RE_MATH_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\$\$)").unwrap());
     let step3 = re_math_un.replace_all(&step2, "$1");
 
-    // 4. Unindent Tables (Strips leading whitespace before pipes)
+    // 4. Unindent Tables
     let re_table_un = RE_TABLE_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\|)").unwrap());
     let step4 = re_table_un.replace_all(&step3, "$1");
 
     // 5. Ensure an empty line BEFORE tables
-    let re_table_pad = RE_TABLE_PAD.get_or_init(|| {
+    let re_table_pre = RE_TABLE_PRE_PAD.get_or_init(|| {
         Regex::new(r"(?m)^([ \t]*[^|\s][^\n]*)\r?\n(\|)").unwrap()
     });
-    let step5 = re_table_pad.replace_all(&step4, "$1\n\n$2");
+    let step5 = re_table_pre.replace_all(&step4, "$1\n\n$2");
 
-    // 6. Pad Display Math with newlines to force block rendering
+    // 6. Ensure an empty line AFTER tables
+    let re_table_post = RE_TABLE_POST_PAD.get_or_init(|| {
+        Regex::new(r"(?m)^(\|.*)\r?\n([^|\r\n].*)").unwrap()
+    });
+    let step6 = re_table_post.replace_all(&step5, "$1\n\n$2");
+
+    // Converts \[ ... \] to $$ ... $$
+    let re_latex_disp = RE_LATEX_DISPLAY.get_or_init(|| Regex::new(r"(?s)\\\[(.*?)\\\]").unwrap());
+    let step6_5 = re_latex_disp.replace_all(&step6, |caps: &regex::Captures| {
+        // We trim() to safely remove leading/trailing spaces or newlines
+        format!("$${}$$", caps[1].trim())
+    });
+
+    // Converts \( ... \) to $ ... $
+    let re_latex_in = RE_LATEX_INLINE.get_or_init(|| Regex::new(r"(?s)\\\((.*?)\\\)").unwrap());
+    let step6_6 = re_latex_in.replace_all(&step6_5, |caps: &regex::Captures| {
+        // CRITICAL: .trim() removes spaces so `$ \sqrt{-4} $` becomes `$\sqrt{-4}$`
+        // which completely satisfies strict Markdown inline math rules!
+        format!("${}$", caps[1].trim())
+    });
+
+    // 7. Pad Display Math (Make sure to pass step6_6 into this!)
     let re_math_pad = RE_MATH_PAD.get_or_init(|| {
         Regex::new(r"(?x)
             # Group 1: Code blocks (preserve entirely)
@@ -349,21 +376,21 @@ fn normalize_code_blocks(markdown: &str) -> String {
         ").unwrap()
     });
 
-    let mut result = String::with_capacity(step5.len() + 128);
+    let mut result = String::with_capacity(step6_6.len() + 128);
     let mut last_end = 0;
 
-    for caps in re_math_pad.captures_iter(&step5) {
+    for caps in re_math_pad.captures_iter(&step6_6) {
         let full_match = caps.get(0).unwrap();
 
         // Push everything before the matched part
-        result.push_str(&step5[last_end..full_match.start()]);
+        result.push_str(&step6_6[last_end..full_match.start()]);
 
         if let Some(code) = caps.get(1) {
             // Return code blocks untouched
             result.push_str(code.as_str());
 
         } else if let Some(math) = caps.get(2) {
-            let before_match = &step5[..full_match.start()];
+            let before_match = &step6_6[..full_match.start()];
             let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
             let line_start = &before_match[last_newline..];
 
@@ -383,7 +410,7 @@ fn normalize_code_blocks(markdown: &str) -> String {
             let empty_prefix = prefix.trim_end();
             let m = math.as_str().trim_matches(|c| c == '\n' || c == '\r');
 
-            let next_char = step5[full_match.end()..].chars().next();
+            let next_char = step6_6[full_match.end()..].chars().next();
             let append_prefix = match next_char {
                 Some('\n') | Some('\r') | None => "",
                 _ => prefix.as_str(),
@@ -396,7 +423,7 @@ fn normalize_code_blocks(markdown: &str) -> String {
         last_end = full_match.end();
     }
 
-    result.push_str(&step5[last_end..]);
+    result.push_str(&step6_6[last_end..]);
     result
 }
 

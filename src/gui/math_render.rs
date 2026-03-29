@@ -64,13 +64,29 @@ impl World for TypstMathWorld {
 }
 
 pub fn compile_math_to_svg_embedded(math: &str, is_inline: bool) -> Option<Vec<u8>> {
-    let typst_math = mitex::convert_math(math, None).ok()?;
+    let safe_math = math
+        .replace("^*", "^\\ast")
+        .replace("^{*}", "^{\\ast}");
 
-    let actually_inline = is_inline && !math.contains("\\displaystyle");
+    // 1. Catch Mitex conversion errors
+    let typst_math = match mitex::convert_math(&safe_math, None) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("MiTeX Error on formula [ {} ]: {:?}", math, e);
+            return None;
+        }
+    };
+
+let actually_inline = is_inline && !math.contains("\\displaystyle");
     let block = if actually_inline { "false" } else { "true" };
 
+    // Inject the missing mitexsqrt function definition
     let typst_source = format!(
         r##"
+#let mitexsqrt(..args) = {{
+    let p = args.pos()
+    if p.len() == 1 {{ math.sqrt(p.at(0)) }} else {{ math.root(index: p.at(0), p.at(1)) }}
+}}
 #set page(width: auto, height: auto, margin: 0pt, fill: none)
 #set text(fill: rgb("#FFFFFF"))
 #set math.equation(block: {block})
@@ -82,9 +98,24 @@ $ {typst_math} $
     );
 
     let world = TypstMathWorld::new(typst_source);
-    let document: typst::layout::PagedDocument = typst::compile(&world).output.ok()?;
 
-    if document.pages.is_empty() { return None; }
+    // 2. Catch Typst compilation errors
+    let compiled = typst::compile(&world);
+    let document: typst::layout::PagedDocument = match compiled.output {
+        Ok(doc) => doc,
+        Err(errs) => {
+            eprintln!("Typst Compilation Error on formula [ {} ]:", math);
+            // Print the raw diagnostic array so we can see exactly what Typst didn't like
+            eprintln!("{:#?}", errs);
+            return None;
+        }
+    };
+
+    if document.pages.is_empty() {
+        eprintln!("Typst rendered 0 pages for formula [ {} ]", math);
+        return None;
+    }
+
     let svg_string = typst_svg::svg(&document.pages[0]);
 
     Some(svg_string.into_bytes())
