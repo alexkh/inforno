@@ -15,9 +15,61 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                 .corner_radius(5));
 
             ui.label(t!("chats_label"));
-            if ui.button(t!("new_chat_btn")).clicked() {
-                state.chat = Chat::default();
-            }
+
+            // --- NEW: Horizontal Layout for New Chat actions ---
+            ui.horizontal(|ui| {
+                if ui.button(t!("new_chat_btn")).on_hover_text(
+                    egui::RichText::new(t!("new_chat_tooltip"))
+                        .strong()
+                        .heading()
+                    ).clicked() {
+                    state.chat = Chat::default();
+                }
+
+                if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(
+                    egui::RichText::new(t!("new_chat_copying_agents_tooltip"))
+                        .strong()
+                        .heading()
+                    )
+                    .clicked() {
+                    let mut template = state.chat.clone();
+                    template.id = 0;
+                    template.title = "Unnamed Chat".to_string();
+                    template.msg_pool.clear();
+                    for agent in &mut template.agents {
+                        agent.id = 0;
+                        agent.msg_ids.clear();
+                    }
+                    state.chat = template;
+                }
+
+                if ui.button(t!("new_chat_copying_prompts_btn")).on_hover_text(
+                    egui::RichText::new(t!("new_chat_copying_prompts_tooltip"))
+                        .strong()
+                        .heading()
+                    ).clicked() {
+                    extract_prompts(&state.chat, &mut state.bottom_panel_state, &state.project_root);
+                    state.chat = Chat::default();
+                }
+
+                if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(
+                    egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip"))
+                        .strong()
+                        .heading()
+                    ).clicked() {
+                    extract_prompts(&state.chat, &mut state.bottom_panel_state, &state.project_root);
+                    let mut template = state.chat.clone();
+                    template.id = 0;
+                    template.title = "Unnamed Chat".to_string();
+                    template.msg_pool.clear();
+                    for agent in &mut template.agents {
+                        agent.id = 0;
+                        agent.msg_ids.clear();
+                    }
+                    state.chat = template;
+                }
+            });
+
             let mut to_delete_chat_id = 0;
 
             // Iterate through chats
@@ -29,33 +81,6 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     // We use menu_button. The label is the wrench icon.
                     ui.menu_button("🔧", |ui| {
                         ui.set_min_width(80.0);
-
-                        // --- NEW: 0. New Similar Option ---
-                        if ui.button(egui::RichText::new("New, copying Agents")) // Replace with t!("new_similar_btn") if you add it to locales
-                            .on_hover_text(egui::RichText::new("Create a new chat with the same agents")
-                            .heading())
-                        .clicked() {
-                            // 1. Fetch the selected chat as a template
-                            let mut template = fetch_chat(&state.db_conn, db_chat.id, &state.presets)
-                                .unwrap_or_else(|_| Chat::default());
-
-                            // 2. Strip its identity and message history
-                            template.id = 0;
-                            template.title = "Unnamed Chat".to_string();
-                            template.msg_pool.clear();
-
-                            // 3. Reset all agents so they are saved as new rows later
-                            for agent in &mut template.agents {
-                                agent.id = 0;
-                                agent.msg_ids.clear();
-                            }
-
-                            // 4. Make it the active chat!
-                            state.chat = template;
-                            ui.close();
-                        }
-
-                        ui.separator();
 
                         // 1. Rename Option
                         if ui.button(egui::RichText::new(t!("rename_chat_btn")))
@@ -129,6 +154,78 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
     // --- RENAME POPUP WINDOW ---
     // This draws a small window on top of everything if a chat is being renamed
     render_rename_window(ctx, state);
+}
+
+// Helper function to extract prompts and re-attach files
+fn extract_prompts(
+    chat: &Chat,
+    bottom_state: &mut crate::gui::bottom_panel::BottomPanelState,
+    project_root: &Option<std::path::PathBuf>,
+) {
+    let mut first_sys = None;
+    let mut first_usr = None;
+    let mut details = None;
+
+    // Omnis agent contains all the ordered messages
+    if let Some(agent) = chat.agents.first() {
+        for msg_id in &agent.msg_ids {
+            if let Some(msg) = chat.msg_pool.get(msg_id) {
+                if first_sys.is_none() && msg.msg_role == crate::common::MsgRole::System {
+                    first_sys = Some(msg.content.clone());
+                }
+                if first_usr.is_none() && msg.msg_role == crate::common::MsgRole::User {
+                    first_usr = Some(msg.content.clone());
+                    details = msg.details.clone();
+                }
+                if first_sys.is_some() && first_usr.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(sys) = first_sys {
+        bottom_state.system_prompt_edited = sys;
+        bottom_state.show_system_prompt = true;
+    } else {
+        bottom_state.system_prompt_edited.clear();
+        bottom_state.show_system_prompt = false;
+    }
+
+    if let Some(usr) = first_usr {
+        bottom_state.prompt_edited = usr;
+    } else {
+        bottom_state.prompt_edited.clear();
+    }
+
+    bottom_state.pending_attachments.clear();
+    if let Some(det) = details {
+        if let Ok(atts) = serde_json::from_str::<Vec<crate::common::Attachment>>(&det) {
+            for mut att in atts {
+                let mut reattached = false;
+
+                // Try to re-attach from project root
+                if let Some(root) = project_root {
+                    let path = root.join(&att.filename);
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        att.content = content;
+                        reattached = true;
+                    }
+                }
+
+                // Try to re-attach if it's an absolute path
+                if !reattached {
+                    let path = std::path::PathBuf::from(&att.filename);
+                    if path.is_absolute() {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            att.content = content;
+                        }
+                    }
+                }
+                bottom_state.pending_attachments.push(att);
+            }
+        }
+    }
 }
 
 fn clipped_button(ui: &mut egui::Ui, text: &str, is_selected: bool)
