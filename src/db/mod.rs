@@ -321,14 +321,32 @@ fn normalize_code_blocks(markdown: &str) -> String {
     static RE_LATEX_INLINE: OnceLock<Regex> = OnceLock::new();
 
     static RE_MATH_PAD: OnceLock<Regex> = OnceLock::new();
+    
+    // NEW: Regexes to extract and restore code blocks
+    static RE_CODE_BLOCKS: OnceLock<Regex> = OnceLock::new();
+    static RE_RESTORE: OnceLock<Regex> = OnceLock::new();
 
-    // 1. Unindent Code Blocks
+    // 1. Unindent Code Blocks (Run on raw markdown so backticks are clean)
     let re_code = RE_CODE_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(`{3})").unwrap());
     let step1 = re_code.replace_all(markdown, "\n$1");
 
+    // --- NEW: Shield Code Blocks ---
+    // We extract all code blocks (both block and inline) and replace them 
+    // with a placeholder. This guarantees that table and math formatting 
+    // does not modify the content inside code blocks.
+    let re_code_blocks = RE_CODE_BLOCKS.get_or_init(|| {
+        Regex::new(r"(?s)(`{3}.*?`{3}|`[^`]*`)").unwrap()
+    });
+
+    let mut code_blocks = Vec::new();
+    let step1_no_code = re_code_blocks.replace_all(&step1, |caps: &regex::Captures| {
+        code_blocks.push(caps[0].to_string());
+        format!("\x00CODEBLOCK_{}\x00", code_blocks.len() - 1)
+    });
+
     // 2. Unindent Blockquotes
     let re_bq = RE_BQ_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(>)").unwrap());
-    let step2 = re_bq.replace_all(&step1, "$1");
+    let step2 = re_bq.replace_all(&step1_no_code, "$1");
 
     // 3. Unindent Display Math
     let re_math_un = RE_MATH_UNINDENT.get_or_init(|| Regex::new(r"(?m)^[ \t]+(\$\$)").unwrap());
@@ -365,66 +383,67 @@ fn normalize_code_blocks(markdown: &str) -> String {
         format!("${}$", caps[1].trim())
     });
 
-    // 7. Pad Display Math (Make sure to pass step6_6 into this!)
+    // 7. Pad Display Math (Simplified since Code Blocks are safely hidden!)
     let re_math_pad = RE_MATH_PAD.get_or_init(|| {
-        Regex::new(r"(?x)
-            # Group 1: Code blocks (preserve entirely)
-            (`{3}(?s:.*?)`{3} | `[^`]*`)
-            |
-            # Group 2: Display Math (finds it anywhere on the line!)
-            (\$\$(?s:.*?)\$\$)
-        ").unwrap()
+        Regex::new(r"(\$\$(?s:.*?)\$\$)").unwrap()
     });
 
-    let mut result = String::with_capacity(step6_6.len() + 128);
+    let mut step7 = String::with_capacity(step6_6.len() + 128);
     let mut last_end = 0;
 
     for caps in re_math_pad.captures_iter(&step6_6) {
         let full_match = caps.get(0).unwrap();
 
         // Push everything before the matched part
-        result.push_str(&step6_6[last_end..full_match.start()]);
+        step7.push_str(&step6_6[last_end..full_match.start()]);
 
-        if let Some(code) = caps.get(1) {
-            // Return code blocks untouched
-            result.push_str(code.as_str());
+        let math = caps.get(1).unwrap();
+        let before_match = &step6_6[..full_match.start()];
+        let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = &before_match[last_newline..];
 
-        } else if let Some(math) = caps.get(2) {
-            let before_match = &step6_6[..full_match.start()];
-            let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let line_start = &before_match[last_newline..];
-
-            let mut prefix = String::new();
-            for c in line_start.chars() {
-                if c == ' ' || c == '\t' || c == '>' {
-                    prefix.push(c);
-                } else {
-                    break;
-                }
+        let mut prefix = String::new();
+        for c in line_start.chars() {
+            if c == ' ' || c == '\t' || c == '>' {
+                prefix.push(c);
+            } else {
+                break;
             }
-
-            if !prefix.contains('>') {
-                prefix.clear();
-            }
-
-            let empty_prefix = prefix.trim_end();
-            let m = math.as_str().trim_matches(|c| c == '\n' || c == '\r');
-
-            let next_char = step6_6[full_match.end()..].chars().next();
-            let append_prefix = match next_char {
-                Some('\n') | Some('\r') | None => "",
-                _ => prefix.as_str(),
-            };
-
-            let padded = format!("\n{empty_prefix}\n{prefix}{m}\n{empty_prefix}\n{append_prefix}");
-            result.push_str(&padded);
         }
+
+        if !prefix.contains('>') {
+            prefix.clear();
+        }
+
+        let empty_prefix = prefix.trim_end();
+        let m = math.as_str().trim_matches(|c| c == '\n' || c == '\r');
+
+        let next_char = step6_6[full_match.end()..].chars().next();
+        let append_prefix = match next_char {
+            Some('\n') | Some('\r') | None => "",
+            _ => prefix.as_str(),
+        };
+
+        let padded = format!("\n{empty_prefix}\n{prefix}{m}\n{empty_prefix}\n{append_prefix}");
+        step7.push_str(&padded);
 
         last_end = full_match.end();
     }
 
-    result.push_str(&step6_6[last_end..]);
-    result
+    step7.push_str(&step6_6[last_end..]);
+
+    // 8. Restore Code Blocks
+    let re_restore = RE_RESTORE.get_or_init(|| Regex::new(r"\x00CODEBLOCK_(\d+)\x00").unwrap());
+    let final_result = re_restore.replace_all(&step7, |caps: &regex::Captures| {
+        if let Ok(idx) = caps[1].parse::<usize>() {
+            if let Some(code) = code_blocks.get(idx) {
+                return code.clone();
+            }
+        }
+        caps[0].to_string() // Fallback
+    });
+
+    final_result.into_owned()
 }
 
 pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
