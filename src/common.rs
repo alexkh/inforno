@@ -16,6 +16,7 @@ use crate::db::{CURRENT_SANDBOX_VERSION, mk_agent};
 //use crate::openr::do_openr_chat_que;
 //use crate::ollama::{do_ollama_chat_que};
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
+use ollama_rs::generation::images::Image;
 
 pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
 
@@ -246,16 +247,19 @@ pub struct ChatMsg {
 impl From<ChatMsg> for ChatMessage {
     fn from(item: ChatMsg) -> Self {
         let mut full_content = item.content;
+        let mut images = Vec::new(); // Rust will now infer this as Vec<Image>
 
-        // Deserialize the JSON array and append text attachments
+        // Deserialize the JSON array and append text or gather images
         if let Some(details) = item.details {
             if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&details) {
                 for att in attachments {
                     if att.mime_type.starts_with("text/") {
                         full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
                         full_content.push_str(&att.content);
+                    } else if att.mime_type.starts_with("image/") {
+                        // FIX: Convert the base64 string into ollama_rs's Image type
+                        images.push(Image::from_base64(&att.content)); 
                     }
-                    // Future: Handle "image/" types if Ollama_rs supports multimodal!
                 }
             }
         }
@@ -264,7 +268,7 @@ impl From<ChatMsg> for ChatMessage {
             role: item.msg_role.into(),
             content: full_content,
             tool_calls: vec![],
-            images: None,
+            images: if images.is_empty() { None } else { Some(images) },
             thinking: item.reasoning,
         }
     }
@@ -282,8 +286,10 @@ impl From<ChatMsg> for Message {
                     if att.mime_type.starts_with("text/") {
                         full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
                         full_content.push_str(&att.content);
+                    } else if att.mime_type.starts_with("image/") {
+                        // For OpenRouter, passing standard Markdown Data URIs works perfectly for multi-modal parsing
+                        full_content.push_str(&format!("\n\n![{}]({})\n", att.filename, format!("data:{};base64,{}", att.mime_type, att.content)));
                     }
-                    // Future: Handle OpenRouter multimodal image arrays here!
                 }
             }
         }

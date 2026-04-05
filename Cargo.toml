@@ -25,7 +25,7 @@ secrecy = "0.10.3"
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native", "vendored"] }
 openrouter-rs = "0.6.1"
 clap = { version = "4.6.0", features = ["derive", "cargo"] }
-egui_extras = { version = "0.33.2", features = ["all_loaders", "default", "svg"] }
+egui_extras = { version = "0.33.2", features = ["all_loaders", "default", "svg", "image"] }
 image = { version = "0.25.10", features = ["jpeg", "png", "webp"] }
 egui_autocomplete = { version = "12.0.0", features = ["serde"] }
 chrono = "0.4.44"
@@ -44,6 +44,7 @@ typst-assets = { version = "0.14.2", features = ["fonts"] }
 logos = "0.16.1"
 similar = "2.7.0"
 egui-file-dialog = "0.12.0"
+base64 = "0.22.1"
 
 [[bin]]
 name = "inforno"

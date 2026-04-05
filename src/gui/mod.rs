@@ -23,6 +23,7 @@ use crate::gui::side_panel::ui_side_panel;
 use crate::gui::top_panel::ui_top_panel;
 use crate::ollama::ollama_fetch_models;
 use crate::openr::openr_fetch_models;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 mod top_panel;
 mod side_panel;
@@ -567,9 +568,21 @@ impl eframe::App for MyApp {
             tokio::spawn(async move {
                 let mut attachments = Vec::new();
 
+                // Helper to check if a file is an image
+                let get_image_mime = |ext: &str| -> Option<String> {
+                    match ext.to_lowercase().as_str() {
+                        "png" => Some("image/png".to_string()),
+                        "jpg" | "jpeg" => Some("image/jpeg".to_string()),
+                        "webp" => Some("image/webp".to_string()),
+                        "gif" => Some("image/gif".to_string()),
+                        _ => None,
+                    }
+                };
+
                 for path in paths {
                     if path.is_dir() {
-                        // Recursively read directory
+                        // Recursively read directory (we can leave this for text only as before, 
+                        // or you could expand it to images. Let's keep it safe and just do text for folders)
                         fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<crate::common::Attachment>, root_path: &std::path::Path) {
                             if let Ok(entries) = std::fs::read_dir(dir) {
                                 for entry in entries.flatten() {
@@ -577,7 +590,6 @@ impl eframe::App for MyApp {
                                     if p.is_dir() {
                                         read_dir_recursive(&p, out, root_path);
                                     } else {
-                                        // Implicit text filter
                                         if let Ok(content) = std::fs::read_to_string(&p) {
                                             let relative_path = p.strip_prefix(root_path).unwrap_or(&p).display().to_string();
                                             out.push(crate::common::Attachment {
@@ -592,13 +604,28 @@ impl eframe::App for MyApp {
                         }
                         read_dir_recursive(&path, &mut attachments, &path);
                     } else {
-                        // Read single file
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            attachments.push(crate::common::Attachment {
-                                filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-                                mime_type: "text/plain".to_string(),
-                                content,
-                            });
+                        // Read single file: Check if it's an image!
+                        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                        
+                        if let Some(mime) = get_image_mime(ext) {
+                            // It's an image, read as binary and base64 encode
+                            if let Ok(bytes) = std::fs::read(&path) {
+                                let base64_str = STANDARD.encode(&bytes);
+                                attachments.push(crate::common::Attachment {
+                                    filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                                    mime_type: mime,
+                                    content: base64_str,
+                                });
+                            }
+                        } else {
+                            // Read as standard text
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                attachments.push(crate::common::Attachment {
+                                    filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                                    mime_type: "text/plain".to_string(),
+                                    content,
+                                });
+                            }
                         }
                     }
                 }

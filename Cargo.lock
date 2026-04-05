@@ -3831,6 +3831,7 @@ checksum = "64e9829a50b42bb782c1df523f78d332fe371b10c661e78b7a3c34b0198e9fac"
 name = "inforno"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "clap",
  "directories",

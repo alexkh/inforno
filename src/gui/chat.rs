@@ -5,6 +5,7 @@ use crate::common::Attachment;
 use crate::gui::math_render::compile_math_to_svg_embedded;
 use regex::Regex;
 use std::sync::OnceLock;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::bulat::editor::{CodeEditor, Syntax, ColorTheme};
 
@@ -254,10 +255,10 @@ fn render_user_msg(
                 .fill(ui.visuals().extreme_bg_color)
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
-                    render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache,
+                    render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
                         project_root, active_merge);
 
-                    // --- NEW: Render JSON Attachments as Spoilers ---
+                    // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
                         if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(details_json) {
                             if !attachments.is_empty() {
@@ -270,18 +271,71 @@ fn render_user_msg(
                                             egui::CollapsingHeader::new(egui::RichText::new(&att.filename).weak())
                                                 .id_salt(format!("att_collapse_{}_{}", msg.id, att.filename))
                                                 .show(ui, |ui| {
-                                                    egui::ScrollArea::vertical()
-                                                        .id_salt(format!("att_scroll_{}_{}", msg.id, att.filename))
-                                                        .max_height(300.0)
-                                                        .show(ui, |ui| {
-                                                            let mut code = att.content.as_str();
-                                                            ui.add(
-                                                                egui::TextEdit::multiline(&mut code)
-                                                                    .desired_width(f32::INFINITY)
-                                                                    .font(egui::TextStyle::Monospace)
-                                                                    .interactive(false)
-                                                            );
+                                                    // DIFFERENTIATE TEXT VS IMAGE
+                                                    if att.mime_type.starts_with("image/") {
+                                                        let ext = match att.mime_type.as_str() {
+                                                            "image/jpeg" | "image/jpg" => ".jpg",
+                                                            "image/webp" => ".webp",
+                                                            "image/gif" => ".gif",
+                                                            _ => ".png",
+                                                        };
+
+                                                        let uri = format!("bytes://{}_{}{}", msg.id, att.filename, ext);
+
+                                                        let mut cache_map = math_cache.borrow_mut();
+                                                        let image_bytes = cache_map.entry(uri.clone()).or_insert_with(|| {
+                                                            STANDARD.decode(att.content.trim()).unwrap_or_default().into()
                                                         });
+
+                                                        if !image_bytes.is_empty() {
+                                                            // 1. Show the byte size so we mathematically KNOW the data is there
+                                                            ui.label(egui::RichText::new(format!("📸 Loaded: {} bytes", image_bytes.len())).weak().small());
+
+                                                            ui.ctx().include_bytes(uri.clone(), image_bytes.clone());
+
+                                                            let source = egui::ImageSource::Bytes {
+                                                                uri: uri.clone().into(),
+                                                                bytes: egui::load::Bytes::Shared(image_bytes.clone()),
+                                                            };
+
+                                                            // 2. Explicitly poll the texture to see exactly what state the engine is in
+                                                            match ui.ctx().try_load_texture(&uri, egui::TextureOptions::LINEAR, egui::SizeHint::default()) {
+                                                                Ok(egui::load::TexturePoll::Pending { .. }) => {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.spinner();
+                                                                        ui.label("Decoding image...");
+                                                                    });
+                                                                }
+                                                                Ok(egui::load::TexturePoll::Ready { texture }) => {
+                                                                    // 3. Force a strict size so the layout CANNOT collapse to 0x0
+                                                                    let size = texture.size;
+                                                                    let max_w = 300.0_f32;
+                                                                    let scale = if size.x > max_w { max_w / size.x } else { 1.0 };
+
+                                                                    ui.add(egui::Image::new(source).fit_to_exact_size(size * scale));
+                                                                }
+                                                                Err(err) => {
+                                                                    ui.colored_label(ui.visuals().error_fg_color, format!("Texture Error: {}", err));
+                                                                }
+                                                            }
+                                                        } else {
+                                                            ui.colored_label(ui.visuals().error_fg_color, "Failed to decode image data.");
+                                                        }
+                                                    } else {
+                                                        // Standard Text Rendering
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt(format!("att_scroll_{}_{}", msg.id, att.filename))
+                                                            .max_height(300.0)
+                                                            .show(ui, |ui| {
+                                                                let mut code = att.content.as_str();
+                                                                ui.add(
+                                                                    egui::TextEdit::multiline(&mut code)
+                                                                        .desired_width(f32::INFINITY)
+                                                                        .font(egui::TextStyle::Monospace)
+                                                                        .interactive(false)
+                                                                );
+                                                            });
+                                                    }
                                                 });
                                         }
                                     });
