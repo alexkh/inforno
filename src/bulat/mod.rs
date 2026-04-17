@@ -399,7 +399,8 @@ impl DiffApp {
                         if total_lines > 0.0 {
                             // galley.rect.height() gives the exact pixel height of the text block
                             let measured_total_height = left_out.output.galley.rect.height();
-                            let measured_row_height = measured_total_height / total_lines;
+                            // we add 1 to total_lines because of extra newline at the end
+                            let measured_row_height = measured_total_height / (total_lines + 1.0);
 
                             // If our guess differs from reality by more than a tiny fraction of a pixel,
                             // update it and immediately ask egui to draw the next frame.
