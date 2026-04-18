@@ -413,9 +413,7 @@ fn render_msg_header(
                     ui.ctx().copy_text(msg.content.clone());
                 }
 
-                if ui.toggle_value(&mut msg_ui.show_raw, "Raw").clicked() {
-                    println!("Raw button clicked");
-                }
+                ui.toggle_value(&mut msg_ui.show_raw, "Raw");
             },
         );
     });

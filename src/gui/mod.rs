@@ -415,35 +415,16 @@ impl eframe::App for MyApp {
                     state.open_sandbox_showing = false;
                     state.is_modal_open = false;
                     if !file_op_msg.cancelled {
-                        // 1. Replace the current connection with a dummy Memory DB.
-                        //    This gives us ownership of 'old_conn' and keeps 'state' valid.
-                        let old_conn = std::mem::replace(
-                            &mut state.db_conn,
-                            rusqlite::Connection::open_in_memory().unwrap()
-                        );
-                        // 2. Explicitly close it
-                        match old_conn.close() {
-                            Ok(_) => {
-                                println!("Sandbox closed. Proceeding to move file...");
-
-                                // 3. Now it is safe to copy the file
-                                let old_path = &state.sandbox;
-                                if let Some(new_path) = &file_op_msg.path {
-                                    match std::fs::copy(old_path, new_path) {
-                                        Ok(_) => {
-                                            println!("File copied successfully!");
-                                            state.reload(file_op_msg.path);
-                                        },
-                                        Err(e) => {
-                                            eprintln!("Failed to copy file: {}", e);
-                                        },
-                                    }
-                                }
-                            },
-                            Err((restored_conn, err)) => {
-                                eprintln!("Could not close Sandbox: {}. Aborting copying.", err);
-                                // Put the connection back into state so the app doesn't crash if used again
-                                state.db_conn = restored_conn;
+                        let old_path = &state.sandbox;
+                        if let Some(new_path) = &file_op_msg.path {
+                            match std::fs::copy(old_path, new_path) {
+                                Ok(_) => {
+                                    println!("File copied successfully!");
+                                },
+                                Err(e) => {
+                                    state.error_msg = Some(
+                                        format!("Failed to copy file: {}", e));
+                                },
                             }
                         }
                     }
@@ -466,7 +447,6 @@ impl eframe::App for MyApp {
         while let Ok(event) = state.chat_streaming_state.rx.try_recv() {
             match event {
                 ChatStreamEvent::Content(ind, text) => {
-                    println!("Received content");
                     if let Some(buf) = state.chat_streaming_state
                                 .content_buffers.get_mut(ind) {
                         buf.push_str(&text);
@@ -478,7 +458,6 @@ impl eframe::App for MyApp {
                     }
                 }
                 ChatStreamEvent::Reasoning(ind, text) => {
-                    println!("Received reasoning");
                     if let Some(buf) = state.chat_streaming_state
                                 .reasoning_buffers.get_mut(ind) {
                         buf.push_str(&text);
@@ -490,24 +469,19 @@ impl eframe::App for MyApp {
                     }
                 }
                 ChatStreamEvent::Finished(ind) => {
-                    // tur off the bit for this agent
                     state.chat_streaming_state.bitmask &= !(1 << ind as u128);
-                    // persist the result to db
                     let content = state.chat_streaming_state
                             .content_buffers[ind].clone();
                     let reasoning = state.chat_streaming_state
                             .reasoning_buffers[ind].clone();
 
-                    // save the message content and reasoning to the database
                     let _ = mod_msg_content_reasoning(
                             &state.db_conn,
                             state.chat_streaming_state.msg_ids[ind],
                             &content, &reasoning);
 
-                    // check if all agents are done
                     if state.chat_streaming_state.bitmask == 0 {
                         state.chat_streaming_state.streaming = false;
-                        println!("Streaming finished");
                     }
                 }
                 ChatStreamEvent::Error(ind, err) => {
@@ -532,7 +506,6 @@ impl eframe::App for MyApp {
                         }
 
                         state.chat_streaming_state.bitmask &= !(1 << ind as u128);
-                        println!("Stream {} finished with error", ind);
                         if state.chat_streaming_state.bitmask == 0 {
                             state.chat_streaming_state.streaming = false;
                         }

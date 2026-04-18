@@ -871,6 +871,44 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Exports a chat to a Markdown-formatted string.
+pub fn export_chat_to_markdown(conn: &Connection, chat_id: i64, presets: &Presets) -> rusqlite::Result<String> {
+    let chat = fetch_chat(conn, chat_id, presets)?;
+    let mut md = String::new();
+    md.push_str(&format!("# {}\n\n", chat.title));
+
+    if let Some(agent) = chat.agents.first() {
+        for msg_id in &agent.msg_ids {
+            if let Some(msg) = chat.msg_pool.get(msg_id) {
+                let role_label = match msg.msg_role {
+                    crate::common::MsgRole::User => "User",
+                    crate::common::MsgRole::Assistant => {
+                        msg.name.as_deref().unwrap_or("Assistant")
+                    },
+                    crate::common::MsgRole::System => "System",
+                    crate::common::MsgRole::Developer => "Developer",
+                    crate::common::MsgRole::Tool => "Tool",
+                };
+
+                md.push_str(&format!("## {}\n\n", role_label));
+
+                if let Some(reasoning) = &msg.reasoning {
+                    if !reasoning.is_empty() {
+                        md.push_str("<details>\n<summary>Thought Process</summary>\n\n");
+                        md.push_str(reasoning);
+                        md.push_str("\n\n</details>\n\n");
+                    }
+                }
+
+                md.push_str(&msg.content);
+                md.push_str("\n\n---\n\n");
+            }
+        }
+    }
+
+    Ok(md)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write;

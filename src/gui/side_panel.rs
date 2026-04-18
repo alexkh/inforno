@@ -1,4 +1,4 @@
-use crate::{common::Chat, db::{delete_chat, fetch_chat}, gui::State};
+use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::State};
 use rust_i18n::t;
 
 pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
@@ -91,6 +91,42 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             // Prepare state for renaming
                             state.chat_to_rename = Some(db_chat.id);
                             state.chat_rename_buffer = db_chat.title.clone();
+                            ui.close();
+                        }
+
+                        ui.separator();
+
+                        // Export to Markdown
+                        if ui.button(egui::RichText::new(t!("export_chat_btn")))
+                            .on_hover_text(egui::RichText::new(
+                                    t!("export_chat_tooltip"))
+                            .heading())
+                        .clicked() {
+                            match export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
+                                Ok(markdown) => {
+                                    let tx_clone = state.op_tx.clone();
+                                    let title = db_chat.title.clone();
+                                    let ctx_clone = ctx.clone();
+                                    tokio::spawn(async move {
+                                        let task = rfd::AsyncFileDialog::new()
+                                            .add_filter("Markdown", &["md"])
+                                            .set_file_name(format!("{}.md", title))
+                                            .save_file()
+                                            .await;
+
+                                        if let Some(handle) = task {
+                                            let path = handle.path().to_path_buf();
+                                            if let Err(e) = std::fs::write(&path, markdown) {
+                                                eprintln!("Failed to write markdown: {}", e);
+                                            }
+                                        }
+                                        ctx_clone.request_repaint();
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to export chat: {}", e);
+                                }
+                            }
                             ui.close();
                         }
 
