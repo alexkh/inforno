@@ -4,42 +4,9 @@ use crate::common::{ChatQue, ChatStreamEvent, DbOllamaModel};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::Sender};
 use tokio_stream::StreamExt;
 
-/// Creates an Ollama client, respecting the OLLAMA_HOST environment variable.
-/// Falls back to the default (http://localhost:11434) if not set.
-fn create_ollama_client() -> Ollama {
-    if let Ok(host_str) = std::env::var("OLLAMA_HOST") {
-        let trimmed = host_str.trim().trim_end_matches('/');
-        if let Some(stripped) = trimmed.strip_prefix("http://") {
-            if let Some((host, port_str)) = stripped.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return Ollama::new(
-                        format!("http://{}", host), port);
-                }
-            }
-            return Ollama::new(format!("http://{}", stripped), 11434);
-        } else if let Some(stripped) = trimmed.strip_prefix("https://") {
-            if let Some((host, port_str)) = stripped.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return Ollama::new(
-                        format!("https://{}", host), port);
-                }
-            }
-            return Ollama::new(format!("https://{}", stripped), 11434);
-        } else if let Some((host, port_str)) = trimmed.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                return Ollama::new(
-                    format!("http://{}", host), port);
-            }
-        }
-        Ollama::new(format!("http://{}", trimmed), 11434)
-    } else {
-        Ollama::default()
-    }
-}
-
 pub async fn do_ollama_chat_que(query: ChatQue) ->
         Result<ChatMessageResponse, OllamaError> {
-    let ollama = create_ollama_client();
+    let ollama = Ollama::default();
 
     let mut options = ModelOptions::default();
     if let Some(t) = query.preset.options.temperature {
@@ -67,7 +34,7 @@ pub async fn do_ollama_chat_stream(
     ctx: &egui::Context,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ollama = create_ollama_client();
+    let ollama = Ollama::default();
     let model_name = query.preset.model.clone();
     let messages = query.chat.to_ollama_messages(query.agent_ind);
 
@@ -136,7 +103,7 @@ pub async fn do_ollama_chat_stream(
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(
                     query.agent_ind,
-                    format!("Ollama stream error: {}", e)
+                    format!("Ollama stream error: {:?}", e)
                 ));
                 ctx.request_repaint();
             }
@@ -149,7 +116,7 @@ pub async fn do_ollama_chat_stream(
 
 pub async fn ollama_fetch_models() -> Result<Vec<DbOllamaModel>,
         Box<dyn std::error::Error>> {
-    let ollama = create_ollama_client();
+    let ollama = Ollama::default();
     let models = ollama.list_local_models().await?;
 
     let db_models = models
