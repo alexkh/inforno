@@ -156,7 +156,8 @@ impl From<&str> for MsgRole {
         match input {
             "assistant" => MsgRole::Assistant,
             "system" => MsgRole::System,
-            // fall back for "user" or any invalid string
+            "developer" => MsgRole::Developer,
+            "tool" => MsgRole::Tool,
             _ => MsgRole::User,
         }
     }
@@ -392,7 +393,7 @@ impl Chat {
                 Result<(), Box<dyn std::error::Error>> {
         // Enforce limit of 127 agents (indices 0-126)
         if self.agents.len() >= 127 {
-            return Ok(()); // Or return an Err if you want to log a warning
+            return Err("Maximum number of agents (127) reached".into());
         }
 
         let new_ind = self.agents.len();

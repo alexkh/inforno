@@ -104,10 +104,10 @@ pub async fn do_ollama_chat_stream(
                     }
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(
                     query.agent_ind,
-                    "Error during stream from Ollama".to_string()
+                    format!("Ollama stream error: {:?}", e)
                 ));
                 ctx.request_repaint();
             }
