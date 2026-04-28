@@ -102,5 +102,9 @@ impl<T: Editor> egui::util::cache::ComputerMut<(&T, &str), LayoutJob> for Token 
 pub type HighlightCache = egui::util::cache::FrameCache<LayoutJob, Token>;
 
 pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> LayoutJob {
-    ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)))
+    ctx.memory_mut(|mem| {
+        // We clone it HERE, while 'mem' is still alive.
+        // This returns an owned LayoutJob, which can safely leave the closure.
+        mem.caches.cache::<HighlightCache>().get((cache, text)).clone()
+    })
 }

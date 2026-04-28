@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use egui::{Align, Key, Layout, Modifiers, RichText, Ui, Vec2b};
-use egui_autocomplete::AutoCompleteTextEdit;
+use crate::gui::autocomplete::AutoCompleteTextEdit;
 use ollama_rs::Ollama;
 use rand::RngExt;
 use rusqlite::Connection;
@@ -103,7 +103,8 @@ macro_rules! validated_edit {
 
 // --- Main Entry Point ---
 
-pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
+pub fn ui_preset_editor(ui: &mut egui::Ui, state: &mut State) {
+    let ctx = ui.ctx().clone();
     if !state.show_preset_editor {
         return;
     }
@@ -117,7 +118,7 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
         .scroll(Vec2b { x: false, y: true })
         .open(&mut show_preset_editor)
         .default_width(500.)
-        .show(ctx, |ui| {
+        .show(ui, |ui| {
             if state.is_modal_open {
                 ui.disable();
             }
@@ -127,7 +128,7 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
 
             // 2. Select View Mode
             if state.preset_editor_state.editing {
-                render_edit_mode(ui, ctx, state);
+                render_edit_mode(ui, &ctx, state);
             } else {
                 render_view_mode(ui, state);
             }

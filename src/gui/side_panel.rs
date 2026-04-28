@@ -1,8 +1,8 @@
 use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::State};
 use rust_i18n::t;
 
-pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
-    egui::SidePanel::new(egui::panel::Side::Left, "panel").show(ctx, |ui| {
+pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
+    egui::Panel::left("panel").show_inside(ui, |ui| {
         // Disable main UI if a modal/rename is open to force focus
         if state.is_modal_open || state.chat_to_rename.is_some() {
             ui.disable();
@@ -106,7 +106,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                 Ok(markdown) => {
                                     let tx_clone = state.op_tx.clone();
                                     let title = db_chat.title.clone();
-                                    let ctx_clone = ctx.clone();
+                                    let ctx_clone = ui.ctx().clone();
                                     tokio::spawn(async move {
                                         let task = rfd::AsyncFileDialog::new()
                                             .add_filter("Markdown", &["md"])
@@ -189,7 +189,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
     // --- RENAME POPUP WINDOW ---
     // This draws a small window on top of everything if a chat is being renamed
-    render_rename_window(ctx, state);
+    render_rename_window(ui, state);
 }
 
 // Helper function to extract prompts and re-attach files
@@ -314,7 +314,7 @@ fn clipped_button(ui: &mut egui::Ui, text: &str, is_selected: bool)
 }
 
 // Helper function to handle the popup logic
-fn render_rename_window(ctx: &egui::Context, state: &mut State) {
+fn render_rename_window(ui: &mut egui::Ui, state: &mut State) {
     if let Some(chat_id) = state.chat_to_rename.clone() {
         let mut open = true;
 
@@ -324,7 +324,7 @@ fn render_rename_window(ctx: &egui::Context, state: &mut State) {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
 
                 ui.label("Enter new name:");
 

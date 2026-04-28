@@ -87,22 +87,18 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
 // --- Main Entry Point ---
 
-pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
-    egui::CentralPanel::default()
-    //.stick_to_the_bottom(true)
-    .show(ctx, |ui| {
-        if state.is_modal_open {
-            ui.disable();
-        }
-        egui::ScrollArea::vertical()
-        .stick_to_bottom(true)
-        .id_salt("chat_scroll_main")
-        // Fix for scrolling behavior: preventing auto-shrink ensures the
-        // scroll area tries to fill the parent, helping capture input.
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            render_chat_messages(ui, state, ui.available_width());
-        });
+pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
+    if state.is_modal_open {
+        ui.disable();
+    }
+    egui::ScrollArea::vertical()
+    .stick_to_bottom(true)
+    .id_salt("chat_scroll_main")
+    // Fix for scrolling behavior: preventing auto-shrink ensures the
+    // scroll area tries to fill the parent, helping capture input.
+    .auto_shrink([false, false])
+    .show(ui, |ui| {
+        render_chat_messages(ui, state, ui.available_width());
     });
 }
 
@@ -466,6 +462,7 @@ ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
                                     } else {
                                         format!("$${}$$", math)
                                     };
+
                                     ui.label(egui::RichText::new(raw_math)
                                         .monospace()
                                         .color(ui.visuals().warn_fg_color));

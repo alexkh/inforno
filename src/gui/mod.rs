@@ -34,6 +34,8 @@ mod bottom_panel;
 mod chat;
 mod agent_config;
 pub mod math_render;
+mod autocomplete;
+pub use autocomplete::AutoCompleteTextEdit;
 
 pub struct MyAppPermanent {
     pub rt: Handle,
@@ -340,7 +342,8 @@ impl eframe::App for MyApp {
         eframe::set_value(storage, "app_language", &self.perma.app_language);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // --- SYNC GLOBAL COLORS ---
         {
             let visuals = ctx.style().visuals.clone();
@@ -520,24 +523,24 @@ impl eframe::App for MyApp {
             }
         }
 
-        ui_top_panel(ctx, state);
+        ui_top_panel(ui, state);
 
-        ui_side_panel(ctx, state);
+        ui_side_panel(ui, state);
 
-        ui_key_manager(ctx, state);
+        ui_key_manager(ui, state);
 
-        ui_preset_editor(ctx, state);
+        ui_preset_editor(ui, state);
 
-        ui_agent_config(ctx, state);
+        ui_agent_config(ui, state);
 
-        ui_bottom_panel(ctx, state);
+        ui_bottom_panel(ui, state);
 
-        ui_right_panel(ctx, state);
+        ui_right_panel(ui, state);
 
-        ui_chat(ctx, state);
+        ui_chat(ui, state);
 
         // File Dialog Start
-        state.file_dialog.update(ctx);
+        state.file_dialog.update(&ctx);
 
         // Check if the user confirmed their selection
         if let Some(paths) = state.file_dialog.take_picked_multiple() {
@@ -560,7 +563,7 @@ impl eframe::App for MyApp {
 
                 for path in paths {
                     if path.is_dir() {
-                        // Recursively read directory (we can leave this for text only as before, 
+                        // Recursively read directory (we can leave this for text only as before,
                         // or you could expand it to images. Let's keep it safe and just do text for folders)
                         fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<crate::common::Attachment>, root_path: &std::path::Path) {
                             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -585,7 +588,7 @@ impl eframe::App for MyApp {
                     } else {
                         // Read single file: Check if it's an image!
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                        
+
                         if let Some(mime) = get_image_mime(ext) {
                             // It's an image, read as binary and base64 encode
                             if let Ok(bytes) = std::fs::read(&path) {
@@ -633,7 +636,7 @@ impl eframe::App for MyApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]) // Center on screen
                 .open(&mut open) // Helper to handle the "X" close button
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.set_min_width(300.0); // Make it look substantial
 
                     ui.vertical_centered(|ui| {
@@ -665,7 +668,7 @@ impl eframe::App for MyApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.label("A project directory was provided, but no Sandbox was found.");
                     ui.label("Would you like to initialize an '.inforno' directory here?");
 
@@ -703,12 +706,6 @@ impl eframe::App for MyApp {
                 state.show_project_init_modal = false;
             }
         }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Manually exit the process with code 0 (success).
-        // This prevents the OS from attempting the faulty Wayland cleanup.
-        //std::process::exit(0);
     }
 }
 
