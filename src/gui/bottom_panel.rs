@@ -6,6 +6,8 @@ use rust_i18n::t;
 
 use crate::{common::{Agent, Attachment, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, FileOp, FileOpMsg, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
 
+use crate::bulat::editor::{Token, Syntax, TokenType};
+
 pub struct BottomPanelState {
     pub col1_width: f32,
     pub col2_width: f32,
@@ -107,6 +109,29 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                                 }
 
                                 read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
+                            }
+                            ui.close();
+                        }
+
+                        // Generate and insert TOC
+                        if ui.button("Attach TOC of 'src/' (.rs)").clicked() {
+                            if let Some(root) = &state.project_root {
+                                let src_path = root.join("src");
+                                let mut toc = String::new();
+
+                                // Generate the markdown TOC
+                                generate_rust_toc(&src_path, root, &mut toc);
+
+                                if !toc.is_empty() {
+                                    // Instead of inserting into the prompt, we create an Attachment!
+                                    state.bottom_panel_state.pending_attachments.push(
+                                        crate::common::Attachment {
+                                            filename: "project_toc.md".to_string(),
+                                            mime_type: "text/markdown".to_string(),
+                                            content: toc,
+                                        }
+                                    );
+                                }
                             }
                             ui.close();
                         }
@@ -805,5 +830,101 @@ fn vertical_splitter(ui: &mut egui::Ui, width: &mut f32) {
         *width += ui.input(|i| i.pointer.delta().x);
         // Clamp to prevent it from disappearing
         *width = width.max(50.0);
+    }
+}
+
+/// Parses Rust source code and extracts high-level declarations
+/// into a structured Markdown Table of Contents with line numbers.
+fn generate_rust_toc(dir: &std::path::Path, root_path: &std::path::Path, toc: &mut String) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut syntax = Syntax::rust();
+        let mut tokenizer = Token::default();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                // Recurse into subdirectories
+                generate_rust_toc(&path, root_path, toc);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    // Create the large title for the file
+                    let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
+                    toc.push_str(&format!("# {}\n\n", relative_path));
+
+                    // Tokenize the file
+                    let tokens = tokenizer.tokens(&syntax, &content);
+                    let mut i = 0;
+                    let mut current_line = 1; // NEW: Track the current line number
+
+                    while i < tokens.len() {
+                        let t = &tokens[i];
+                        let buf = t.buffer();
+
+                        // 1. Look for standard Rust declarations
+                        if t.ty() == TokenType::Keyword {
+                            // Target the main structural blocks of a Rust file
+                            if ["fn", "struct", "enum", "trait", "impl", "type", "mod"].contains(&buf) {
+                                let start_line = current_line; // Capture the line where the keyword appears
+                                let mut signature = String::from(buf);
+                                let mut j = i + 1;
+
+                                // Read ahead to capture the FULL signature
+                                while j < tokens.len() {
+                                    let nt = &tokens[j];
+                                    let nbuf = nt.buffer();
+
+                                    // Stop only when the body begins or the statement ends
+                                    if nbuf == "{" || nbuf == ";" {
+                                        break;
+                                    }
+                                    signature.push_str(nbuf);
+
+                                    // IMPORTANT: We must count newlines inside multi-line signatures!
+                                    current_line += nbuf.matches('\n').count();
+                                    j += 1;
+                                }
+
+                                // Condense whitespace and newlines so multi-line signatures render perfectly
+                                let cleaned_signature = signature.split_whitespace().collect::<Vec<_>>().join(" ");
+
+                                // Format as a bullet point with the line number
+                                toc.push_str(&format!("{}: {}\n", start_line, cleaned_signature));
+                                i = j;
+                                continue;
+                            }
+                        }
+                        // 2. Special case for macros
+                        else if buf == "macro_rules" {
+                            let start_line = current_line;
+                            let mut signature = String::from("macro_rules");
+                            let mut j = i + 1;
+
+                            while j < tokens.len() {
+                                let nt = &tokens[j];
+                                let nbuf = nt.buffer();
+                                if nbuf == "{" {
+                                    break;
+                                }
+                                signature.push_str(nbuf);
+
+                                current_line += nbuf.matches('\n').count();
+                                j += 1;
+                            }
+
+                            let cleaned_signature = signature.split_whitespace().collect::<Vec<_>>().join(" ");
+                            toc.push_str(&format!("{}: {}\n", start_line, cleaned_signature));
+                            i = j;
+                            continue;
+                        }
+
+                        // 3. If we aren't capturing a signature, just count the newlines and move on
+                        current_line += buf.matches('\n').count();
+                        i += 1;
+                    }
+                    toc.push('\n'); // Extra spacing between files
+                }
+            }
+        }
     }
 }

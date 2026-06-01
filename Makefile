@@ -1,6 +1,9 @@
 run:
 	cargo run --release
 
+build:
+	cargo build --release
+
 rus:
 	cargo run --release -- --la ru
 
