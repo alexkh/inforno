@@ -34,6 +34,7 @@ mod bottom_panel;
 mod chat;
 mod agent_config;
 pub mod math_render;
+mod panes;
 
 pub struct MyAppPermanent {
     pub rt: Handle,
@@ -99,6 +100,7 @@ pub struct State {
     project_root: Option<PathBuf>,
     active_merge: Option<ActiveMerge>,
     file_dialog: egui_file_dialog::FileDialog,
+    pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
 }
 
 impl State {
@@ -251,6 +253,15 @@ impl State {
         let pending_init = permanent.pending_project_init.lock().unwrap().take();
         let show_project_init = pending_init.is_some();
 
+        // attempt to load the layout from the .ron file
+        let mut pane_tree = load_layout_from_ron(&project_root);
+
+        if pane_tree.is_empty() {
+            let mut tiles = egui_tiles::Tiles::default();
+            let chat_pane = tiles.insert_pane(crate::gui::panes::Pane::Chat);
+            pane_tree = egui_tiles::Tree::new("main_pane_tree", chat_pane, tiles);
+        }
+
         // --- 4. Construct State ---
         Self {
             perma: permanent,
@@ -301,6 +312,7 @@ impl State {
             project_root,
             active_merge: None,
             file_dialog: egui_file_dialog::FileDialog::new(),
+            pane_tree,
         }
     }
 
@@ -560,7 +572,7 @@ impl eframe::App for MyApp {
 
                 for path in paths {
                     if path.is_dir() {
-                        // Recursively read directory (we can leave this for text only as before, 
+                        // Recursively read directory (we can leave this for text only as before,
                         // or you could expand it to images. Let's keep it safe and just do text for folders)
                         fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<crate::common::Attachment>, root_path: &std::path::Path) {
                             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -585,7 +597,7 @@ impl eframe::App for MyApp {
                     } else {
                         // Read single file: Check if it's an image!
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                        
+
                         if let Some(mime) = get_image_mime(ext) {
                             // It's an image, read as binary and base64 encode
                             if let Ok(bytes) = std::fs::read(&path) {
@@ -734,4 +746,30 @@ macro_rules! mybtn {
             )
             .clicked()
     };
+}
+
+// Helper to construct the path to the layout.ron file
+fn get_layout_path(project_root: &Option<PathBuf>) -> Option<PathBuf> {
+    project_root.as_ref().map(|root| root.join(".inforno").join("layout.ron"))
+}
+
+// Loads the layout from disk, returning an empty tree if it fails
+fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crate::gui::panes::Pane> {
+    if let Some(path) = get_layout_path(project_root) {
+        if let Ok(file_content) = std::fs::read_to_string(path) {
+            if let Ok(tree) = ron::from_str(&file_content) {
+                return tree;
+            }
+        }
+    }
+    egui_tiles::Tree::empty("main_pane_tree")
+}
+
+// Call this function whenever you want to save the current window layout
+pub fn save_layout_to_ron(state: &State) {
+    if let Some(path) = get_layout_path(&state.project_root) {
+        if let Ok(ron_string) = ron::ser::to_string_pretty(&state.pane_tree, ron::ser::PrettyConfig::default()) {
+            let _ = std::fs::write(path, ron_string);
+        }
+    }
 }

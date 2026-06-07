@@ -45,6 +45,8 @@ logos = "0.16.1"
 similar = "2.7.0"
 egui-file-dialog = "0.12.0"
 base64 = "0.22.1"
+egui_tiles = "0.14.1"
+ron = "0.12.1"
 
 [[bin]]
 name = "inforno"

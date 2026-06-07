@@ -1988,7 +1988,7 @@ dependencies = [
  "percent-encoding",
  "profiling",
  "raw-window-handle",
- "ron",
+ "ron 0.11.0",
  "serde",
  "static_assertions",
  "wasm-bindgen",
@@ -2013,7 +2013,7 @@ dependencies = [
  "log",
  "nohash-hasher",
  "profiling",
- "ron",
+ "ron 0.11.0",
  "serde",
  "smallvec",
  "unicode-segmentation",
@@ -2160,6 +2160,19 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "winit",
+]
+
+[[package]]
+name = "egui_tiles"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef184e589f0a80560bd3b63017634642d1ba112a8a8d9b29341f7cafd04601f"
+dependencies = [
+ "ahash 0.8.12",
+ "egui",
+ "itertools 0.14.0",
+ "log",
+ "serde",
 ]
 
 [[package]]
@@ -3842,6 +3855,7 @@ dependencies = [
  "egui_autocomplete",
  "egui_commonmark",
  "egui_extras",
+ "egui_tiles",
  "env_logger",
  "futures-util",
  "image 0.25.10",
@@ -3855,6 +3869,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.2",
  "rfd",
+ "ron 0.12.1",
  "rusqlite",
  "rust-i18n",
  "secrecy",
@@ -6521,6 +6536,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4147b952f3f819eca0e99527022f7d6a8d05f111aeb0a62960c74eb283bec8fc"
+dependencies = [
+ "bitflags 2.10.0",
+ "once_cell",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "rowan"
 version = "0.15.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8164,6 +8193,12 @@ name = "typed-arena"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"

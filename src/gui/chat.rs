@@ -87,28 +87,49 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
 // --- Main Entry Point ---
 
-pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
-    egui::CentralPanel::default()
-    //.stick_to_the_bottom(true)
-    .show(ctx, |ui| {
+pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
+    egui::CentralPanel::default().show(ctx, |ui| {
         if state.is_modal_open {
             ui.disable();
         }
-        egui::ScrollArea::vertical()
-        .stick_to_bottom(true)
-        .id_salt("chat_scroll_main")
-        // Fix for scrolling behavior: preventing auto-shrink ensures the
-        // scroll area tries to fill the parent, helping capture input.
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            render_chat_messages(ui, state, ui.available_width());
-        });
+
+        // 1. Temporarily extract the tree from the state.
+        // We replace it with a cheap, empty placeholder so the state remains valid.
+        let mut tree = std::mem::replace(
+            &mut state.pane_tree,
+            egui_tiles::Tree::empty("temp_tree")
+        );
+
+        // 2. Create the behavior bridge WITH the new action queue
+        let mut behavior = crate::gui::panes::PaneBehavior {
+            state,
+            split_requests: Vec::new(),
+        };
+
+        // 3. Render the layout
+        tree.ui(&mut behavior, ui);
+
+        // 4. NEW: Process any requested splits
+        for new_pane in behavior.split_requests {
+            let new_tile = tree.tiles.insert_pane(new_pane);
+
+            if let Some(root_id) = tree.root {
+                // Wrap the entire current layout and the new pane in a horizontal split container!
+                let new_root = tree.tiles.insert_horizontal_tile(vec![root_id, new_tile]);
+                tree.root = Some(new_root);
+            } else {
+                tree.root = Some(new_tile);
+            }
+        }
+
+        // 5. Put the updated tree back
+        state.pane_tree = tree;
     });
 }
 
 // --- Message Rendering ---
 
-fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) {
+pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) {
     let msg_ui_map = &mut state.chat_msg_ui;
     let cache = &mut state.common_mark_cache;
     let msg_pool = &state.chat.msg_pool;
