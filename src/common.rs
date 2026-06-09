@@ -97,6 +97,7 @@ pub enum FileOp {
     SaveCopy,
     Clear,
     Attach,
+    OpenEditor,
 }
 
 #[derive(Default, Clone)]

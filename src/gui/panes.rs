@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub enum Pane {
     Chat { chat_id: i64 },
-    Editor { path: PathBuf },
+    Editor { path: PathBuf, content: String },
     // We can easily add MergeTool here later!
 }
 
@@ -66,7 +66,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     "💬 New Chat ✖".into()
                 }
             }
-            Pane::Editor { path } => {
+            Pane::Editor { path, content: _ } => {
                 let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 format!("📝 {} ✖", filename).into()
             }
@@ -155,12 +155,41 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                 );
                             });
                     }
-                    Pane::Editor { path } => {
-                        // Detect clicks in the editor pane too!
+
+                    Pane::Editor { path, content } => {
+                        ui.horizontal(|ui| {
+                            ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
+                            ui.label(format!("Editing: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("◫ Split").clicked() {
+                                    self.split_requests.push(Pane::Editor { path: path.clone(), content: content.clone() });
+                                }
+                                if ui.button("💾 Save").clicked() {
+                                    if let Err(e) = std::fs::write(&path, &*content) {
+                                        self.state.error_msg = Some(format!("Failed to save file: {}", e));
+                                        self.state.is_modal_open = true;
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+
                         if ui.ui_contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
                             self.state.active_tile_id = Some(tile_id);
                         }
-                        // ... editor code ...
+
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("editor_scroll_{:?}", tile_id))
+                            .show(ui, |ui| {
+                                // Render your custom text editor!
+                                crate::bulat::editor::CodeEditor::default()
+                                    .id_source(format!("editor_code_{:?}", tile_id))
+                                    .with_theme(crate::bulat::editor::ColorTheme::SV)
+                                    .with_syntax(crate::bulat::editor::Syntax::rust())
+                                    .vscroll(false) // Let the outer scroll area handle scrolling natively
+                                    .show(ui, content);
+                            });
                     }
                 }
             });
@@ -339,4 +368,69 @@ pub fn open_chat_in_tab(state: &mut crate::gui::State, new_chat_id: i64) {
             state.pane_tree.root = Some(new_tile_id);
         }
     }
+}
+
+pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content: String) {
+    let prev_active_id = state.active_tile_id; // Capture current focus
+
+    let new_pane = Pane::Editor { path, content };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+    
+    state.active_tile_id = Some(new_tile_id); // Focus new tab globally
+
+    if let Some(ptid) = prev_active_id {
+        let mut parent_is_tabs = None;
+        for (tid, tile) in state.pane_tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
+                if t.children.contains(&ptid) {
+                    parent_is_tabs = Some(*tid);
+                    break;
+                }
+            }
+        }
+
+        if let Some(tabs_id) = parent_is_tabs {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
+                p.clone()
+            } else { return; };
+
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
+            new_tabs.active = Some(new_tile_id);
+
+            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
+                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
+            }
+        }
+    } else {
+        if let Some(root_id) = state.pane_tree.root {
+            // FIXED: Check if the root is already a tabs container
+            let mut is_tabs = false;
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+                is_tabs = true;
+            }
+
+            if !is_tabs {
+                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
+                state.pane_tree.root = Some(new_tabs_id);
+                
+                // FIXED: Tell the brand new Tabs container to focus our new tile
+                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
+                    tabs.set_active(new_tile_id);
+                }
+            }
+        } else {
+            state.pane_tree.root = Some(new_tile_id);
+        }
+    }
+
+    // Force egui_tiles to traverse the tree and verify focus
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
 }

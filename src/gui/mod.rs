@@ -473,6 +473,21 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
+                FileOp::OpenEditor => {
+                    if !file_op_msg.cancelled {
+                        if let Some(path) = file_op_msg.path {
+                            match std::fs::read_to_string(&path) {
+                                Ok(content) => {
+                                    crate::gui::panes::open_editor_in_tab(state, path, content);
+                                }
+                                Err(e) => {
+                                    state.error_msg = Some(format!("Could not read file: {}", e));
+                                    state.is_modal_open = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

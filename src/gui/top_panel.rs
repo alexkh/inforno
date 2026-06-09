@@ -232,6 +232,28 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                     state.reload(None);
                 };
 
+            ui.separator(); // Visual spacer
+
+            ui.menu_button("📝 Edit", |ui| {
+                if ui.button("📂 Open File...").clicked() {
+                    ui.close_menu();
+                    let tx_clone = state.op_tx.clone();
+                    let ctx_clone = ctx.clone();
+
+                    // Spawn async file dialog
+                    tokio::spawn(async move {
+                        if let Some(handle) = rfd::AsyncFileDialog::new().pick_file().await {
+                            let _ = tx_clone.send(crate::common::FileOpMsg {
+                                op: crate::common::FileOp::OpenEditor,
+                                cancelled: false,
+                                path: Some(handle.path().to_path_buf()),
+                                attachments: None,
+                            });
+                            ctx_clone.request_repaint();
+                        }
+                    });
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(root) = &state.project_root {
                     // 1. Get the absolute path (fallback to the original root if it fails)
