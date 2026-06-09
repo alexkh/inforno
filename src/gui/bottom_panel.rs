@@ -266,15 +266,11 @@ fn render_user_prompt_col(ui: &mut Ui, state: &mut State, panel_height: f32) {
 fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context) {
     let mut do_send_prompt_now = false;
 
-    // Check for Ctrl+Enter
     if ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter)) {
         do_send_prompt_now = true;
     }
 
-    let btn_height = state.bottom_panel_state.desired_rows as f32
-            * state.bottom_panel_state.row_height;
-
-    // Safety check to ensure button has some height even if rows calc fails
+    let btn_height = state.bottom_panel_state.desired_rows as f32 * state.bottom_panel_state.row_height;
     let actual_btn_height = if btn_height > 0.0 { btn_height } else { 30.0 };
 
     let button_text = if state.chat_streaming_state.streaming {
@@ -283,15 +279,9 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context) {
         t!("send_prompt_btn").to_string()
     };
 
-    let send_btn = egui::Button::new(button_text).wrap()
-            .selected(state.chat_streaming_state.streaming);
+    let send_btn = egui::Button::new(button_text).wrap().selected(state.chat_streaming_state.streaming);
+    let send_clicked = ui.add_sized([80.0, actual_btn_height], send_btn).clicked();
 
-    let send_clicked = ui.add_sized(
-        [80.0, actual_btn_height],
-        send_btn,
-    ).clicked();
-
-    // only submit prompt if there is text entered
     if do_send_prompt_now || send_clicked {
         if state.chat_streaming_state.streaming {
             if let Some(flag) = &state.chat_streaming_state.abort_flag {
@@ -307,44 +297,38 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context) {
         }
     }
 
+    // Safely get or create the active chat
+    let active_chat_id = state.active_chat_id.unwrap_or(0);
+    if !state.open_chats.contains_key(&active_chat_id) {
+        state.open_chats.insert(active_chat_id, crate::common::Chat::default());
+    }
+
     egui::ScrollArea::vertical().id_salt("agent_scroll").show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
             ui.vertical(|ui| {
-                // Prepare disjoint borrows
-                // We need to mutate agents, but only read presets.
-                // Rust can usually handle this if we access fields directly,
-                // but destructuring makes it explicit and safe.
                 let presets = &state.presets;
-                let agents = &mut state.chat.agents;
+                // Scope the mutable borrow of the chat
+                let chat = state.open_chats.get_mut(&active_chat_id).unwrap();
 
-                for (i, agent) in agents.iter_mut().enumerate().skip(1) {
+                for (i, agent) in chat.agents.iter_mut().enumerate().skip(1) {
                     if agent.deleted { continue; }
                     ui.horizontal(|ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.x = 4.0;
-
-                        // We create a unique ID for the combo box using the index
                         let id_source = format!("chat_agent_{}", i);
                         ui.label(format!("{}", agent.id));
-                        render_agent(ui, agent, &mut state.agent_config_state,
-                                presets, &id_source, &state.db_conn);
+                        render_agent(ui, agent, &mut state.agent_config_state, presets, &id_source, &state.db_conn);
                     });
                 }
 
-                // In your UI update loop
-                let is_full = state.chat.agents.len() >= 127;
-
+                let is_full = chat.agents.len() >= 127;
                 if ui.add_enabled(!is_full, egui::Button::new("+"))
-                .on_hover_text(if is_full { "Max agents reached" } else
-                        { "Add another agent" })
+                .on_hover_text(if is_full { "Max agents reached" } else { "Add another agent" })
                 .clicked() {
-                    // create a new agent right inside chat, sync it to db
-                    if let Err(e) = state.chat.add_agent_try_sync(
-                        &state.db_conn) {
+                    if let Err(e) = chat.add_agent_try_sync(&state.db_conn) {
                         eprintln!("Failed to add agent: {}", e);
-                        state.error_msg = Some(
-                                format!("Failed to add agent: {}", e));
+                        state.error_msg = Some(format!("Failed to add agent: {}", e));
                         state.is_modal_open = true;
                     }
                 }
@@ -548,255 +532,191 @@ pub fn preset_combo_box(
 }
 
 fn submit_prompt(state: &mut State, ctx: &egui::Context) {
-    // check if at least one agent has valid preset selected
-    if !state.chat.agents.iter().skip(1).any(|a|
-                state.presets.get(a.preset_selection.id).is_some()) {
+    let active_chat_id = state.active_chat_id.unwrap_or(0);
+
+    // Temporarily extract the active chat to satisfy the borrow checker
+    let mut chat = state.open_chats.remove(&active_chat_id).unwrap_or_default();
+
+    if !chat.agents.iter().skip(1).any(|a| state.presets.get(a.preset_selection.id).is_some()) {
         state.error_msg = Some(t!("error_no_agent_preset_selected").to_string());
         state.is_modal_open = true;
+        // Put it back if we fail early
+        state.open_chats.insert(active_chat_id, chat);
         return;
     }
 
     let prompt_text = state.bottom_panel_state.prompt_edited.clone();
-
     let rt_handle = state.perma.rt.clone();
     let tx_base = state.chat_streaming_state.tx.clone();
 
-    // ---------------------------------------------------------
-    // 1. Ensure Chat Exists
-    // ---------------------------------------------------------
-    if state.chat.id == 0 {
-        // create a chat title from the first 40 characters of the prompt
-        state.chat.title = state.bottom_panel_state.prompt_edited.chars()
-                .take(40).collect::<String>();
-        // create a chat in the database, so that we have the new chat id
-        match mk_chat(&state.db_conn, &mut state.chat) {
-            Ok(()) => {
-                reload_db_chats(&state.db_conn, &mut state.db_chats);
-            }
+    if chat.id == 0 {
+        chat.title = state.bottom_panel_state.prompt_edited
+            .lines() // Split into lines
+            .find(|line| !line.trim().is_empty()) // Grab the first non-empty line
+            .unwrap_or("Unnamed Chat")
+            .chars()
+            .take(40)
+            .collect::<String>();
+
+        match crate::db::mk_chat(&state.db_conn, &mut chat) {
+            Ok(()) => reload_db_chats(&state.db_conn, &mut state.db_chats),
             Err(e) => {
                 eprintln!("CRITICAL DB ERROR (create chat): {}", e);
+                state.open_chats.insert(active_chat_id, chat);
                 return;
             }
         }
     }
 
-    // ---------------------------------------------------------
-    // 2. Handle System Prompt (New Logic)
-    // ---------------------------------------------------------
-    // If the panel is visible and contains text, we send it as a System message
-    // immediately before the User message, then hide the panel.
+    let new_active_id = chat.id;
+
     if state.bottom_panel_state.show_system_prompt {
         let sys_content = state.bottom_panel_state.system_prompt_edited.trim();
-
         if !sys_content.is_empty() {
-            let mut sys_msg = ChatMsg {
+            let mut sys_msg = crate::common::ChatMsg {
                 id: 0,
-                msg_role: MsgRole::System,
+                msg_role: crate::common::MsgRole::System,
                 content: state.bottom_panel_state.system_prompt_edited.clone(),
                 ..Default::default()
             };
 
-            // Save System Message to DB
-            if let Ok(()) = mk_msg(&state.db_conn, &mut sys_msg) {
-                // Add to memory pool
-                state.chat.msg_pool.insert(sys_msg.id, sys_msg.clone());
-
-                // Add this System Message ID to ALL agents (including Omnis/Index 0)
-                for agent in state.chat.agents.iter_mut() {
+            if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut sys_msg) {
+                chat.msg_pool.insert(sys_msg.id, sys_msg.clone());
+                for agent in chat.agents.iter_mut() {
                     agent.msg_ids.push(sys_msg.id);
-                    // Sync this agent's history to DB
-                    if let Err(e) = mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids) {
-                        eprintln!("DB ERROR (updating agent with sys msg): {}", e);
-                    }
+                    let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
                 }
-
-                // Hide the panel so it doesn't send again automatically
                 state.bottom_panel_state.show_system_prompt = false;
-            } else {
-                eprintln!("CRITICAL DB ERROR (save sys msg)");
             }
         }
     }
 
-    // Serialize the attachments to JSON if we have any
     let details_json = if !state.bottom_panel_state.pending_attachments.is_empty() {
         serde_json::to_string(&state.bottom_panel_state.pending_attachments).ok()
     } else {
         None
     };
 
-    // Clear the pending attachments for the next prompt
     state.bottom_panel_state.pending_attachments.clear();
 
-    // ---------------------------------------------------------
-    // 3. Create & Save User Message
-    // ---------------------------------------------------------
-    let mut usr_msg = ChatMsg {
-        id: 0, // Placeholder, will be updated from DB
-        msg_role: MsgRole::User,
-        content: prompt_text.clone(), // or .to_string()
+    let mut usr_msg = crate::common::ChatMsg {
+        id: 0,
+        msg_role: crate::common::MsgRole::User,
+        content: prompt_text.clone(),
         details: details_json,
-        // Defaults (preset_id=0, preset=None, etc.) are handled by Default
         ..Default::default()
     };
 
-    // ---------------------------------------------------------
-    // 4. Persist User Message to DB (mk_msg)
-    // ---------------------------------------------------------
-    if let Err(e) = mk_msg(&state.db_conn, &mut usr_msg) {
+    if let Err(e) = crate::db::mk_msg(&state.db_conn, &mut usr_msg) {
         eprintln!("CRITICAL DB ERROR (save msg): {}", e);
+        state.open_chats.insert(new_active_id, chat);
+        state.active_chat_id = Some(new_active_id);
         return;
     }
 
-    // Now that we know it succeeded, capture the ID.
-    // No 'mut' needed, and no wasted initialization.
     let usr_msg_id = usr_msg.id;
+    chat.msg_pool.insert(usr_msg.id, usr_msg.clone());
 
-    state.chat.msg_pool.insert(usr_msg.id, usr_msg.clone());
-
-    // ---------------------------------------------------------
-    // 5. Prepare Multi-Agent Streaming
-    // ---------------------------------------------------------
-    println!("Starting streaming...");
     state.chat_streaming_state.streaming = true;
     state.chat_streaming_state.bitmask = 0;
 
-    // create a new flag, while false it means don't abort
-    let abort_flag = Arc::new(AtomicBool::new(false));
+    let abort_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.chat_streaming_state.abort_flag = Some(abort_flag.clone());
 
-    // ensure buffers are sized correctly for the number of agents
-    let agent_count = std::cmp::min(state.chat.agents.len(), 128);
+    let agent_count = std::cmp::min(chat.agents.len(), 128);
     state.chat_streaming_state.msg_ids.clear();
-    state.chat_streaming_state.msg_ids.resize_with(
-            agent_count, || 0);
+    state.chat_streaming_state.msg_ids.resize_with(agent_count, || 0);
     state.chat_streaming_state.content_buffers.clear();
-    state.chat_streaming_state.content_buffers.resize_with(
-            agent_count, || String::new());
+    state.chat_streaming_state.content_buffers.resize_with(agent_count, || String::new());
     state.chat_streaming_state.reasoning_buffers.clear();
-    state.chat_streaming_state.reasoning_buffers.resize_with(
-            agent_count, || String::new());
+    state.chat_streaming_state.reasoning_buffers.resize_with(agent_count, || String::new());
 
-    for (index, agent) in state.chat.agents.iter_mut().enumerate() {
-        // add the user msg id to this agent's history
-        // Note: System msg (if any) was already added in Step 2, so this comes after.
+    for (index, agent) in chat.agents.iter_mut().enumerate() {
         agent.msg_ids.push(usr_msg_id);
-        // save this message id to the database
-        if let Err(e) = mod_agent_msgs(
-                    &state.db_conn, agent.id, &agent.msg_ids) {
-            eprintln!("DB ERROR (agent {}): {}", index, e);
-            continue;
-        }
+        let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
     }
 
-    // before streaming we create a snapshot of the current chat, because we
-    // want to share it with all the streaming threads as read-only
-    let shared_chat = std::sync::Arc::new(state.chat.clone());
+    let shared_chat = std::sync::Arc::new(chat.clone());
 
-    for index in 1..state.chat.agents.len() {
-        if state.chat.agents[index].deleted || state.chat.agents[index].muted {
+    for index in 1..chat.agents.len() {
+        if chat.agents[index].deleted || chat.agents[index].muted {
             continue;
         }
 
-        if state.chat.agents[index].preset.is_none() {
-            let preset_id = state.chat.agents[index].preset_selection.id;
-            // Update the Agent's actual state
-            state.chat.agents[index].preset = state.presets.get(preset_id).cloned();
-            let _ = update_agent_preset_snapshot(&state.db_conn,
-                state.chat.agents[index].id,
-                state.chat.agents[index].preset.as_ref());
+        if chat.agents[index].preset.is_none() {
+            let preset_id = chat.agents[index].preset_selection.id;
+            chat.agents[index].preset = state.presets.get(preset_id).cloned();
+            let _ = crate::db::update_agent_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
         }
 
-        let Some(mut preset) = state.chat.agents[index].preset.clone() else {
+        let Some(mut preset) = chat.agents[index].preset.clone() else {
             continue;
         };
 
-        // for OpenRouter we must provide the API Key, but it must not be
-        // saved to the database or even in memory
-        if preset.chat_router == ChatRouter::Openrouter {
+        if preset.chat_router == crate::common::ChatRouter::Openrouter {
             preset.api_key = state.openrouter_api_key.clone();
         }
 
-        // prepare thread data
         let tx = tx_base.clone();
-        let que = ChatQue {
+        let que = crate::common::ChatQue {
             preset,
-            chat: shared_chat.clone(), // cheap arc clone
+            chat: shared_chat.clone(),
             agent_ind: index,
         };
 
-        // ---------------------------------------------------------
-        // PREPARE ASSISTANT MESSAGE (Placeholder)
-        // ---------------------------------------------------------
-
-        // 1. Determine the Effective Preset (Snapshot)
-        // We do this now so the message history immediately records
-        // what settings were used for this generation.
         let (effective_preset, preset_id) = {
-            let agent = &state.chat.agents[index];
+            let agent = &chat.agents[index];
             if let Some(override_p) = &agent.preset {
-                (Some(override_p.clone()), agent.preset_selection.id)
+                // Explicitly annotate Option<Preset> here to satisfy E0282
+                let override_preset: Option<crate::common::Preset> = Some(override_p.clone());
+                (override_preset, agent.preset_selection.id)
             } else {
-                (
-                    state.presets.get(agent.preset_selection.id).cloned(),
-                    agent.preset_selection.id
-                )
+                (state.presets.get(agent.preset_selection.id).cloned(), agent.preset_selection.id)
             }
         };
 
-        // 2. Create the ChatMsg Object in Memory
-        let mut assistant_msg = ChatMsg {
-            id: 0, // Placeholder
-            msg_role: MsgRole::Assistant,
+        let mut assistant_msg = crate::common::ChatMsg {
+            id: 0,
+            msg_role: crate::common::MsgRole::Assistant,
             content: String::new(),
             reasoning: None,
             preset: effective_preset,
             preset_id,
-            name: Some(state.chat.agents[index].name.clone()),
+            name: Some(chat.agents[index].name.clone()),
             ..Default::default()
         };
 
-        // 3. Persist to Database (mk_msg)
-        if let Ok(()) = mk_msg(&state.db_conn, &mut assistant_msg) {
-
-            // A. Update the ID in the struct and Streaming State
+        if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut assistant_msg) {
             state.chat_streaming_state.msg_ids[index] = assistant_msg.id;
 
-            // B. Update Agents (Omnis + Specific Agent)
-            // Note: We update both Memory and Database for the message lists
-
-            // Update Omnis (Index 0)
-            if let Some(omnis) = state.chat.agents.get_mut(0) {
+            if let Some(omnis) = chat.agents.get_mut(0) {
                 omnis.msg_ids.push(assistant_msg.id);
-                let _ = crate::db::mod_agent_msgs(
-                        &state.db_conn, omnis.id, &omnis.msg_ids);
+                let _ = crate::db::mod_agent_msgs(&state.db_conn, omnis.id, &omnis.msg_ids);
             }
 
-            // Update The Specific Agent
-            if let Some(agent) = state.chat.agents.get_mut(index) {
+            if let Some(agent) = chat.agents.get_mut(index) {
                 agent.msg_ids.push(assistant_msg.id);
-                let _ = crate::db::mod_agent_msgs(
-                        &state.db_conn, agent.id, &agent.msg_ids);
+                let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
             }
 
-            // C. Insert into Pool (So UI renders it immediately)
-            state.chat.msg_pool.insert(assistant_msg.id, assistant_msg);
+            chat.msg_pool.insert(assistant_msg.id, assistant_msg);
         }
 
-        // spawn
         state.chat_streaming_state.bitmask |= 1 << index as u128;
         let ctx_clone = ctx.clone();
         let thread_abort = abort_flag.clone();
+
         rt_handle.spawn(async move {
-            if let Err(e) = run_chat_stream_router(que, tx.clone(),
-                        &ctx_clone, thread_abort).await {
-                let _ = tx.send(ChatStreamEvent::Error(index,
-                        format!("Error: {}", e)));
+            if let Err(e) = crate::common::run_chat_stream_router(que, tx.clone(), &ctx_clone, thread_abort).await {
+                let _ = tx.send(crate::common::ChatStreamEvent::Error(index, format!("Error: {}", e)));
             }
-            // signal finished
-            let _ = tx.send(ChatStreamEvent::Finished(index));
+            let _ = tx.send(crate::common::ChatStreamEvent::Finished(index));
         });
     }
+
+    // Reinsert the chat back into the HashMap now that we are done modifying it
+    state.open_chats.insert(new_active_id, chat);
+    state.active_chat_id = Some(new_active_id);
 }
 
 fn vertical_splitter(ui: &mut egui::Ui, width: &mut f32) {

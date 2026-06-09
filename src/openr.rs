@@ -142,7 +142,7 @@ pub async fn openr_fetch_models(api_key: &ApiKey) -> Result<Vec<DbOpenrModel>,
     let db_models: Vec<DbOpenrModel> = models
         .into_iter()
         .map(|item| {
-            if let Some((id1, id2)) = item.id.split_once('/') {
+            if let Some((id1, _)) = item.id.split_once('/') {
                 DbOpenrModel {
                     id: 0,
                     provider: id1.into(),

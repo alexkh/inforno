@@ -63,7 +63,13 @@ pub struct ChatStreamingState {
 //#[serde(default)]
 pub struct State {
     perma: Arc<MyAppPermanent>,
-    chat: common::Chat,
+    tile_labels: std::collections::HashMap<egui_tiles::TileId, String>,
+    active_tile_id: Option<egui_tiles::TileId>,
+    chat_locations: std::collections::HashMap<i64, Vec<String>>,
+    // chat: common::Chat,
+    open_chats: HashMap<i64, common::Chat>,
+    active_chat_id: Option<i64>,
+    dragging_chat: Option<i64>,
     chat_msg_ui: HashMap<i64, ChatMsgUi>,
     chat_to_rename: Option<i64>,
     chat_rename_buffer: String,
@@ -123,7 +129,6 @@ impl State {
         // --- 1. Main Database Connection ---
 
         let mut chats: Vec<DbChat> = vec![];
-        let mut chat = common::Chat::default();
         let mut presets = Presets::default();
 
         // 1. Establish Connection or Die
@@ -152,12 +157,16 @@ impl State {
             std::process::exit(1);
         });
 
+        let mut open_chats: HashMap<i64, common::Chat> = HashMap::new();
+        let mut active_chat_id: Option<i64> = None;
         if let Some(first_chat_info) = chats.first() {
-            chat = fetch_chat(&conn, first_chat_info.id, &presets)
+            let chat = fetch_chat(&conn, first_chat_info.id, &presets)
                 .unwrap_or_else(|e| {
                     eprintln!("CRITICAL: Could not fetch initial chat: {}", e);
                     std::process::exit(1);
                 });
+            open_chats.insert(first_chat_info.id, chat);
+            active_chat_id = Some(first_chat_info.id);
         }
 
         // --- 2. API Key Retrieval (Env or Keyring) ---
@@ -258,14 +267,20 @@ impl State {
 
         if pane_tree.is_empty() {
             let mut tiles = egui_tiles::Tiles::default();
-            let chat_pane = tiles.insert_pane(crate::gui::panes::Pane::Chat);
+            let chat_pane = tiles.insert_pane(crate::gui::panes::Pane::Chat {
+                chat_id: active_chat_id.unwrap_or(0) });
             pane_tree = egui_tiles::Tree::new("main_pane_tree", chat_pane, tiles);
         }
 
         // --- 4. Construct State ---
         Self {
             perma: permanent,
-            chat: chat,
+            tile_labels: std::collections::HashMap::new(),
+            active_tile_id: None,
+            chat_locations: std::collections::HashMap::new(),
+            open_chats,
+            active_chat_id,
+            dragging_chat: None,
             chat_msg_ui: HashMap::new(),
             chat_to_rename: None,
             chat_rename_buffer: String::new(),
@@ -366,6 +381,11 @@ impl eframe::App for MyApp {
 
         let state = &mut self.state;
 
+        // Generate our Tile Map ---
+        let (labels, locs) = crate::gui::panes::compute_tile_locations(&state.pane_tree);
+        state.tile_labels = labels;
+        state.chat_locations = locs;
+
         if state.error_msg.is_some() {
             state.is_modal_open = true;
         }
@@ -457,6 +477,8 @@ impl eframe::App for MyApp {
         }
 
         while let Ok(event) = state.chat_streaming_state.rx.try_recv() {
+            let active_chat_id = state.active_chat_id.unwrap_or(0);
+
             match event {
                 ChatStreamEvent::Content(ind, text) => {
                     if let Some(buf) = state.chat_streaming_state
@@ -464,8 +486,10 @@ impl eframe::App for MyApp {
                         buf.push_str(&text);
                         // update the message in the chat.msg_pool
                         let msg_id = state.chat_streaming_state.msg_ids[ind];
-                        if let Some(msg) = state.chat.msg_pool.get_mut(&msg_id) {
-                            msg.content = buf.clone();
+                        if let Some(chat) = state.open_chats.get_mut(&active_chat_id) {
+                            if let Some(msg) = chat.msg_pool.get_mut(&msg_id) {
+                                msg.content = buf.clone();
+                            }
                         }
                     }
                 }
@@ -475,8 +499,10 @@ impl eframe::App for MyApp {
                         buf.push_str(&text);
                         // update the message in the chat.msg_pool
                         let msg_id = state.chat_streaming_state.msg_ids[ind];
-                        if let Some(msg) = state.chat.msg_pool.get_mut(&msg_id) {
-                            msg.reasoning = Some(buf.clone());
+                        if let Some(chat) = state.open_chats.get_mut(&active_chat_id) {
+                            if let Some(msg) = chat.msg_pool.get_mut(&msg_id) {
+                                msg.reasoning = Some(buf.clone());
+                            }
                         }
                     }
                 }
@@ -517,8 +543,10 @@ impl eframe::App for MyApp {
                             "**Error! Is the Server Running? Details: {}**\n", err));
                             // update the message in the chat.msg_pool
                             let msg_id = state.chat_streaming_state.msg_ids[ind];
-                            if let Some(msg) = state.chat.msg_pool.get_mut(&msg_id) {
-                                msg.content = buf.clone();
+                            if let Some(chat) = state.open_chats.get_mut(&active_chat_id) {
+                                if let Some(msg) = chat.msg_pool.get_mut(&msg_id) {
+                                    msg.content = buf.clone();
+                                }
                             }
                         }
 

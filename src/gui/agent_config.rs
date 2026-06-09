@@ -83,17 +83,19 @@ pub fn ui_agent_config(ctx: &egui::Context, state: &mut State) {
 
 fn save_agent_preset(state: &mut State) {
     let edited = &state.agent_config_state.editor_state.edited_preset;
-    if let Some(agent_ind) =
-            state.agent_config_state.target_agent_ind {
-        let agent = &mut state.chat.agents[agent_ind];
-        agent.preset = Some(edited.clone()); // save modified preset to agent
-        // save modified agent to Sandbox
-        let result = update_agent_preset_snapshot(
-                &state.db_conn, agent.id, agent.preset.as_ref());
-        if result.is_err() {
-            state.error_msg =
-                Some(t!("error_saving_agent_config_to_sandbox").to_string());
-            state.is_modal_open = true;
+        let active_chat_id = state.active_chat_id.unwrap_or(0);
+
+    if let Some(chat) = state.open_chats.get_mut(&active_chat_id) {
+        if let Some(agent_ind) = state.agent_config_state.target_agent_ind {
+            let agent = &mut chat.agents[agent_ind];
+            agent.preset = Some(edited.clone());
+            let result = update_agent_preset_snapshot(&state.db_conn, agent.id, agent.preset.as_ref());
+
+            if result.is_err() {
+                state.error_msg =
+                    Some(t!("error_saving_agent_config_to_sandbox").to_string());
+                state.is_modal_open = true;
+            }
         }
     }
 }

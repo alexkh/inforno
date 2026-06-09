@@ -104,41 +104,84 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
         let mut behavior = crate::gui::panes::PaneBehavior {
             state,
             split_requests: Vec::new(),
+            close_requests: Vec::new(), // NEW
         };
 
         // 3. Render the layout
         tree.ui(&mut behavior, ui);
 
-        // 4. NEW: Process any requested splits
+        // --- NEW: Layout Auto-Fix Pass ---
+        // When a user drags the active tab out of a container to split the screen,
+        // the old container still remembers that tab as "active", even though it's gone!
+        // This sweep ensures every Tabs container points to a valid, existing child.
+        let mut needs_repaint = false;
+        for (_, tile) in tree.tiles.iter_mut() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) = tile {
+                if !tabs.children.is_empty() {
+                    // Check if the currently active tab actually exists inside this container
+                    let has_valid_active = tabs.active.is_some_and(|id| tabs.children.contains(&id));
+                    
+                    if !has_valid_active {
+                        // The active tab was dragged away. Reset focus to the first remaining tab.
+                        tabs.active = Some(tabs.children[0]);
+                        needs_repaint = true;
+                    }
+                }
+            }
+        }
+        
+        if needs_repaint {
+            ui.ctx().request_repaint();
+        }
+        // ---------------------------------
+
+        // 4. Process any requested splits safely
         for new_pane in behavior.split_requests {
             let new_tile = tree.tiles.insert_pane(new_pane);
+            let new_tabs = tree.tiles.insert_tab_tile(vec![new_tile]);
 
             if let Some(root_id) = tree.root {
-                // Wrap the entire current layout and the new pane in a horizontal split container!
-                let new_root = tree.tiles.insert_horizontal_tile(vec![root_id, new_tile]);
+                let new_root = tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs]);
                 tree.root = Some(new_root);
             } else {
-                tree.root = Some(new_tile);
+                tree.root = Some(new_tabs);
             }
         }
 
-        // 5. Put the updated tree back
+        // 5. Process any requested closes safely
+        for dead_id in behavior.close_requests {
+            if behavior.state.active_tile_id == Some(dead_id) {
+                behavior.state.active_tile_id = None;
+                behavior.state.active_chat_id = None; 
+            }
+
+            // This safely removes the tab and cleans up its parent containers
+            tree.remove_recursively(dead_id);
+        }
+
+        // 6. Put the updated tree back
         state.pane_tree = tree;
     });
 }
 
 // --- Message Rendering ---
 
-pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f32) {
+pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
     let msg_ui_map = &mut state.chat_msg_ui;
     let cache = &mut state.common_mark_cache;
-    let msg_pool = &state.chat.msg_pool;
 
     let project_root = &state.project_root;
     let active_merge = &mut state.active_merge;
 
     // We clone the Rc pointer here (very cheap)
     let math_cache = state.math_cache.clone();
+
+    // Fetch the specific chat being rendered
+    let Some(chat) = state.open_chats.get(&chat_id) else {
+        return; // Chat not loaded yet
+    };
+
+    let msg_pool = &chat.msg_pool;
 
     if msg_pool.is_empty() {
            egui::Frame::default()
@@ -156,7 +199,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, total_width: f
     let active_agent_ind = 0;
     let mut assistant_batch: Vec<i64> = Vec::new();
 
-    if let Some(agent) = state.chat.agents.get(active_agent_ind) {
+    if let Some(agent) = chat.agents.get(active_agent_ind) {
         for &msg_id in &agent.msg_ids {
             if let Some(msg) = msg_pool.get(&msg_id) {
                 match msg.msg_role {

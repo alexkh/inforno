@@ -259,7 +259,7 @@ impl From<ChatMsg> for ChatMessage {
                         full_content.push_str(&att.content);
                     } else if att.mime_type.starts_with("image/") {
                         // FIX: Convert the base64 string into ollama_rs's Image type
-                        images.push(Image::from_base64(&att.content)); 
+                        images.push(Image::from_base64(&att.content));
                     }
                 }
             }
@@ -295,13 +295,13 @@ impl From<ChatMsg> for Message {
             }
         }
 
-        Message {
-            name: item.name,
-            role: item.msg_role.into(),
-            content: full_content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-        }
+        // Use the library's constructor instead of a struct expression
+        let mut msg = Message::new(item.msg_role.into(), full_content);
+
+        // Since `name` is an optional public field, we can assign it after creation
+        msg.name = item.name;
+
+        msg
     }
 }
 

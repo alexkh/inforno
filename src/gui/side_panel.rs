@@ -23,16 +23,14 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         .strong()
                         .heading()
                     ).clicked() {
-                    state.chat = Chat::default();
+                    state.open_chats.insert(0, Chat::default());
+                    state.active_chat_id = Some(0);
+                    crate::gui::panes::open_chat_in_tab(state, 0);
                 }
 
-                if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(
-                    egui::RichText::new(t!("new_chat_copying_agents_tooltip"))
-                        .strong()
-                        .heading()
-                    )
-                    .clicked() {
-                    let mut template = state.chat.clone();
+                if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_tooltip")).strong().heading()).clicked() {
+                    let active_id = state.active_chat_id.unwrap_or(0);
+                    let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
                     template.id = 0;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
@@ -40,25 +38,23 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         agent.id = 0;
                         agent.msg_ids.clear();
                     }
-                    state.chat = template;
+                    state.open_chats.insert(0, template);
+                    state.active_chat_id = Some(0);
                 }
 
-                if ui.button(t!("new_chat_copying_prompts_btn")).on_hover_text(
-                    egui::RichText::new(t!("new_chat_copying_prompts_tooltip"))
-                        .strong()
-                        .heading()
-                    ).clicked() {
-                    extract_prompts(&state.chat, &mut state.bottom_panel_state, &state.project_root);
-                    state.chat = Chat::default();
+                if ui.button(t!("new_chat_copying_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_prompts_tooltip")).strong().heading()).clicked() {
+                    let active_id = state.active_chat_id.unwrap_or(0);
+                    if let Some(chat) = state.open_chats.get(&active_id) {
+                        extract_prompts(chat, &mut state.bottom_panel_state, &state.project_root);
+                    }
+                    state.open_chats.insert(0, Chat::default());
+                    state.active_chat_id = Some(0);
                 }
 
-                if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(
-                    egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip"))
-                        .strong()
-                        .heading()
-                    ).clicked() {
-                    extract_prompts(&state.chat, &mut state.bottom_panel_state, &state.project_root);
-                    let mut template = state.chat.clone();
+                if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip")).strong().heading()).clicked() {
+                    let active_id = state.active_chat_id.unwrap_or(0);
+                    let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
+                    extract_prompts(&template, &mut state.bottom_panel_state, &state.project_root);
                     template.id = 0;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
@@ -66,123 +62,108 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         agent.id = 0;
                         agent.msg_ids.clear();
                     }
-                    state.chat = template;
+                    state.open_chats.insert(0, template);
+                    state.active_chat_id = Some(0);
                 }
             });
 
             let mut to_delete_chat_id = 0;
+            let mut clicked_chat_id = None; // 1. Create a temporary holder
 
             // Iterate through chats
             for db_chat in &mut state.db_chats {
                 ui.horizontal_top(|ui| {
+                    ui.set_max_height(20.0);
                     ui.spacing_mut().item_spacing.x = 2.0;
 
-                    // --- WRENCH MENU ---
-                    // We use menu_button. The label is the wrench icon.
-                    ui.menu_button("🔧", |ui| {
-                        ui.set_min_width(80.0);
+                    let is_selected = state.active_chat_id == Some(db_chat.id);
 
-                        // 1. Rename Option
-                        if ui.button(egui::RichText::new(t!("rename_chat_btn")))
-                            .on_hover_text(egui::RichText::new(
-                                    t!("rename_chat_tooltip"))
-                            .heading())
-                        .clicked() {
-                            // Prepare state for renaming
-                            state.chat_to_rename = Some(db_chat.id);
-                            state.chat_rename_buffer = db_chat.title.clone();
-                            ui.close();
-                        }
+                    // ONE layout. Right-to-Left.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 
-                        ui.separator();
+                        // 1. The Wrench Menu (Rendered first, placed on far right)
+                        ui.menu_button("🔧", |ui| {
+                            ui.set_min_width(80.0);
 
-                        // Export to Markdown
-                        if ui.button(egui::RichText::new(t!("export_chat_btn")))
-                            .on_hover_text(egui::RichText::new(
-                                    t!("export_chat_tooltip"))
-                            .heading())
-                        .clicked() {
-                            match export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
-                                Ok(markdown) => {
-                                    let tx_clone = state.op_tx.clone();
-                                    let title = db_chat.title.clone();
-                                    let ctx_clone = ctx.clone();
-                                    tokio::spawn(async move {
-                                        let task = rfd::AsyncFileDialog::new()
-                                            .add_filter("Markdown", &["md"])
-                                            .set_file_name(format!("{}.md", title))
-                                            .save_file()
-                                            .await;
+                            if ui.button(egui::RichText::new(t!("rename_chat_btn"))).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
+                                state.chat_to_rename = Some(db_chat.id);
+                                state.chat_rename_buffer = db_chat.title.clone();
+                                ui.close();
+                            }
 
-                                        if let Some(handle) = task {
-                                            let path = handle.path().to_path_buf();
-                                            if let Err(e) = std::fs::write(&path, markdown) {
-                                                eprintln!("Failed to write markdown: {}", e);
+                            ui.separator();
+
+                            if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
+                                match export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
+                                    Ok(markdown) => {
+                                        let tx_clone = state.op_tx.clone();
+                                        let title = db_chat.title.clone();
+                                        let ctx_clone = ctx.clone();
+                                        tokio::spawn(async move {
+                                            let task = rfd::AsyncFileDialog::new().add_filter("Markdown", &["md"]).set_file_name(format!("{}.md", title)).save_file().await;
+                                            if let Some(handle) = task {
+                                                let path = handle.path().to_path_buf();
+                                                let _ = std::fs::write(&path, markdown);
                                             }
-                                        }
-                                        ctx_clone.request_repaint();
-                                    });
+                                            ctx_clone.request_repaint();
+                                        });
+                                    }
+                                    Err(_) => {}
                                 }
-                                Err(e) => {
-                                    eprintln!("Failed to export chat: {}", e);
-                                }
+                                ui.close();
                             }
-                            ui.close();
+
+                            ui.separator();
+
+                            if ui.button(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {
+                                if let Ok(_) = delete_chat(&state.db_conn, db_chat.id) {
+                                    if state.active_chat_id == Some(db_chat.id) {
+                                        state.open_chats.remove(&db_chat.id);
+                                        state.open_chats.insert(0, Chat::default());
+                                        state.active_chat_id = Some(0);
+                                    }
+                                    to_delete_chat_id = db_chat.id;
+                                }
+                                ui.close();
+                            }
+                        }).response.on_hover_text(t!("chat_options_tooltip"));
+
+                        // 2. The Pane Badges (Rendered second, placed to the left of the wrench)
+                        if let Some(locations) = state.chat_locations.get(&db_chat.id) {
+                            for loc in locations.iter().rev() {
+                                ui.label(
+                                    egui::RichText::new(loc)
+                                        .strong()
+                                        .background_color(ui.visuals().code_bg_color)
+                                ).on_hover_text(format!("Open in Pane {}", loc));
+                            }
                         }
 
-                        ui.separator();
+                        // 3. The Main Button (Consumes ALL remaining space on the left)
+                        let btn_response = clipped_button(ui, &db_chat.title, is_selected)
+                            .on_hover_text(
+                                egui::RichText::new(&db_chat.title).heading().strong()
+                            );
 
-                        // 2. Delete Option (Red)
-                        if ui.button(egui::RichText::new(t!("delete_chat_btn"))
-                            .color(ui.visuals().error_fg_color))
-                            .on_hover_text(egui::RichText::new(
-                                    t!("delete_chat_tooltip"))
-                            .heading()
-                            .color(ui.visuals().error_fg_color))
-                        .clicked() {
-                             // Try to delete the chat from the database:
-                             if let Ok(_) = delete_chat(&state.db_conn,
-                                    db_chat.id) {
-                                println!("Chat {} deleted", db_chat.id);
-                                if state.chat.id == db_chat.id {
-                                    state.chat = Chat::default();
-                                }
-                                to_delete_chat_id = db_chat.id;
-                            }
-                            ui.close();
+                        if btn_response.clicked() {
+                            clicked_chat_id = Some(db_chat.id);
                         }
-                    })
-                    // Add the tooltip to the wrench button itself
-                    .response.on_hover_text(t!("chat_options_tooltip"));
-
-                    // --- CHAT SELECTION BUTTON ---
-                    let is_selected = state.chat.id == db_chat.id;
-
-                    let btn_response = clipped_button(ui, &db_chat.title, is_selected)
-                        .on_hover_text(
-                            egui::RichText::new(&db_chat.title)
-                                .heading() // Makes it large
-                                .strong()  // Makes it bold
-                                .color(ui.visuals().strong_text_color()) // Ensures it's bright in both light/dark themes
-                        );
-
-                    if btn_response.clicked() {
-                        println!("You selected chat {} {}",
-                        db_chat.title, db_chat.id);
-                        println!("Fetching chat...");
-                        state.chat = fetch_chat(
-                                &state.db_conn, db_chat.id, &state.presets)
-                                .unwrap_or_else(|e| {
-                            eprintln!("Could not load chat from database: {}", e);
-                            Chat::default()
-                        });
-                    }
+                    });
                 });
             }
 
             // Cleanup deleted chats after the loop
             if to_delete_chat_id != 0 {
                 state.db_chats.retain(|c| c.id != to_delete_chat_id);
+            }
+
+            // 3. Handle the click outside the loop safely!
+            if let Some(chat_id) = clicked_chat_id {
+                if !state.open_chats.contains_key(&chat_id) {
+                    let loaded_chat = fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
+                    state.open_chats.insert(chat_id, loaded_chat);
+                }
+                crate::gui::panes::open_chat_in_tab(state, chat_id);
             }
         });
     });
@@ -374,8 +355,10 @@ fn save_rename(state: &mut State, chat_id: i64) {
         target_db_chat.title = state.chat_rename_buffer.clone();
 
         // Update current chat if it's the one open
-        if state.chat.id == chat_id {
-            state.chat.title = target_db_chat.title.clone();
+        if state.active_chat_id == Some(chat_id) {
+            if let Some(chat) = state.open_chats.get_mut(&chat_id) {
+                chat.title = target_db_chat.title.clone();
+            }
         }
 
         println!("Renamed chat {} to {}", chat_id, target_db_chat.title);
