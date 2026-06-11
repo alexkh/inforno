@@ -58,131 +58,135 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
             // 2. Handle the manual resize logic (returns updated height)
             panel_h = handle_panel_resize(ui, state, panel_h);
 
-            // 3. Main Horizontal Layout
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                let panel_height = ui.available_height();
+            // --- FIX: Grey out the panel if a chat is not actively focused ---
+            let is_chat_active = state.active_chat_id.is_some();
 
-                ui.vertical(|ui| {
-                    // Toggle Button (System prompt)
-                    if ui.add(egui::Button::new("💻").small().selected(
-                            state.bottom_panel_state.show_system_prompt))
-                            .on_hover_text(t!("toggle_system_prompt"))
-                            .clicked()
-                    {
-                        state.bottom_panel_state.show_system_prompt =
-                                !state.bottom_panel_state.show_system_prompt;
-                    }
+            ui.add_enabled_ui(is_chat_active, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                    let panel_height = ui.available_height();
 
-                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        // Toggle Button (System prompt)
+                        if ui.add(egui::Button::new("💻").small().selected(
+                                state.bottom_panel_state.show_system_prompt))
+                                .on_hover_text(t!("toggle_system_prompt"))
+                                .clicked()
+                        {
+                            state.bottom_panel_state.show_system_prompt =
+                                    !state.bottom_panel_state.show_system_prompt;
+                        }
 
-                    // Attachment Menu Button
-                    let attach_count = state.bottom_panel_state.pending_attachments.len();
-                    let attach_text = if attach_count > 0 {
-                        egui::RichText::new(format!("📎 {}", attach_count)).color(egui::Color32::GREEN)
-                    } else {
-                        egui::RichText::new("📎")
-                    };
+                        ui.add_space(4.0);
 
-                    ui.menu_button(attach_text, |ui| {
-                        if ui.button("Attach 'src/' (.rs)").clicked() {
-                            if let Some(root) = &state.project_root {
-                                let src_path = root.join("src");
+                        // Attachment Menu Button
+                        let attach_count = state.bottom_panel_state.pending_attachments.len();
+                        let attach_text = if attach_count > 0 {
+                            egui::RichText::new(format!("📎 {}", attach_count)).color(egui::Color32::GREEN)
+                        } else {
+                            egui::RichText::new("📎")
+                        };
 
-                                // Recursive helper to read .rs files into Attachments
-                                fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path) {
-                                    if let Ok(entries) = std::fs::read_dir(dir) {
-                                        for entry in entries.flatten() {
-                                            let path = entry.path();
-                                            if path.is_dir() {
-                                                read_dir_recursive(&path, out, root_path);
-                                            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-                                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                                    // Get relative path for cleaner display
-                                                    let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
-                                                    out.push(Attachment {
-                                                        filename: relative_path,
-                                                        mime_type: "text/rust".to_string(),
-                                                        content,
-                                                    });
+                        ui.menu_button(attach_text, |ui| {
+                            if ui.button("Attach 'src/' (.rs)").clicked() {
+                                if let Some(root) = &state.project_root {
+                                    let src_path = root.join("src");
+
+                                    // Recursive helper to read .rs files into Attachments
+                                    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path) {
+                                        if let Ok(entries) = std::fs::read_dir(dir) {
+                                            for entry in entries.flatten() {
+                                                let path = entry.path();
+                                                if path.is_dir() {
+                                                    read_dir_recursive(&path, out, root_path);
+                                                } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                                                    if let Ok(content) = std::fs::read_to_string(&path) {
+                                                        // Get relative path for cleaner display
+                                                        let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
+                                                        out.push(Attachment {
+                                                            filename: relative_path,
+                                                            mime_type: "text/rust".to_string(),
+                                                            content,
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+
+                                    read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
                                 }
-
-                                read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
-                            }
-                            ui.close();
-                        }
-
-                        // Generate and insert TOC
-                        if ui.button("Attach TOC of 'src/' (.rs)").clicked() {
-                            if let Some(root) = &state.project_root {
-                                let src_path = root.join("src");
-                                let mut toc = String::new();
-
-                                // Generate the markdown TOC
-                                generate_rust_toc(&src_path, root, &mut toc);
-
-                                if !toc.is_empty() {
-                                    // Instead of inserting into the prompt, we create an Attachment!
-                                    state.bottom_panel_state.pending_attachments.push(
-                                        crate::common::Attachment {
-                                            filename: "project_toc.md".to_string(),
-                                            mime_type: "text/markdown".to_string(),
-                                            content: toc,
-                                        }
-                                    );
-                                }
-                            }
-                            ui.close();
-                        }
-
-                        // Attach Multiple Files and or Folders
-                        if ui.button("📄 Attach Files/Folders...").clicked() {
-                            // 1. Reconfigure the dialog with the project root (if active)
-                            if let Some(root) = &state.project_root {
-                                state.file_dialog = egui_file_dialog::FileDialog::new()
-                                    .initial_directory(root.clone());
-                            } else {
-                                state.file_dialog = egui_file_dialog::FileDialog::new();
-                            }
-
-                            // 2. Trigger the multi-select dialog
-                            state.file_dialog.pick_multiple();
-                            ui.close();
-                        }
-
-                        if !state.bottom_panel_state.pending_attachments.is_empty() {
-                            if ui.button("Clear Attachments").clicked() {
-                                state.bottom_panel_state.pending_attachments.clear();
                                 ui.close();
                             }
-                        }
-                    }).response.on_hover_text("Attachments");
-                });
 
-                // --- Column 1: System Prompt ---
-                if state.bottom_panel_state.show_system_prompt {
-                    ui.allocate_ui(egui::vec2(col1_w, panel_height), |ui| {
-                        ui.set_width(col1_w);
-                        render_system_prompt_col(ui, state);
+                            // Generate and insert TOC
+                            if ui.button("Attach TOC of 'src/' (.rs)").clicked() {
+                                if let Some(root) = &state.project_root {
+                                    let src_path = root.join("src");
+                                    let mut toc = String::new();
+
+                                    // Generate the markdown TOC
+                                    generate_rust_toc(&src_path, root, &mut toc);
+
+                                    if !toc.is_empty() {
+                                        // Instead of inserting into the prompt, we create an Attachment!
+                                        state.bottom_panel_state.pending_attachments.push(
+                                            crate::common::Attachment {
+                                                filename: "project_toc.md".to_string(),
+                                                mime_type: "text/markdown".to_string(),
+                                                content: toc,
+                                            }
+                                        );
+                                    }
+                                }
+                                ui.close();
+                            }
+
+                            // Attach Multiple Files and or Folders
+                            if ui.button("📄 Attach Files/Folders...").clicked() {
+                                // 1. Reconfigure the dialog with the project root (if active)
+                                if let Some(root) = &state.project_root {
+                                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                                        .initial_directory(root.clone());
+                                } else {
+                                    state.file_dialog = egui_file_dialog::FileDialog::new();
+                                }
+
+                                // 2. Trigger the multi-select dialog
+                                state.file_dialog.pick_multiple();
+                                ui.close();
+                            }
+
+                            if !state.bottom_panel_state.pending_attachments.is_empty() {
+                                if ui.button("Clear Attachments").clicked() {
+                                    state.bottom_panel_state.pending_attachments.clear();
+                                    ui.close();
+                                }
+                            }
+                        }).response.on_hover_text("Attachments");
                     });
-                    // Splitter 1
-                    vertical_splitter(ui, &mut col1_w);
-                }
 
-                // --- Column 2: User Prompt ---
-                ui.allocate_ui(egui::vec2(col2_w, panel_height), |ui| {
-                    ui.set_width(col2_w);
-                    render_user_prompt_col(ui, state, panel_height);
+                    // --- Column 1: System Prompt ---
+                    if state.bottom_panel_state.show_system_prompt {
+                        ui.allocate_ui(egui::vec2(col1_w, panel_height), |ui| {
+                            ui.set_width(col1_w);
+                            render_system_prompt_col(ui, state);
+                        });
+                        // Splitter 1
+                        vertical_splitter(ui, &mut col1_w);
+                    }
+
+                    // --- Column 2: User Prompt ---
+                    ui.allocate_ui(egui::vec2(col2_w, panel_height), |ui| {
+                        ui.set_width(col2_w);
+                        render_user_prompt_col(ui, state, panel_height);
+                    });
+
+                    // Splitter 2
+                    vertical_splitter(ui, &mut col2_w);
+
+                    // --- Column 3: Actions (Send & Presets) ---
+                    render_actions_col(ui, state, &ctx);
                 });
-
-                // Splitter 2
-                vertical_splitter(ui, &mut col2_w);
-
-                // --- Column 3: Actions (Send & Presets) ---
-                render_actions_col(ui, state, &ctx);
             });
         });
 

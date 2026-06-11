@@ -80,8 +80,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         &mut self,
         tiles: &mut egui_tiles::Tiles<Pane>,
         tile_id: TileId,
-        button_response: egui::response::Response, // FIX: Exact parameter path
-    ) -> egui::response::Response { // FIX: Exact return path
+        button_response: egui::response::Response,
+    ) -> egui::response::Response {
         if button_response.clicked() {
             // Check if the click was on the rightmost edge of the tab (the ✖ icon)
             if let Some(pointer_pos) = button_response.interact_pointer_pos() {
@@ -92,22 +92,25 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 }
             }
 
-            // Normal click logic -> Focus the tab
+            // --- FIX: Strictly synchronize state when tab is clicked ---
             self.state.active_tile_id = Some(tile_id);
-            if let Some(egui_tiles::Tile::Pane(Pane::Chat { chat_id })) = tiles.get(tile_id) {
-                self.state.active_chat_id = Some(*chat_id);
+            match tiles.get(tile_id) {
+                Some(egui_tiles::Tile::Pane(Pane::Chat { chat_id })) => {
+                    self.state.active_chat_id = Some(*chat_id);
+                }
+                Some(egui_tiles::Tile::Pane(Pane::Editor { .. })) => {
+                    self.state.active_chat_id = None; // Disconnect bottom panel!
+                }
+                _ => {}
             }
-        } else if button_response.middle_clicked() {
-            // BONUS: Middle-clicking anywhere on the tab will also close it!
-            self.close_requests.push(tile_id);
+
+
         }
 
         button_response
     }
 
-    // FIX: Updated parameter to egui::ui::Ui
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
-        // Determine if this specific tile is the globally active one
         let is_active = self.state.active_tile_id == Some(tile_id);
 
         // Define our highlight border. If active, use the theme's hyperlink/accent color.
@@ -118,11 +121,24 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         } else {
             egui::Frame::default()
                 .stroke(egui::Stroke::NONE)
-                .inner_margin(2.0) // Keep layout stable when border disappears
+                .inner_margin(2.0)
         };
 
         frame.show(ui, |ui| {
-            // --- THE WATERMARK ---
+            // --- FIX: PASSIVE FOCUS DETECTION ---
+            // Detect clicks ANYWHERE in the tile's maximum rectangle and steal focus.
+            if ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.pointer.any_pressed()) {
+                self.state.active_tile_id = Some(tile_id);
+                match pane {
+                    Pane::Chat { chat_id } => {
+                        self.state.active_chat_id = Some(*chat_id);
+                    }
+                    Pane::Editor { .. } => {
+                        self.state.active_chat_id = None; // Disconnect bottom panel!
+                    }
+                }
+            }
+
             if let Some(label) = self.state.tile_labels.get(&tile_id).and_then(
                     |s| s.find(|c: char| c.is_ascii_digit()).map(|i| &s[..i])) {
                 let text_color = ui.visuals().text_color().linear_multiply(0.10);
@@ -139,12 +155,6 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
             ui.push_id(tile_id, |ui| {
                 match pane {
                     Pane::Chat { chat_id } => {
-                        // Detect clicks inside the body of the pane to steal focus
-                        if ui.ui_contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
-                            self.state.active_tile_id = Some(tile_id); // NEW
-                            self.state.active_chat_id = Some(*chat_id);
-                        }
-
                         egui::ScrollArea::vertical()
                             .id_salt(format!("pane_scroll_{:?}", tile_id))
                             .stick_to_bottom(true)
@@ -177,10 +187,6 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             });
                         });
                         ui.separator();
-
-                        if ui.ui_contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
-                            self.state.active_tile_id = Some(tile_id);
-                        }
 
                         egui::ScrollArea::vertical()
                             .id_salt(format!("editor_scroll_{:?}", tile_id))
@@ -380,6 +386,7 @@ pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content:
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
 
     state.active_tile_id = Some(new_tile_id); // Focus new tab globally
+    state.active_chat_id = None; // Ensure bottom panel disconnects when editor opens
 
     if let Some(ptid) = prev_active_id {
         let mut parent_is_tabs = None;
