@@ -38,16 +38,18 @@ impl Default for BottomPanelState {
     }
 }
 
-pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
+pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
+    let ctx = ui.ctx().clone();
+
     // 1. Extract state values we might modify locally
     let mut col1_w = state.bottom_panel_state.col1_width;
     let mut col2_w = state.bottom_panel_state.col2_width;
     let mut panel_h = state.bottom_panel_state.height;
 
-    egui::TopBottomPanel::bottom("chat_input_panel")
+    egui::Panel::bottom("chat_input_panel")
         .resizable(false) // We implement custom resizing below
         .exact_height(panel_h)
-        .show(ctx, |ui| {
+        .show_inside(ui, |ui| {
 
             if state.is_modal_open {
                 ui.disable();
@@ -180,7 +182,7 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                 vertical_splitter(ui, &mut col2_w);
 
                 // --- Column 3: Actions (Send & Presets) ---
-                render_actions_col(ui, state, ctx);
+                render_actions_col(ui, state, &ctx);
             });
         });
 
@@ -549,7 +551,9 @@ fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     let rt_handle = state.perma.rt.clone();
     let tx_base = state.chat_streaming_state.tx.clone();
 
-    if chat.id == 0 {
+    let old_chat_id = chat.id;
+
+    if chat.id <= 0 {
         chat.title = state.bottom_panel_state.prompt_edited
             .lines() // Split into lines
             .find(|line| !line.trim().is_empty()) // Grab the first non-empty line
@@ -569,6 +573,16 @@ fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     }
 
     let new_active_id = chat.id;
+
+    if old_chat_id <= 0 && old_chat_id != new_active_id {
+        for (_tile_id, tile) in state.pane_tree.tiles.iter_mut() {
+            if let egui_tiles::Tile::Pane(crate::gui::panes::Pane::Chat { chat_id }) = tile {
+                if *chat_id == old_chat_id {
+                    *chat_id = new_active_id;
+                }
+            }
+        }
+    }
 
     if state.bottom_panel_state.show_system_prompt {
         let sys_content = state.bottom_panel_state.system_prompt_edited.trim();

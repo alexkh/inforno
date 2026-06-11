@@ -1,8 +1,8 @@
 use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::State};
 use rust_i18n::t;
 
-pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
-    egui::SidePanel::new(egui::panel::Side::Left, "panel").show(ctx, |ui| {
+pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
+    egui::Panel::left("panel").show_inside(ui, |ui| {
         // Disable main UI if a modal/rename is open to force focus
         if state.is_modal_open || state.chat_to_rename.is_some() {
             ui.disable();
@@ -18,28 +18,36 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
             // --- NEW: Horizontal Layout for New Chat actions ---
             ui.horizontal(|ui| {
+                // Helper to find the next available temporary ID (0, -1, -2...)
+                let get_temp_id = |state: &State| {
+                    let mut id = 0;
+                    while state.open_chats.contains_key(&id) { id -= 1; }
+                    id
+                };
+
                 if ui.button(t!("new_chat_btn")).on_hover_text(
-                    egui::RichText::new(t!("new_chat_tooltip"))
-                        .strong()
-                        .heading()
+                    egui::RichText::new(t!("new_chat_tooltip")).strong().heading()
                     ).clicked() {
-                    state.open_chats.insert(0, Chat::default());
-                    state.active_chat_id = Some(0);
-                    crate::gui::panes::open_chat_in_tab(state, 0);
+                    let temp_id = get_temp_id(state);
+                    let mut new_chat = Chat::default();
+                    new_chat.id = temp_id;
+                    state.open_chats.insert(temp_id, new_chat);
+                    crate::gui::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_tooltip")).strong().heading()).clicked() {
                     let active_id = state.active_chat_id.unwrap_or(0);
+                    let temp_id = get_temp_id(state);
                     let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
-                    template.id = 0;
+                    template.id = temp_id;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
                     for agent in &mut template.agents {
                         agent.id = 0;
                         agent.msg_ids.clear();
                     }
-                    state.open_chats.insert(0, template);
-                    state.active_chat_id = Some(0);
+                    state.open_chats.insert(temp_id, template);
+                    crate::gui::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_prompts_tooltip")).strong().heading()).clicked() {
@@ -47,23 +55,27 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     if let Some(chat) = state.open_chats.get(&active_id) {
                         extract_prompts(chat, &mut state.bottom_panel_state, &state.project_root);
                     }
-                    state.open_chats.insert(0, Chat::default());
-                    state.active_chat_id = Some(0);
+                    let temp_id = get_temp_id(state);
+                    let mut new_chat = Chat::default();
+                    new_chat.id = temp_id;
+                    state.open_chats.insert(temp_id, new_chat);
+                    crate::gui::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip")).strong().heading()).clicked() {
                     let active_id = state.active_chat_id.unwrap_or(0);
+                    let temp_id = get_temp_id(state);
                     let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
                     extract_prompts(&template, &mut state.bottom_panel_state, &state.project_root);
-                    template.id = 0;
+                    template.id = temp_id;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
                     for agent in &mut template.agents {
                         agent.id = 0;
                         agent.msg_ids.clear();
                     }
-                    state.open_chats.insert(0, template);
-                    state.active_chat_id = Some(0);
+                    state.open_chats.insert(temp_id, template);
+                    crate::gui::panes::open_chat_in_tab(state, temp_id);
                 }
             });
 
@@ -98,7 +110,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                     Ok(markdown) => {
                                         let tx_clone = state.op_tx.clone();
                                         let title = db_chat.title.clone();
-                                        let ctx_clone = ctx.clone();
+                                        let ctx_clone = ui.ctx().clone();
                                         tokio::spawn(async move {
                                             let task = rfd::AsyncFileDialog::new().add_filter("Markdown", &["md"]).set_file_name(format!("{}.md", title)).save_file().await;
                                             if let Some(handle) = task {
@@ -170,7 +182,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
     // --- RENAME POPUP WINDOW ---
     // This draws a small window on top of everything if a chat is being renamed
-    render_rename_window(ctx, state);
+    render_rename_window(ui, state);
 }
 
 // Helper function to extract prompts and re-attach files
@@ -295,7 +307,7 @@ fn clipped_button(ui: &mut egui::Ui, text: &str, is_selected: bool)
 }
 
 // Helper function to handle the popup logic
-fn render_rename_window(ctx: &egui::Context, state: &mut State) {
+fn render_rename_window(ui: &mut egui::Ui, state: &mut State) {
     if let Some(chat_id) = state.chat_to_rename.clone() {
         let mut open = true;
 
@@ -305,7 +317,7 @@ fn render_rename_window(ctx: &egui::Context, state: &mut State) {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
 
                 ui.label("Enter new name:");
 

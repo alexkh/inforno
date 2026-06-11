@@ -87,8 +87,8 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
 // --- Main Entry Point ---
 
-pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
-    egui::CentralPanel::default().show(ctx, |ui| {
+pub fn ui_chat(ui: &mut egui::Ui, state: &mut crate::gui::State) {
+    egui::CentralPanel::default().show_inside(ui, |ui| {
         if state.is_modal_open {
             ui.disable();
         }
@@ -120,7 +120,7 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
                 if !tabs.children.is_empty() {
                     // Check if the currently active tab actually exists inside this container
                     let has_valid_active = tabs.active.is_some_and(|id| tabs.children.contains(&id));
-                    
+
                     if !has_valid_active {
                         // The active tab was dragged away. Reset focus to the first remaining tab.
                         tabs.active = Some(tabs.children[0]);
@@ -129,7 +129,7 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
                 }
             }
         }
-        
+
         if needs_repaint {
             ui.ctx().request_repaint();
         }
@@ -152,7 +152,7 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut crate::gui::State) {
         for dead_id in behavior.close_requests {
             if behavior.state.active_tile_id == Some(dead_id) {
                 behavior.state.active_tile_id = None;
-                behavior.state.active_chat_id = None; 
+                behavior.state.active_chat_id = None;
             }
 
             // This safely removes the tab and cleans up its parent containers
@@ -512,7 +512,7 @@ fn render_msg_content(
                     let local_math_cache = math_cache.clone();
 
                     // Wrap the viewer in a unique egui ID context
-ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
+                    ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
                         CommonMarkViewer::new()
                             .max_image_width(Some(max_image_width))
                             .render_math_fn(Some(&mut move |ui, math, is_inline| {

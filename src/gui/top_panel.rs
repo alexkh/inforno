@@ -4,8 +4,9 @@ use std::path;
 
 use crate::{common::{FileOp, FileOpMsg, err_color}, db::reset_sandbox_db, gui::State, mybtn};
 
-pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
-    egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    egui::Panel::top("top_panel").show_inside(ui, |ui| {
         if state.is_modal_open {
             ui.disable();
         }

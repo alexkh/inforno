@@ -45,7 +45,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     }
 
     // Override the tile title to inject the "A1", "B2" label
-    fn tab_title_for_tile(&mut self, tiles: &egui_tiles::Tiles<Pane>, tile_id: TileId) -> egui::WidgetText {
+    // FIX: Updated return type to egui::widget_text::WidgetText
+    fn tab_title_for_tile(&mut self, tiles: &egui_tiles::Tiles<Pane>, tile_id: TileId) -> egui::widget_text::WidgetText {
         let label = self.state.tile_labels.get(&tile_id).cloned().unwrap_or_default();
         let title = if let Some(egui_tiles::Tile::Pane(pane)) = tiles.get(tile_id) {
             self.tab_title_for_pane(pane).text().to_string()
@@ -55,7 +56,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         format!("{}  {}", label, title).into()
     }
 
-    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+    // FIX: Updated return type to egui::widget_text::WidgetText
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::widget_text::WidgetText {
         match pane {
             Pane::Chat { chat_id } => {
                 if let Some(chat) = self.state.open_chats.get(chat_id) {
@@ -76,10 +78,10 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     // Intercept clicks on the tab header
     fn on_tab_button(
         &mut self,
-        tiles: &egui_tiles::Tiles<Pane>,
+        tiles: &mut egui_tiles::Tiles<Pane>,
         tile_id: TileId,
-        button_response: egui::Response,
-    ) -> egui::Response {
+        button_response: egui::response::Response, // FIX: Exact parameter path
+    ) -> egui::response::Response { // FIX: Exact return path
         if button_response.clicked() {
             // Check if the click was on the rightmost edge of the tab (the ✖ icon)
             if let Some(pointer_pos) = button_response.interact_pointer_pos() {
@@ -103,6 +105,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         button_response
     }
 
+    // FIX: Updated parameter to egui::ui::Ui
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         // Determine if this specific tile is the globally active one
         let is_active = self.state.active_tile_id == Some(tile_id);
@@ -375,7 +378,7 @@ pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content:
 
     let new_pane = Pane::Editor { path, content };
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-    
+
     state.active_tile_id = Some(new_tile_id); // Focus new tab globally
 
     if let Some(ptid) = prev_active_id {
@@ -420,7 +423,7 @@ pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content:
             if !is_tabs {
                 let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
                 state.pane_tree.root = Some(new_tabs_id);
-                
+
                 // FIXED: Tell the brand new Tabs container to focus our new tile
                 if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
                     tabs.set_active(new_tile_id);
