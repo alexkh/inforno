@@ -39,6 +39,7 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
     Ok(response)
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn do_openr_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,

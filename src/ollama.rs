@@ -32,6 +32,7 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
     ollama.send_chat_messages(request).await
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn do_ollama_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,

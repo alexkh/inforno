@@ -369,6 +369,7 @@ impl eframe::App for MyApp {
         eframe::set_value(storage, "app_language", &self.perma.app_language);
     }
 
+    #[tracing::instrument(skip_all, name = "MyApp::ui")]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // --- SYNC GLOBAL COLORS ---

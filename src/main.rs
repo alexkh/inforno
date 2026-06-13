@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use eframe::wgpu::PresentMode;
+use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use clap::Parser;
 use egui::ViewportBuilder;
@@ -33,6 +36,11 @@ struct Args {
 }
 
 fn main() -> eframe::Result {
+    // Initialize Tracy profiling
+    tracing_subscriber::registry()
+        .with(tracing_tracy::TracyLayer::default())
+        .init();
+
     let args = Args::parse();
 
     // create the tokio runtime
@@ -42,7 +50,7 @@ fn main() -> eframe::Result {
     // this variable must live as long as the app runs!
     let _enter = rt.enter();
 
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: ViewportBuilder {
             icon: Some(std::sync::Arc::new(egui::IconData {
                 rgba: image::load_from_memory(
@@ -57,6 +65,8 @@ fn main() -> eframe::Result {
         },
         ..Default::default()
     };
+
+    native_options.wgpu_options.present_mode = PresentMode::AutoVsync;
 
     let rt_handle = rt.handle().clone();
 

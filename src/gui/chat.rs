@@ -87,6 +87,7 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
 // --- Main Entry Point ---
 
+#[tracing::instrument(skip_all)]
 pub fn ui_chat(ui: &mut egui::Ui, state: &mut crate::gui::State) {
     egui::CentralPanel::default().show_inside(ui, |ui| {
         if state.is_modal_open {
@@ -166,6 +167,7 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut crate::gui::State) {
 
 // --- Message Rendering ---
 
+#[tracing::instrument(skip_all)]
 pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
     let msg_ui_map = &mut state.chat_msg_ui;
     let cache = &mut state.common_mark_cache;
