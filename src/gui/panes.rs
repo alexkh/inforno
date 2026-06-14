@@ -11,17 +11,22 @@ pub enum Pane {
     // We can easily add MergeTool here later!
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum SplitAction {
+    Right,
+    Down,
+}
+
 /// This is the bridge between egui_tiles and your application state.
 pub struct PaneBehavior<'a> {
     pub state: &'a mut crate::gui::State,
     // A queue to hold our split requests until the UI is done drawing
-    pub split_requests: Vec<Pane>,
+    pub split_requests: Vec<(Pane, SplitAction)>,
     // A queue to hold tabs that need to be closed
     pub close_requests: Vec<egui_tiles::TileId>,
 }
 
 impl<'a> Behavior<Pane> for PaneBehavior<'a> {
-    // Places buttons on the far right of the tab bar row
     fn top_bar_right_ui(
         &mut self,
         tiles: &egui_tiles::Tiles<Pane>,
@@ -32,20 +37,19 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     ) {
         // Get the currently active tab in this container
         if let Some(active_id) = tabs.active {
-            if let Some(egui_tiles::Tile::Pane(Pane::Chat { chat_id })) = tiles.get(active_id) {
-                // Draw the split button
-                if ui.button("◫").on_hover_text("Split this chat into a new pane").clicked() {
-                    self.split_requests.push(Pane::Chat { chat_id: *chat_id });
+            // Grab the active pane, clone it, and attach the split direction.
+            if let Some(egui_tiles::Tile::Pane(active_pane)) = tiles.get(active_id) {
+                if ui.button("◫").on_hover_text("Split Right").clicked() {
+                    self.split_requests.push((active_pane.clone(), SplitAction::Right));
+                }
+                if ui.button("⊟").on_hover_text("Split Down").clicked() {
+                    self.split_requests.push((active_pane.clone(), SplitAction::Down));
                 }
             }
-
-            // Note: If you later add a split option for the Editor pane,
-            // you can easily add an `else if let Some(Tile::Pane(Pane::Editor { path }))` block here!
         }
     }
 
     // Override the tile title to inject the "A1", "B2" label
-    // FIX: Updated return type to egui::widget_text::WidgetText
     fn tab_title_for_tile(&mut self, tiles: &egui_tiles::Tiles<Pane>, tile_id: TileId) -> egui::widget_text::WidgetText {
         let label = self.state.tile_labels.get(&tile_id).cloned().unwrap_or_default();
         let title = if let Some(egui_tiles::Tile::Pane(pane)) = tiles.get(tile_id) {
@@ -175,9 +179,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             ui.label(format!("Editing: {}", path.file_name().unwrap_or_default().to_string_lossy()));
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("◫ Split").clicked() {
-                                    self.split_requests.push(Pane::Editor { path: path.clone(), content: content.clone() });
-                                }
+                                // 2. Removed the Split buttons from here!
+                                // Now we only keep pane-specific actions like Save.
                                 if ui.button("💾 Save").clicked() {
                                     if let Err(e) = std::fs::write(&path, &*content) {
                                         self.state.error_msg = Some(format!("Failed to save file: {}", e));
@@ -188,17 +191,17 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                         });
                         ui.separator();
 
-                        egui::ScrollArea::vertical()
-                            .id_salt(format!("editor_scroll_{:?}", tile_id))
-                            .show(ui, |ui| {
-                                // Render your custom text editor!
-                                crate::bulat::editor::CodeEditor::default()
-                                    .id_source(format!("editor_code_{:?}", tile_id))
-                                    .with_theme(crate::bulat::editor::ColorTheme::SV)
-                                    .with_syntax(crate::bulat::editor::Syntax::rust())
-                                    .vscroll(false) // Let the outer scroll area handle scrolling natively
-                                    .show(ui, content);
-                            });
+                        let available_width = ui.available_width();
+
+                        // No more outer scroll area! Let the editor fill the space.
+                        crate::bulat::editor::CodeEditor::default()
+                            .id_source(format!("editor_code_{:?}", tile_id))
+                            .with_theme(crate::bulat::editor::ColorTheme::SV)
+                            .with_syntax(crate::bulat::editor::Syntax::rust())
+                            .vscroll(true)
+                            .v_auto_shrink(false)
+                            .desired_width(available_width)
+                            .show(ui, content);
                     }
                 }
             });

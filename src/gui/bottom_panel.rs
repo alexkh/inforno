@@ -1,10 +1,10 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::atomic::Ordering;
 
 use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use crate::{common::{Agent, Attachment, ChatMsg, ChatQue, ChatRouter, ChatStreamEvent, FileOp, FileOpMsg, MsgRole, PresetSelection, Presets, cloud_color, local_color, router_color, run_chat_stream_router, text_color}, db::{fetch_chat, mk_chat, mk_msg, mod_agent_msgs, mod_agent_preset, update_agent_preset_snapshot}, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
+use crate::{common::{Agent, Attachment, PresetSelection, Presets, router_color, text_color}, db::mod_agent_preset, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
 
 use crate::bulat::editor::{Token, Syntax, TokenType};
 
@@ -378,7 +378,7 @@ fn render_agent(
     // wrench menu here 🔧
     if ui.button("🔧").on_hover_text("Modify this preset").clicked() {
         // A. Get the current preset data
-        if let Some(current_preset) = presets.get(agent.preset_selection.id) {
+        if let Some(_current_preset) = presets.get(agent.preset_selection.id) {
             if let Some(agent_preset) = agent.preset.as_ref() {
 
                 // B. Initialize the Agent Config Window State
@@ -647,7 +647,7 @@ fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     state.chat_streaming_state.reasoning_buffers.clear();
     state.chat_streaming_state.reasoning_buffers.resize_with(agent_count, || String::new());
 
-    for (index, agent) in chat.agents.iter_mut().enumerate() {
+    for (_index, agent) in chat.agents.iter_mut().enumerate() {
         agent.msg_ids.push(usr_msg_id);
         let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
     }
@@ -773,7 +773,7 @@ fn vertical_splitter(ui: &mut egui::Ui, width: &mut f32) {
 /// into a structured Markdown Table of Contents with line numbers.
 fn generate_rust_toc(dir: &std::path::Path, root_path: &std::path::Path, toc: &mut String) {
     if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut syntax = Syntax::rust();
+        let syntax = Syntax::rust();
         let mut tokenizer = Token::default();
 
         for entry in entries.flatten() {

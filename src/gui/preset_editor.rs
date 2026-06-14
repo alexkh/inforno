@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use egui::{Align, Key, Layout, Modifiers, RichText, Ui, Vec2b};
+use egui::{Align, Layout, RichText, Ui, Vec2b};
 use crate::gui::autocomplete::AutoCompleteTextEdit;
 use ollama_rs::Ollama;
 use rand::RngExt;
@@ -14,8 +14,7 @@ use crate::{
     },
     db::{
         cache::{
-            clear_ollama_cache, get_ollama_model_info, get_openr_model_info,
-            save_ollama_model,
+            get_ollama_model_info, get_openr_model_info,
         },
         delete_preset, save_preset,
     },
@@ -165,7 +164,7 @@ fn save_active_preset(
     }
 }
 
-fn handle_global_shortcuts(ui: &mut egui::Ui, state: &mut State) {
+fn handle_global_shortcuts(_ui: &mut egui::Ui, _state: &mut State) {
 }
 
 // --- View Mode ---

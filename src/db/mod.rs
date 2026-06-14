@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs, path::PathBuf, sync::OnceLock};
-use regex::{Regex, Captures};
-use rusqlite::{Connection, params, Result, ffi};
+use regex::Regex;
+use rusqlite::{Connection, params, Result};
 use directories::ProjectDirs;
 use crate::common::{Agent, Chat, ChatMsg, DbChat, MyError, Preset, PresetSelection, Presets};
 

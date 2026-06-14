@@ -108,7 +108,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
                                 match export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
                                     Ok(markdown) => {
-                                        let tx_clone = state.op_tx.clone();
+                                        let _tx_clone = state.op_tx.clone();
                                         let title = db_chat.title.clone();
                                         let ctx_clone = ui.ctx().clone();
                                         tokio::spawn(async move {

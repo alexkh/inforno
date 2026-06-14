@@ -1,7 +1,7 @@
 use egui::{Vec2b, Window};
 use rust_i18n::t;
-use crate::common::{ChatRouter, ModelOptions, load_presets};
-use crate::db::{save_preset, update_agent_preset_snapshot};
+use crate::common::ModelOptions;
+use crate::db::update_agent_preset_snapshot;
 use crate::gui::State;
 // Import the reusable components
 use crate::gui::preset_editor::{

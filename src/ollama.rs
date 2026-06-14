@@ -1,4 +1,4 @@
-use ollama_rs::{Ollama, error::OllamaError, generation::{chat::{ChatMessageResponse, request::ChatMessageRequest}, completion::{GenerationResponse, request::GenerationRequest}}, models::ModelOptions};
+use ollama_rs::{Ollama, error::OllamaError, generation::chat::{ChatMessageResponse, request::ChatMessageRequest}, models::ModelOptions};
 
 use crate::common::{ChatQue, ChatStreamEvent, DbOllamaModel};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::Sender};

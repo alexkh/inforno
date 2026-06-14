@@ -26,7 +26,7 @@ enum ContentChunk<'a> {
     },
 }
 
-fn parse_chunks(text: &str) -> Vec<ContentChunk> {
+fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
     static RE_RUST_BLOCK: OnceLock<Regex> = OnceLock::new();
     static RE_FILEPATH: OnceLock<Regex> = OnceLock::new();
 
@@ -138,12 +138,20 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         // ---------------------------------
 
         // 4. Process any requested splits safely
-        for new_pane in behavior.split_requests {
+        for (new_pane, direction) in behavior.split_requests {
             let new_tile = tree.tiles.insert_pane(new_pane);
             let new_tabs = tree.tiles.insert_tab_tile(vec![new_tile]);
 
             if let Some(root_id) = tree.root {
-                let new_root = tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs]);
+                // Determine whether to split horizontally or vertically
+                let new_root = match direction {
+                    crate::gui::panes::SplitAction::Right => {
+                        tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs])
+                    }
+                    crate::gui::panes::SplitAction::Down => {
+                        tree.tiles.insert_vertical_tile(vec![root_id, new_tabs])
+                    }
+                };
                 tree.root = Some(new_root);
             } else {
                 tree.root = Some(new_tabs);
@@ -619,6 +627,7 @@ fn render_msg_content(
                         .with_theme(ColorTheme::SV)
                         .with_syntax(Syntax::rust())
                         .with_numlines(false)
+                        .with_rows(num_lines)
                         // Disable internal scroll so the parent chat window handles scrolling natively
                         .vscroll(false)
                         .show(ui, &mut code_buffer);

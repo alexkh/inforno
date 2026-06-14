@@ -1,6 +1,5 @@
 use egui::{Color32, RichText};
 use rust_i18n::t;
-use std::path;
 
 use crate::{common::{FileOp, FileOpMsg, err_color}, db::reset_sandbox_db, gui::State, mybtn};
 
@@ -236,7 +235,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.menu_button("📝 Edit", |ui| {
                 if ui.button("📂 Open File...").clicked() {
-                    ui.close_menu();
+                    ui.close();
                     let tx_clone = state.op_tx.clone();
                     let ctx_clone = ctx.clone();
 

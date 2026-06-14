@@ -49,7 +49,7 @@ fn main() -> eframe::Result {
     // this variable must live as long as the app runs!
     let _enter = rt.enter();
 
-    let mut native_options = eframe::NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: ViewportBuilder {
             icon: Some(std::sync::Arc::new(egui::IconData {
                 rgba: image::load_from_memory(

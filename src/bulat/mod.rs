@@ -1,6 +1,6 @@
-use eframe::{egui, NativeOptions};
+use eframe::egui;
 use egui::{Color32, Pos2, Rect, Vec2};
-use std::{collections::BTreeMap, fs};
+use std::collections::BTreeMap;
 use similar::{Algorithm, TextDiff, DiffOp};
 pub mod editor;
 use editor::{CodeEditor, ColorTheme, Syntax};

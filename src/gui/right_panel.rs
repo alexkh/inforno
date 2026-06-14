@@ -1,6 +1,4 @@
-use egui::Ui;
 use std::fs;
-use rust_i18n::t;
 use crate::gui::State;
 
 pub fn ui_right_panel(ctx: &egui::Context, state: &mut State) {

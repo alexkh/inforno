@@ -9,9 +9,9 @@ use eframe::egui::{self};
 use egui_commonmark::CommonMarkCache;
 use keyring::Entry;
 use rusqlite::Connection;
-use tokio::runtime::{Handle, Runtime};
-use crate::common::{self, ApiKey, ChatMsg, ChatMsgUi, ChatResp, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, MsgRole, OllamaDownloading, Preset, PresetSelection, Presets, THEME_COLORS, load_presets};
-use crate::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, is_table_empty, mk_msg, mod_agent_msgs, mod_msg_content_reasoning};
+use tokio::runtime::Handle;
+use crate::common::{self, ApiKey, ChatMsgUi, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, OllamaDownloading, Presets, THEME_COLORS, load_presets};
+use crate::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, is_table_empty, mod_msg_content_reasoning};
 use crate::db::cache::{get_cache_db_conn, get_ollama_model_installed, get_ollama_model_names, get_openr_model_names, populate_ollama_installed, populate_openr_model};
 use crate::gui::agent_config::{AgentConfigState, ui_agent_config};
 use crate::gui::bottom_panel::{BottomPanelState, ui_bottom_panel};
@@ -35,7 +35,6 @@ mod chat;
 mod agent_config;
 pub mod math_render;
 mod autocomplete;
-pub use autocomplete::AutoCompleteTextEdit;
 mod panes;
 
 pub struct MyAppPermanent {

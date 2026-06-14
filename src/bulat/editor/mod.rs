@@ -83,7 +83,6 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 pub use syntax::{Syntax, TokenType};
 pub use themes::ColorTheme;
-pub use themes::DEFAULT_THEMES;
 
 pub use completer::Completer;
 
@@ -123,6 +122,7 @@ pub struct CodeEditor {
     // NEW: Optional external scroll control
     vscroll_offset: Option<f32>,
     hscroll_offset: Option<f32>,
+	auto_shrink_v: bool,
 }
 
 impl Hash for CodeEditor {
@@ -154,14 +154,24 @@ impl Default for CodeEditor {
             line_numbers: None,
             vscroll_offset: None,
             hscroll_offset: None,
+            auto_shrink_v: true,
         }
     }
 }
 
 impl CodeEditor {
+    // 1. Here is your missing id_source method restored!
     pub fn id_source(self, id_source: impl Into<String>) -> Self {
         CodeEditor {
             id: id_source.into(),
+            ..self
+        }
+    }
+
+    // 2. Here is the clean v_auto_shrink method
+    pub fn v_auto_shrink(self, auto_shrink_v: bool) -> Self {
+        CodeEditor {
+            auto_shrink_v,
             ..self
         }
     }
@@ -313,8 +323,7 @@ impl CodeEditor {
             text.lines().count() + 1
         } else {
             text.lines().count()
-        }
-        .max(self.rows) as isize;
+        } as isize;
 
         let exact_height = total as f32 * self.row_height.unwrap_or(16.0);
 
@@ -419,20 +428,26 @@ impl CodeEditor {
         let mut max_hscroll_offset = 0.0;
 
         let mut code_editor = |ui: &mut egui::Ui| {
-            ui.horizontal_top(|h| {
-                self.theme.modify_style(h, self.fontsize);
-                if self.numlines {
-                    self.numlines_show(h, text.as_str());
+            // 4. Wrap the horizontal_top inside a unified background frame
+            egui::Frame::new().fill(self.theme.bg()).inner_margin(0.0).show(ui, |ui| {
+                if !self.auto_shrink_v {
+                    ui.set_min_height(ui.available_height()); // Forces the frame to fill the scroll area
                 }
 
-                let mut h_scroll = egui::ScrollArea::horizontal()
-                    .id_salt(format!("{}_inner_scroll", self.id));
+                ui.horizontal_top(|h| {
+                    self.theme.modify_style(h, self.fontsize);
+                    if self.numlines {
+                        self.numlines_show(h, text.as_str());
+                    }
 
-                if let Some(offset) = self.hscroll_offset {
-                    h_scroll = h_scroll.horizontal_scroll_offset(offset);
-                }
+                    let mut h_scroll = egui::ScrollArea::horizontal()
+                        .id_salt(format!("{}_inner_scroll", self.id));
 
-                let h_scroll_output = h_scroll.show(h, |ui| {
+                    if let Some(offset) = self.hscroll_offset {
+                        h_scroll = h_scroll.horizontal_scroll_offset(offset);
+                    }
+
+                    let h_scroll_output = h_scroll.show(h, |ui| {
 
                         // *** FIX START: Wrapped content in a Frame to apply theme background ***
                         egui::Frame::new()
@@ -440,78 +455,75 @@ impl CodeEditor {
                             .inner_margin(0.0) // No margin ensures text aligns with line numbers
                             .show(ui, |ui: &mut egui::Ui| {
 
-                        // --- 1. DRAW BACKGROUNDS ---
-                        if !self.diff_lines.is_empty() {
-                            let available_width = 100_000.0;
-                            let start_offset = ui.cursor().min;
-                            let mut shapes = Vec::new();
+                                // --- 1. DRAW BACKGROUNDS ---
+                                if !self.diff_lines.is_empty() {
+                                    let available_width = 100_000.0;
+                                    let start_offset = ui.cursor().min;
+                                    let mut shapes = Vec::new();
 
-                            for (line_idx, color) in &self.diff_lines {
-                                let top_y = start_offset.y + (*line_idx as f32 * row_height);
-                                let bottom_y = top_y + row_height;
+                                    for (line_idx, color) in &self.diff_lines {
+                                        let top_y = start_offset.y + (*line_idx as f32 * row_height);
+                                        let bottom_y = top_y + row_height;
 
-                                let rect = Rect::from_min_size(
-                                    egui::Pos2::new(start_offset.x, top_y),
-                                    Vec2::new(available_width, row_height)
-                                );
+                                        let rect = Rect::from_min_size(
+                                            egui::Pos2::new(start_offset.x, top_y),
+                                            Vec2::new(available_width, row_height)
+                                        );
 
-                                // 1. Draw the background fill
-                                shapes.push(Shape::rect_filled(rect, 0.0, *color));
+                                        // 1. Draw the background fill
+                                        shapes.push(Shape::rect_filled(rect, 0.0, *color));
 
-                                // 2. Create a border color that pops!
-                                // We do this by safely adding brightness to the existing RGB values.
-                                if *color != Color32::from_rgb(25, 25, 25) {
-                                    let edge_color = egui::Color32::from_rgb(
-                                        color.r().saturating_add(30),
-                                        color.g().saturating_add(30),
-                                        color.b().saturating_add(30),
-                                    );
-                                    let stroke = egui::Stroke::new(1.0, edge_color);
+                                        // 2. Create a border color that pops!
+                                        if *color != Color32::from_rgb(25, 25, 25) {
+                                            let edge_color = egui::Color32::from_rgb(
+                                                color.r().saturating_add(30),
+                                                color.g().saturating_add(30),
+                                                color.b().saturating_add(30),
+                                            );
+                                            let stroke = egui::Stroke::new(1.0, edge_color);
 
-                                    // 3. Draw Top Edge (only if the line above is NOT part of this diff block)
-                                    if !self.diff_lines.contains_key(&line_idx.saturating_sub(1)) {
-                                        shapes.push(egui::Shape::hline(start_offset.x..=available_width, top_y, stroke));
+                                            // 3. Draw Top Edge
+                                            if !self.diff_lines.contains_key(&line_idx.saturating_sub(1)) {
+                                                shapes.push(egui::Shape::hline(start_offset.x..=available_width, top_y, stroke));
+                                            }
+
+                                            // 4. Draw Bottom Edge
+                                            if !self.diff_lines.contains_key(&(line_idx + 1)) {
+                                                shapes.push(egui::Shape::hline(start_offset.x..=available_width, bottom_y - 0.5, stroke));
+                                            }
+                                        }
                                     }
-
-                                    // 4. Draw Bottom Edge (only if the line below is NOT part of this diff block)
-                                    if !self.diff_lines.contains_key(&(line_idx + 1)) {
-                                        // We subtract 0.5 from bottom_y to ensure the stroke stays perfectly inside the row bounds
-                                        shapes.push(egui::Shape::hline(start_offset.x..=available_width, bottom_y - 0.5, stroke));
-                                    }
+                                    ui.painter().add(Shape::Vec(shapes));
                                 }
-                            }
-                            ui.painter().add(Shape::Vec(shapes));
-                        }
 
-                        // --- 2. SETUP LAYOUTER ---
-                        let mut layouter =
-                            |ui: &egui::Ui, text_buffer: &dyn TextBuffer, _wrap_width: f32| {
-                                let mut layout_job = highlight(ui.ctx(), self, text_buffer.as_str());
+                                // --- 2. SETUP LAYOUTER ---
+                                let mut layouter =
+                                    |ui: &egui::Ui, text_buffer: &dyn TextBuffer, _wrap_width: f32| {
+                                        let mut layout_job = highlight(ui.ctx(), self, text_buffer.as_str());
+                                        // Enforce the cached height to ensure stability
+                                        layout_job.first_row_min_height = row_height;
+                                        ui.fonts_mut(|f| f.layout_job(layout_job))
+                                    };
 
-                                // Enforce the cached height to ensure stability
-                                layout_job.first_row_min_height = row_height;
-
-                                ui.fonts_mut(|f| f.layout_job(layout_job))
-                            };
-
-                        // --- 3. DRAW TEXT ---
-                        let output = egui::TextEdit::multiline(text)
-                            .id_source(&self.id)
-                            .lock_focus(true)
-                            .desired_rows(self.rows)
-                            .frame(false)
-                            .desired_width(self.desired_width)
-                            .layouter(&mut layouter)
-                            .show(ui);
-                        text_edit_output = Some(output);
+                                // --- 3. DRAW TEXT ---
+                                let output = egui::TextEdit::multiline(text)
+                                    .id_source(&self.id)
+                                    .lock_focus(true)
+                                    .desired_rows(self.rows)
+                                    .frame(false)
+                                    .desired_width(self.desired_width)
+                                    .layouter(&mut layouter)
+                                    .show(ui);
+                                text_edit_output = Some(output);
+                            });
                     });
-                });
 
-                current_hscroll_offset = h_scroll_output.state.offset.x;
-                max_hscroll_offset = (h_scroll_output.content_size.x -
-                        h_scroll_output.inner_rect.width()).max(0.0);
-            });
-        };
+                    current_hscroll_offset = h_scroll_output.state.offset.x;
+                    max_hscroll_offset = (h_scroll_output.content_size.x -
+                            h_scroll_output.inner_rect.width()).max(0.0);
+                });
+            }); // Closes Frame::show
+        }; // Closes code_editor
 
         // Scroll Logic
         let current_scroll_offset;
@@ -519,7 +531,8 @@ impl CodeEditor {
         if vscroll {
             let mut scroll_area = egui::ScrollArea::vertical()
                 .id_salt(format!("{}_outer_scroll", id_source))
-                .stick_to_bottom(stick_to_bottom);
+                .stick_to_bottom(stick_to_bottom)
+				.auto_shrink([self.desired_width != f32::INFINITY, self.auto_shrink_v]);
 
             // Apply external scroll if provided
             if let Some(offset) = self.vscroll_offset {
