@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use eframe::wgpu::PresentMode;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -66,7 +65,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    native_options.wgpu_options.present_mode = PresentMode::AutoVsync;
+    // native_options.wgpu_options.present_mode = PresentMode::AutoVsync;
 
     let rt_handle = rt.handle().clone();
 

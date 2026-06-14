@@ -38,18 +38,16 @@ impl Default for BottomPanelState {
     }
 }
 
-pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
-    let ctx = ui.ctx().clone();
-
+pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
     // 1. Extract state values we might modify locally
     let mut col1_w = state.bottom_panel_state.col1_width;
     let mut col2_w = state.bottom_panel_state.col2_width;
     let mut panel_h = state.bottom_panel_state.height;
 
-    egui::Panel::bottom("chat_input_panel")
+    egui::TopBottomPanel::bottom("chat_input_panel")
         .resizable(false) // We implement custom resizing below
         .exact_height(panel_h)
-        .show_inside(ui, |ui| {
+        .show(ctx, |ui| {
 
             if state.is_modal_open {
                 ui.disable();

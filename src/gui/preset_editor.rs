@@ -103,8 +103,7 @@ macro_rules! validated_edit {
 
 // --- Main Entry Point ---
 
-pub fn ui_preset_editor(ui: &mut egui::Ui, state: &mut State) {
-    let ctx = ui.ctx().clone();
+pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
     if !state.show_preset_editor {
         return;
     }
@@ -118,7 +117,7 @@ pub fn ui_preset_editor(ui: &mut egui::Ui, state: &mut State) {
         .scroll(Vec2b { x: false, y: true })
         .open(&mut show_preset_editor)
         .default_width(500.)
-        .show(ui, |ui| {
+        .show(ctx, |ui| {
             if state.is_modal_open {
                 ui.disable();
             }
@@ -128,7 +127,7 @@ pub fn ui_preset_editor(ui: &mut egui::Ui, state: &mut State) {
 
             // 2. Select View Mode
             if state.preset_editor_state.editing {
-                render_edit_mode(ui, &ctx, state);
+                render_edit_mode(ui, ctx, state);
             } else {
                 render_view_mode(ui, state);
             }

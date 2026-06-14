@@ -11,12 +11,15 @@ rand = "0.10.1"
 # walkers = "0.50.0"
 
 dotenv = "0.15.0"
-eframe = { version = "0.34.3", features = ["persistence"] }
-egui = "0.34.3"
+eframe = { version = "0.33.3", features = ["persistence"] }
+egui = "0.33.3"
 env_logger = "0.11.10"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["full"] }
-egui_commonmark = { version = "0.23.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
+egui_commonmark = { version = "0.22.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
+egui_extras = { version = "0.33.3", features = ["all_loaders", "default", "svg", "image"] }
+egui_tiles = "0.14.0"
+egui-file-dialog = "0.12.0"
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 directories = "6.0.0"
@@ -26,7 +29,6 @@ secrecy = "0.10.3"
 keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native", "vendored"] }
 openrouter-rs = "0.10.0"
 clap = { version = "4.6.1", features = ["derive", "cargo"] }
-egui_extras = { version = "0.34.3", features = ["all_loaders", "default", "svg", "image"] }
 image = { version = "0.25.10", features = ["jpeg", "png", "webp"] }
 chrono = "0.4.45"
 serde_json = "1.0.150"
@@ -43,9 +45,7 @@ mitex = "0.2.4"
 typst-assets = { version = "0.14.2", features = ["fonts"] }
 logos = "0.16.1"
 similar = "2.7.0"
-egui-file-dialog = "0.13.0"
 base64 = "0.22.1"
-egui_tiles = "0.15.0"
 ron = "0.12.1"
 fuzzy-matcher = "0.3.7"
 tracing = "0.1.44"

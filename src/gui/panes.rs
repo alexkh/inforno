@@ -78,7 +78,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     // Intercept clicks on the tab header
     fn on_tab_button(
         &mut self,
-        tiles: &mut egui_tiles::Tiles<Pane>,
+        tiles: &egui_tiles::Tiles<Pane>,
         tile_id: TileId,
         button_response: egui::response::Response,
     ) -> egui::response::Response {

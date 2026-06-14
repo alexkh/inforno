@@ -87,9 +87,10 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk> {
 
 // --- Main Entry Point ---
 
-#[tracing::instrument(skip_all)]
-pub fn ui_chat(ui: &mut egui::Ui, state: &mut crate::gui::State) {
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
+    egui::CentralPanel::default()
+    //.stick_to_the_bottom(true)
+    .show(ctx, |ui| {
         if state.is_modal_open {
             ui.disable();
         }

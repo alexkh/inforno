@@ -3,17 +3,16 @@ use std::fs;
 use rust_i18n::t;
 use crate::gui::State;
 
-pub fn ui_right_panel(ui: &mut egui::Ui, state: &mut State) {
-    let ctx = ui.ctx().clone();
+pub fn ui_right_panel(ctx: &egui::Context, state: &mut State) {
     let mut close_merge = false;
     let mut save_merge = false;
 
     if let Some(active_merge) = &mut state.active_merge {
-        egui::Panel::right("merge_tool_panel")
+        egui::SidePanel::right("merge_tool_panel")
             .resizable(true)
             .default_width(ctx.viewport_rect().width() * 0.5)
             .width_range(200.0..=ctx.viewport_rect().width() * 0.9)
-            .show_inside(ui, |ui| {
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading(format!("Merging {}", active_merge.path.display()));
 

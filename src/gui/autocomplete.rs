@@ -240,7 +240,7 @@ where
         });
 
         state.store(ui.ctx(), id);
-        text_response.response
+        text_response
     }
 }
 
