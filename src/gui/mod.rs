@@ -106,7 +106,7 @@ pub struct State {
     project_dir_to_init: Option<PathBuf>,
     copy_presets_checked: bool,
     project_root: Option<PathBuf>,
-    active_merge: Option<ActiveMerge>,
+    merge_apps: std::collections::HashMap<egui_tiles::TileId, crate::bulat::DiffApp>,
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
 }
@@ -328,7 +328,7 @@ impl State {
             project_dir_to_init: pending_init,
             copy_presets_checked: true,
             project_root,
-            active_merge: None,
+            merge_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
         }
@@ -491,6 +491,17 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
+                FileOp::OpenMerge | FileOp::OpenMergeRight => {
+                    if !file_op_msg.cancelled {
+                        if let (Some(path), Some(left), Some(right)) = (file_op_msg.path, file_op_msg.left_content, file_op_msg.right_content) {
+                            if matches!(file_op_msg.op, FileOp::OpenMergeRight) {
+                                crate::gui::panes::open_merge_in_right_pane(state, path, left, right);
+                            } else {
+                                crate::gui::panes::open_merge_in_tab(state, path, left, right);
+                            }
+                        }
+                    }
+                }
                 FileOp::ExportChat => {
                     // The actual file writing is handled immediately when the file
                     // is picked via state.file_dialog.take_picked().
@@ -616,6 +627,8 @@ impl eframe::App for MyApp {
                         cancelled: false,
                         path: Some(path.to_path_buf()),
                         attachments: None,
+                        left_content: None,
+                        right_content: None,
                     });
                 }
                 ctx.request_repaint();
@@ -698,6 +711,8 @@ impl eframe::App for MyApp {
                     cancelled: false,
                     path: None,
                     attachments: Some(attachments),
+                    left_content: None,
+                    right_content: None,
                 });
 
                 ctx_clone.request_repaint();

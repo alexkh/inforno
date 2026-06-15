@@ -99,6 +99,8 @@ pub enum FileOp {
     Attach,
     OpenEditor,
     OpenEditorRight,
+    OpenMerge,
+    OpenMergeRight,
     ExportChat,
 }
 
@@ -108,6 +110,8 @@ pub struct FileOpMsg {
     pub cancelled: bool,
     pub path: Option<PathBuf>,
     pub attachments: Option<Vec<Attachment>>,
+    pub left_content: Option<String>,
+    pub right_content: Option<String>,
 }
 
 #[derive(Default, Clone)]

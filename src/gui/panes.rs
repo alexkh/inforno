@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub enum Pane {
     Chat { chat_id: i64 },
     Editor { path: PathBuf, content: String },
-    // We can easily add MergeTool here later!
+    Merge { path: PathBuf },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,6 +76,10 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 format!("📝 {} ✖", filename).into()
             }
+            Pane::Merge { path } => {
+                let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                format!("🛠 {} ✖", filename).into()
+            }
         }
     }
 
@@ -137,7 +141,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     Pane::Chat { chat_id } => {
                         self.state.active_chat_id = Some(*chat_id);
                     }
-                    Pane::Editor { .. } => {
+                    Pane::Editor { .. } | Pane::Merge { .. } => {
                         self.state.active_chat_id = None; // Disconnect bottom panel!
                     }
                 }
@@ -202,6 +206,35 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             .v_auto_shrink(false)
                             .desired_width(available_width)
                             .show(ui, content);
+                    }
+
+                    Pane::Merge { path } => {
+                        ui.horizontal(|ui| {
+                            ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
+                            ui.label(format!("Merging: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("💾 Save").clicked() {
+                                    if let Some(app) = self.state.merge_apps.get(&tile_id) {
+                                        if let Err(e) = std::fs::write(&path, &app.left_code_real) {
+                                            self.state.error_msg = Some(format!("Failed to save file: {}", e));
+                                            self.state.is_modal_open = true;
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        if let Some(app) = self.state.merge_apps.get_mut(&tile_id) {
+                            app.show(ui);
+                        } else {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(20.0);
+                                ui.colored_label(ui.visuals().warn_fg_color, "Merge session data lost.");
+                                ui.label("Please close this tab and reopen it from the chat.");
+                            });
+                        }
                     }
                 }
             });
@@ -562,6 +595,187 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
     }
 
     // 5. No right neighbor found? Split horizontally to create one.
+    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
+
+    if let Some(root_id) = state.pane_tree.root {
+        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
+        state.pane_tree.root = Some(new_root);
+    } else {
+        state.pane_tree.root = Some(new_tabs_id);
+    }
+
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+    state.active_tile_id = Some(new_tile_id);
+    state.active_chat_id = None;
+}
+
+// Tile spawners at the bottom of the file
+pub fn open_merge_in_tab(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+    let prev_active_id = state.active_tile_id;
+
+    let new_pane = Pane::Merge { path };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+
+    // Inject the heavy DiffApp into State memory
+    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+
+    state.active_tile_id = Some(new_tile_id);
+    state.active_chat_id = None;
+
+    if let Some(ptid) = prev_active_id {
+        let mut parent_is_tabs = None;
+        for (tid, tile) in state.pane_tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
+                if t.children.contains(&ptid) {
+                    parent_is_tabs = Some(*tid);
+                    break;
+                }
+            }
+        }
+
+        if let Some(tabs_id) = parent_is_tabs {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
+                p.clone()
+            } else { return; };
+
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
+            new_tabs.active = Some(new_tile_id);
+
+            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
+                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
+            }
+        }
+    } else {
+        if let Some(root_id) = state.pane_tree.root {
+            let mut is_tabs = false;
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+                is_tabs = true;
+            }
+
+            if !is_tabs {
+                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
+                state.pane_tree.root = Some(new_tabs_id);
+
+                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
+                    tabs.set_active(new_tile_id);
+                }
+            }
+        } else {
+            state.pane_tree.root = Some(new_tile_id);
+        }
+    }
+
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+}
+
+pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+    let active_id = match state.active_tile_id {
+        Some(id) => id,
+        None => {
+            open_merge_in_tab(state, path, left, right);
+            return;
+        }
+    };
+
+    fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
+        for (id, tile) in tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(c) = tile {
+                if let Some(pos) = c.children().position(|&child| child == child_id) {
+                    return Some((*id, pos));
+                }
+            }
+        }
+        None
+    }
+
+    fn find_leftmost_leaf(tree: &egui_tiles::Tree<Pane>, current: egui_tiles::TileId) -> egui_tiles::TileId {
+        if let Some(tile) = tree.tiles.get(current) {
+            match tile {
+                egui_tiles::Tile::Container(c) => {
+                    if let Some(&first) = c.children().next() {
+                        return find_leftmost_leaf(tree, first);
+                    }
+                }
+                egui_tiles::Tile::Pane(_) => return current,
+            }
+        }
+        current
+    }
+
+    let mut target_node = active_id;
+    if let Some((pid, _)) = find_parent(&state.pane_tree, active_id) {
+        if matches!(state.pane_tree.tiles.get(pid), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))) {
+            target_node = pid;
+        }
+    }
+
+    let mut right_neighbor_id = None;
+    let mut current = target_node;
+
+    while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
+            if l.dir == egui_tiles::LinearDir::Horizontal {
+                if pos + 1 < l.children.len() {
+                    right_neighbor_id = Some(l.children[pos + 1]);
+                    break;
+                }
+            }
+        }
+        current = parent_id;
+    }
+
+    let new_pane = Pane::Merge { path };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+
+    // Inject the heavy DiffApp into State memory
+    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+
+    if let Some(neighbor_id) = right_neighbor_id {
+        let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
+
+        let mut leaf_parent_tabs = None;
+        if let Some((pid, _)) = find_parent(&state.pane_tree, leaf_id) {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_))) = state.pane_tree.tiles.get(pid) {
+                leaf_parent_tabs = Some(pid);
+            }
+        }
+
+        if let Some(tabs_id) = leaf_parent_tabs {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            let old_pane = {
+                let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
+                match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
+                    egui_tiles::Tile::Pane(p) => p,
+                    _ => return,
+                }
+            };
+
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(leaf_id) {
+                tabs.children = vec![old_pane_new_id, new_tile_id];
+                tabs.active = Some(new_tile_id);
+            }
+        }
+
+        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+        state.active_tile_id = Some(new_tile_id);
+        state.active_chat_id = None;
+        return;
+    }
+
     let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
 
     if let Some(root_id) = state.pane_tree.root {

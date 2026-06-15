@@ -117,6 +117,8 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                         cancelled: false,
                         path: None,
                         attachments: None,
+                        left_content: None,
+                        right_content: None,
                     });
                 }
             }).response.on_hover_text(

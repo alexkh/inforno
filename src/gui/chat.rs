@@ -165,6 +165,8 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
                 behavior.state.active_chat_id = None;
             }
 
+            behavior.state.merge_apps.remove(&dead_id);
+
             // This safely removes the tab and cleans up its parent containers
             tree.remove_recursively(dead_id);
         }
@@ -182,7 +184,6 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let cache = &mut state.common_mark_cache;
 
     let project_root = &state.project_root;
-    let active_merge = &mut state.active_merge;
 	let op_tx = state.op_tx.clone();
 
     // We clone the Rc pointer here (very cheap)
@@ -220,7 +221,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             // Pass a clone of the cache pointer
                             render_assistant_grid(ui, cache, msg_pool,
                                 msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                            project_root, &mut *active_merge, &op_tx);
+                            project_root, &op_tx);
                             assistant_batch.clear();
                         }
 
@@ -228,7 +229,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 .or_insert(ChatMsgUi::default());
                         // Pass a clone of the cache pointer
                         render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                            project_root, &mut *active_merge, &op_tx);
+                            project_root, &op_tx);
                     }
                     _ => {
                         assistant_batch.push(msg_id);
@@ -241,7 +242,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             // Pass a clone of the cache pointer
             render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                     &assistant_batch, total_width, math_cache.clone(),
-                    project_root, &mut *active_merge, &op_tx);
+                    project_root, &op_tx);
         }
     }
 }
@@ -255,7 +256,6 @@ fn render_assistant_grid(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_merge: &mut Option<crate::gui::ActiveMerge>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     let effective_width = total_width - 38.0;
@@ -287,7 +287,7 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, &mut *active_merge, op_tx);
+                                    project_root, op_tx);
                         }
                     );
                 }
@@ -310,7 +310,6 @@ fn render_user_msg(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_merge: &mut Option<crate::gui::ActiveMerge>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     let effective_width = total_width - 30.0;
@@ -334,7 +333,7 @@ fn render_user_msg(
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
-                        project_root, active_merge, op_tx);
+                        project_root, op_tx);
 
                     // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
@@ -435,7 +434,6 @@ fn render_assistant_msg(
     item_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_merge: &mut Option<crate::gui::ActiveMerge>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     egui::Frame::default()
@@ -467,7 +465,7 @@ fn render_assistant_msg(
 
             let content_width = (item_width - 25.0).max(100.0);
             render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-                project_root, active_merge, op_tx);
+                project_root, op_tx);
         });
     });
 }
@@ -508,7 +506,6 @@ fn render_msg_content(
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_merge: &mut Option<crate::gui::ActiveMerge>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     if msg_ui.show_raw {
@@ -594,7 +591,7 @@ fn render_msg_content(
                         if let Some(path) = filepath {
                             if let Some(root) = project_root {
                                 let full_path = root.join(&path);
-                                
+
                                 // Group the open buttons together tightly
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -604,6 +601,8 @@ fn render_msg_content(
                                             cancelled: false,
                                             path: Some(full_path.clone()),
                                             attachments: None,
+                                            left_content: None,
+                                            right_content: None,
                                         });
                                     }
                                     if ui.button("➡").on_hover_text("Open file in pane to the right").clicked() {
@@ -612,28 +611,40 @@ fn render_msg_content(
                                             cancelled: false,
                                             path: Some(full_path.clone()),
                                             attachments: None,
+                                            left_content: None,
+                                            right_content: None,
                                         });
                                     }
                                 });
-                                
-                                if ui.button("🛠 Open in Merge Tool").clicked() {
-                                    let original_content = std::fs::read_to_string(&full_path)
-                                        .unwrap_or_else(|_| String::new());
 
-                                    // Attempt to seamlessly splice the function
-                                    // If splicing fails (e.g. multiple functions, function not found),
-                                    // it elegantly falls back to opening the raw snippet.
-                                    let right_content = try_splice_snippet(&original_content, &code_buffer)
-                                        .unwrap_or_else(|| code_buffer.clone());
+                                // Group the Open Merge buttons together tightly
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    if ui.button("🛠 Open in Merge Tool").clicked() {
+                                        let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                                        let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
 
-                                    *active_merge = Some(crate::gui::ActiveMerge {
-                                        app: crate::bulat::DiffApp::new(
-                                            original_content,
-                                            right_content
-                                        ),
-                                        path: full_path,
-                                    });
-                                }                            
+                                        let _ = op_tx.send(crate::common::FileOpMsg {
+                                            op: crate::common::FileOp::OpenMerge,
+                                            path: Some(full_path.clone()),
+                                            left_content: Some(original_content),
+                                            right_content: Some(right_content),
+                                            ..Default::default()
+                                        });
+                                    }
+                                    if ui.button("➡").on_hover_text("Open Merge Tool in pane to the right").clicked() {
+                                        let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                                        let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+
+                                        let _ = op_tx.send(crate::common::FileOpMsg {
+                                            op: crate::common::FileOp::OpenMergeRight,
+                                            path: Some(full_path.clone()),
+                                            left_content: Some(original_content),
+                                            right_content: Some(right_content),
+                                            ..Default::default()
+                                        });
+                                    }
+                                });
                             } else {
                                 // NEW: Fallback button if there's no project root
                                 if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
@@ -642,6 +653,8 @@ fn render_msg_content(
                                         cancelled: false,
                                         path: Some(std::path::PathBuf::from(&path)),
                                         attachments: None,
+                                        left_content: None,
+                                        right_content: None,
                                     });
                                 }
                             }
