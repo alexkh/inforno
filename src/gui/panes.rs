@@ -447,3 +447,131 @@ pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content:
     // Force egui_tiles to traverse the tree and verify focus
     state.pane_tree.make_active(|tid, _| tid == new_tile_id);
 }
+
+pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path::PathBuf, content: String) {
+    let active_id = match state.active_tile_id {
+        Some(id) => id,
+        None => {
+            // Fallback to normal open if nothing is active
+            open_editor_in_tab(state, path, content);
+            return;
+        }
+    };
+
+    // Helper: Find parent and position
+    fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
+        for (id, tile) in tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(c) = tile {
+                // FIXED: children() is an iterator, so we call .position() directly
+                if let Some(pos) = c.children().position(|&child| child == child_id) {
+                    return Some((*id, pos));
+                }
+            }
+        }
+        None
+    }
+
+    // Helper: Find leftmost leaf in a container
+    fn find_leftmost_leaf(tree: &egui_tiles::Tree<Pane>, current: egui_tiles::TileId) -> egui_tiles::TileId {
+        if let Some(tile) = tree.tiles.get(current) {
+            match tile {
+                egui_tiles::Tile::Container(c) => {
+                    // FIXED: Since children() is an iterator, use .next() to get the first item
+                    if let Some(&first) = c.children().next() {
+                        return find_leftmost_leaf(tree, first);
+                    }
+                }
+                egui_tiles::Tile::Pane(_) => return current,
+            }
+        }
+        current
+    }
+
+    // 1. Identify if the active tile is wrapped in Tabs
+    let mut target_node = active_id;
+    if let Some((pid, _)) = find_parent(&state.pane_tree, active_id) {
+        if matches!(state.pane_tree.tiles.get(pid), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))) {
+            target_node = pid;
+        }
+    }
+
+    // 2. Search up the tree for a Horizontal layout with a neighbor to the right
+    let mut right_neighbor_id = None;
+    let mut current = target_node;
+
+    while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
+        // FIXED: Match on Linear container and check its direction
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
+            if l.dir == egui_tiles::LinearDir::Horizontal {
+                if pos + 1 < l.children.len() {
+                    right_neighbor_id = Some(l.children[pos + 1]);
+                    break;
+                }
+            }
+        }
+        current = parent_id;
+    }
+
+    // 3. Create the new pane
+    let new_pane = Pane::Editor { path, content };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+
+    // 4. If a neighbor exists on the right, inject the tab!
+    if let Some(neighbor_id) = right_neighbor_id {
+        let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
+
+        let mut leaf_parent_tabs = None;
+        if let Some((pid, _)) = find_parent(&state.pane_tree, leaf_id) {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_))) = state.pane_tree.tiles.get(pid) {
+                leaf_parent_tabs = Some(pid);
+            }
+        }
+
+        if let Some(tabs_id) = leaf_parent_tabs {
+            // Found a Tabs container on the right! Append to it.
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            // Found a floating Pane on the right! Wrap it in a Tabs container in-place.
+
+            // 1. Use a tightly scoped block to extract the old pane and drop the borrow immediately
+            let old_pane = {
+                let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
+                match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
+                    egui_tiles::Tile::Pane(p) => p,
+                    _ => return, // Safely abort if something went wrong
+                }
+            }; // <-- tile_ref is dropped here, ending the first mutable borrow
+
+            // 2. Now it is perfectly safe to borrow the tree again to insert the new pane
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+
+            // 3. Re-borrow the original leaf one last time to populate its new Tabs container
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(leaf_id) {
+                tabs.children = vec![old_pane_new_id, new_tile_id];
+                tabs.active = Some(new_tile_id);
+            }
+        }
+
+        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+        state.active_tile_id = Some(new_tile_id);
+        state.active_chat_id = None;
+        return;
+    }
+
+    // 5. No right neighbor found? Split horizontally to create one.
+    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
+
+    if let Some(root_id) = state.pane_tree.root {
+        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
+        state.pane_tree.root = Some(new_root);
+    } else {
+        state.pane_tree.root = Some(new_tabs_id);
+    }
+
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+    state.active_tile_id = Some(new_tile_id);
+    state.active_chat_id = None;
+}

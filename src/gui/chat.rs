@@ -183,6 +183,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     let project_root = &state.project_root;
     let active_merge = &mut state.active_merge;
+	let op_tx = state.op_tx.clone();
 
     // We clone the Rc pointer here (very cheap)
     let math_cache = state.math_cache.clone();
@@ -219,7 +220,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             // Pass a clone of the cache pointer
                             render_assistant_grid(ui, cache, msg_pool,
                                 msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                            project_root, &mut *active_merge);
+                            project_root, &mut *active_merge, &op_tx);
                             assistant_batch.clear();
                         }
 
@@ -227,7 +228,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 .or_insert(ChatMsgUi::default());
                         // Pass a clone of the cache pointer
                         render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                            project_root, &mut *active_merge);
+                            project_root, &mut *active_merge, &op_tx);
                     }
                     _ => {
                         assistant_batch.push(msg_id);
@@ -240,7 +241,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             // Pass a clone of the cache pointer
             render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                     &assistant_batch, total_width, math_cache.clone(),
-                    project_root, &mut *active_merge);
+                    project_root, &mut *active_merge, &op_tx);
         }
     }
 }
@@ -255,6 +256,7 @@ fn render_assistant_grid(
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
     active_merge: &mut Option<crate::gui::ActiveMerge>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
@@ -285,7 +287,7 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, &mut *active_merge);
+                                    project_root, &mut *active_merge, op_tx);
                         }
                     );
                 }
@@ -309,6 +311,7 @@ fn render_user_msg(
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
     active_merge: &mut Option<crate::gui::ActiveMerge>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     let effective_width = total_width - 30.0;
     let max_w = effective_width.clamp(400.0, 800.0);
@@ -331,7 +334,7 @@ fn render_user_msg(
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
-                        project_root, active_merge);
+                        project_root, active_merge, op_tx);
 
                     // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
@@ -433,6 +436,7 @@ fn render_assistant_msg(
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
     active_merge: &mut Option<crate::gui::ActiveMerge>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -463,7 +467,7 @@ fn render_assistant_msg(
 
             let content_width = (item_width - 25.0).max(100.0);
             render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-                project_root, active_merge);
+                project_root, active_merge, op_tx);
         });
     });
 }
@@ -505,6 +509,7 @@ fn render_msg_content(
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
     active_merge: &mut Option<crate::gui::ActiveMerge>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -589,7 +594,28 @@ fn render_msg_content(
                         if let Some(path) = filepath {
                             if let Some(root) = project_root {
                                 let full_path = root.join(&path);
-                                ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
+                                
+                                // Group the open buttons together tightly
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    if ui.button(format!("📄 {}", path)).on_hover_text("Open file in editor").clicked() {
+                                        let _ = op_tx.send(crate::common::FileOpMsg {
+                                            op: crate::common::FileOp::OpenEditor,
+                                            cancelled: false,
+                                            path: Some(full_path.clone()),
+                                            attachments: None,
+                                        });
+                                    }
+                                    if ui.button("➡").on_hover_text("Open file in pane to the right").clicked() {
+                                        let _ = op_tx.send(crate::common::FileOpMsg {
+                                            op: crate::common::FileOp::OpenEditorRight,
+                                            cancelled: false,
+                                            path: Some(full_path.clone()),
+                                            attachments: None,
+                                        });
+                                    }
+                                });
+                                
                                 if ui.button("🛠 Open in Merge Tool").clicked() {
                                     let original_content = std::fs::read_to_string(&full_path)
                                         .unwrap_or_else(|_| String::new());
@@ -607,8 +633,17 @@ fn render_msg_content(
                                         ),
                                         path: full_path,
                                     });
-                                }                            } else {
-                                ui.label(egui::RichText::new(format!("📄 {}", path)).strong());
+                                }                            
+                            } else {
+                                // NEW: Fallback button if there's no project root
+                                if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
+                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                        op: crate::common::FileOp::OpenEditor,
+                                        cancelled: false,
+                                        path: Some(std::path::PathBuf::from(&path)),
+                                        attachments: None,
+                                    });
+                                }
                             }
                         } else {
                             ui.label(egui::RichText::new("🦀 Rust").weak());

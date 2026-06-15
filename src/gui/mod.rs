@@ -475,12 +475,17 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
-                FileOp::OpenEditor => {
+                FileOp::OpenEditor | FileOp::OpenEditorRight => {
                     if !file_op_msg.cancelled {
                         if let Some(path) = file_op_msg.path {
                             match std::fs::read_to_string(&path) {
                                 Ok(content) => {
-                                    crate::gui::panes::open_editor_in_tab(state, path, content);
+                                    // Route to the correct placement function
+                                    if matches!(file_op_msg.op, FileOp::OpenEditorRight) {
+                                        crate::gui::panes::open_editor_in_right_pane(state, path, content);
+                                    } else {
+                                        crate::gui::panes::open_editor_in_tab(state, path, content);
+                                    }
                                 }
                                 Err(e) => {
                                     state.error_msg = Some(format!("Could not read file: {}", e));

@@ -98,6 +98,7 @@ pub enum FileOp {
     Clear,
     Attach,
     OpenEditor,
+    OpenEditorRight,
 }
 
 #[derive(Default, Clone)]
