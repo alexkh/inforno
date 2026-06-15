@@ -106,21 +106,19 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             ui.separator();
 
                             if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
-                                match export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
-                                    Ok(markdown) => {
-                                        let _tx_clone = state.op_tx.clone();
-                                        let title = db_chat.title.clone();
-                                        let ctx_clone = ui.ctx().clone();
-                                        tokio::spawn(async move {
-                                            let task = rfd::AsyncFileDialog::new().add_filter("Markdown", &["md"]).set_file_name(format!("{}.md", title)).save_file().await;
-                                            if let Some(handle) = task {
-                                                let path = handle.path().to_path_buf();
-                                                let _ = std::fs::write(&path, markdown);
-                                            }
-                                            ctx_clone.request_repaint();
-                                        });
-                                    }
-                                    Err(_) => {}
+                                if let Ok(markdown) = export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
+                                    // Trigger the native egui dialog for saving
+                                    state.pending_file_dialog_op = Some(crate::common::FileOp::ExportChat);
+                                    state.pending_export_content = Some(markdown);
+
+                                    // Create a safe default filename based on the chat's title
+                                    let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
+                                    let default_name = format!("{}.md", safe_title); // <--- Create the String
+                                    
+                                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                                        .default_file_name(&default_name) // <--- Pass it as a reference (&str)
+                                        .add_file_filter("Markdown", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "md")));
+                                    state.file_dialog.save_file();
                                 }
                                 ui.close();
                             }
@@ -356,21 +354,19 @@ fn save_rename(state: &mut State, chat_id: i64) {
     if let Some(target_db_chat) =
             state.db_chats.iter_mut().find(|c| c.id == chat_id) {
 
-        // Update DB (You need to implement rename_chat in your db module)
+        // Update DB
         if let Err(error) = crate::db::mod_chat_title(&state.db_conn,
                 chat_id, &state.chat_rename_buffer) {
             println!("Error: could not rename chat in the Sandbox: {}", error);
             return;
         }
 
-        // Update the chat object locally
+        // Update the sidebar chat list locally
         target_db_chat.title = state.chat_rename_buffer.clone();
 
-        // Update current chat if it's the one open
-        if state.active_chat_id == Some(chat_id) {
-            if let Some(chat) = state.open_chats.get_mut(&chat_id) {
-                chat.title = target_db_chat.title.clone();
-            }
+        // --- NEW: Unconditionally update the chat object if it's loaded in memory ---
+        if let Some(chat) = state.open_chats.get_mut(&chat_id) {
+            chat.title = target_db_chat.title.clone();
         }
 
         println!("Renamed chat {} to {}", chat_id, target_db_chat.title);

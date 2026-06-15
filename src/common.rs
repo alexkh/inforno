@@ -99,6 +99,7 @@ pub enum FileOp {
     Attach,
     OpenEditor,
     OpenEditorRight,
+    ExportChat,
 }
 
 #[derive(Default, Clone)]

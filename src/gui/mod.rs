@@ -89,7 +89,8 @@ pub struct State {
     ollama_model_names: Vec<String>,
     ollama_model_names_installed: Vec<String>,
     op_tx: Sender<FileOpMsg>,
-    open_sandbox_showing: bool,
+    pending_file_dialog_op: Option<FileOp>,
+    pending_export_content: Option<String>,
     is_in_home_sandbox: bool,
     sandbox: PathBuf,
     // when receiving reply from the LLM's we need to store them during
@@ -304,7 +305,8 @@ impl State {
             ollama_model_names,
             ollama_model_names_installed,
             op_tx,
-            open_sandbox_showing: false,
+            pending_file_dialog_op: None,
+            pending_export_content: None,
             is_in_home_sandbox: is_home,
             sandbox,
             chat_streaming_state: ChatStreamingState {
@@ -397,8 +399,6 @@ impl eframe::App for MyApp {
             match file_op_msg.op {
                 FileOp::Open => {
                     // "open window dialog" closed
-                    state.open_sandbox_showing = false;
-                    state.is_modal_open = false;
                     // if user didn't cancel, we should get path of file to open
                     if !file_op_msg.cancelled {
                         // let self.initializer.sandbox keep the initial value
@@ -407,8 +407,6 @@ impl eframe::App for MyApp {
                 },
                 FileOp::SaveAs => {
                     // "Save As window dialog" closed
-                    state.open_sandbox_showing = false;
-                    state.is_modal_open = false;
                     if !file_op_msg.cancelled {
                         // 1. Replace the current connection with a dummy Memory DB.
                         //    This gives us ownership of 'old_conn' and keeps 'state' valid.
@@ -446,8 +444,6 @@ impl eframe::App for MyApp {
                 FileOp::SaveCopy => {
                     // "Save Copy window dialog" closed. Same as SaveAs, but we
                     // stay in the same old sandbox
-                    state.open_sandbox_showing = false;
-                    state.is_modal_open = false;
                     if !file_op_msg.cancelled {
                         let old_path = &state.sandbox;
                         if let Some(new_path) = &file_op_msg.path {
@@ -494,6 +490,11 @@ impl eframe::App for MyApp {
                             }
                         }
                     }
+                }
+                FileOp::ExportChat => {
+                    // The actual file writing is handled immediately when the file
+                    // is picked via state.file_dialog.take_picked().
+                    // This arm simply satisfies Rust's exhaustive match requirement.
                 }
             }
         }
@@ -600,6 +601,26 @@ impl eframe::App for MyApp {
 
         // File Dialog Start
         state.file_dialog.update(ctx);
+
+        // Handle single file selection (Open / Save) ---
+        if let Some(path) = state.file_dialog.take_picked() {
+            if let Some(op) = state.pending_file_dialog_op.take() {
+                // If it's an export, write it directly and skip the channel
+                if matches!(op, crate::common::FileOp::ExportChat) {
+                    if let Some(content) = state.pending_export_content.take() {
+                        let _ = std::fs::write(&path, content);
+                    }
+                } else {
+                    let _ = state.op_tx.send(crate::common::FileOpMsg {
+                        op,
+                        cancelled: false,
+                        path: Some(path.to_path_buf()),
+                        attachments: None,
+                    });
+                }
+                ctx.request_repaint();
+            }
+        }
 
         // Check if the user confirmed their selection
         if let Some(paths) = state.file_dialog.take_picked_multiple() {

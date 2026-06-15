@@ -80,76 +80,25 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             // Sandbox Menu
             ui.menu_button(t!("menu_sandbox"), |ui| {
+
                 // Save As Button
                 if mybtn!(ui, "menu_sandbox_save_as_btn") {
-                    if state.open_sandbox_showing {
-                        return;
-                    }
-                    state.open_sandbox_showing = true;
-                    state.is_modal_open = true;
-                    let tx_clone = state.op_tx.clone();
-                    let ctx_clone = ctx.clone();
-                    tokio::spawn(async move {
-                        let task = rfd::AsyncFileDialog::new()
-                            .add_filter("Inforno Sandbox: *.rno", &["rno"])
-                            .set_file_name("Unnamed.rno")
-                            .save_file()
-                            .await;
-
-                        // if user picked a file and did not cancel:
-                        if let Some(handle) = task {
-                            let _ = tx_clone.send(FileOpMsg {
-                                op: FileOp::SaveAs,
-                                cancelled: false,
-                                path: Some(handle.path().to_path_buf()),
-                                attachments: None,
-                            });
-                        } else {
-                            let _ = tx_clone.send(FileOpMsg {
-                                op: FileOp::SaveAs,
-                                cancelled: true,
-                                path: None,
-                                attachments: None,
-                            });
-                        }
-                        ctx_clone.request_repaint();
-                    });
+                    ui.close();
+                    state.pending_file_dialog_op = Some(FileOp::SaveAs);
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .default_file_name("")
+                        .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno")));
+                    state.file_dialog.save_file();
                 }
 
                 // Save Copy Button
                 if mybtn!(ui, "menu_sandbox_save_copy_btn") {
-                    if state.open_sandbox_showing {
-                        return;
-                    }
-                    state.open_sandbox_showing = true;
-                    state.is_modal_open = true;
-                    let tx_clone = state.op_tx.clone();
-                    let ctx_clone = ctx.clone();
-                    tokio::spawn(async move {
-                        let task = rfd::AsyncFileDialog::new()
-                            .add_filter("Inforno Sandbox: *.rno", &["rno"])
-                            .set_file_name("Unnamed.rno")
-                            .save_file()
-                            .await;
-
-                        // if user picked a file and did not cancel:
-                        if let Some(handle) = task {
-                            let _ = tx_clone.send(FileOpMsg {
-                                op: FileOp::SaveCopy,
-                                cancelled: false,
-                                path: Some(handle.path().to_path_buf()),
-                                attachments: None,
-                            });
-                        } else {
-                            let _ = tx_clone.send(FileOpMsg {
-                                op: FileOp::SaveCopy,
-                                cancelled: true,
-                                path: None,
-                                attachments: None,
-                            });
-                        }
-                        ctx_clone.request_repaint();
-                    });
+                    ui.close(); // Fixed deprecation
+                    state.pending_file_dialog_op = Some(FileOp::SaveCopy);
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .default_file_name("")
+                        .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno")));
+                    state.file_dialog.save_file();
                 }
 
                 ui.add_space(10.0);
@@ -176,46 +125,18 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                 .heading());
 
             // Open Button
-            let sandbox_open_btn = egui::Button::new(t!("menu_sandbox_open_btn"))
-                .selected(state.open_sandbox_showing);
-            if ui.add(sandbox_open_btn)
+            if ui.button(t!("menu_sandbox_open_btn"))
                 .on_hover_text(egui::RichText::new(
                     t!("menu_sandbox_open_btn_tooltip"))
                     .strong()
                     .heading()
                 )
                 .clicked() {
-                if state.open_sandbox_showing {
-                    return;
-                }
-                state.open_sandbox_showing = true;
-                state.is_modal_open = true;
-                let tx_clone = state.op_tx.clone();
-                let ctx_clone = ctx.clone();
-                tokio::spawn(async move {
-                    let task = rfd::AsyncFileDialog::new()
-                        .add_filter("Inforno Sandbox: *.rno", &["rno"])
-                        .pick_file()
-                        .await;
 
-                    // if user picked a file and did not cancel:
-                    if let Some(handle) = task {
-                        let _ = tx_clone.send(FileOpMsg {
-                            op: FileOp::Open,
-                            cancelled: false,
-                            path: Some(handle.path().to_path_buf()),
-                            attachments: None,
-                        });
-                    } else {
-                        let _ = tx_clone.send(FileOpMsg {
-                            op: FileOp::Open,
-                            cancelled: true,
-                            path: None,
-                            attachments: None,
-                        });
-                    }
-                    ctx_clone.request_repaint();
-                });
+                state.pending_file_dialog_op = Some(FileOp::Open);
+                state.file_dialog = egui_file_dialog::FileDialog::new()
+                    .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno"))); // Fixed filter
+                state.file_dialog.pick_file();
             }
 
             if ui.add_enabled(!state.is_in_home_sandbox,
@@ -235,24 +156,21 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.menu_button("📝 Edit", |ui| {
                 if ui.button("📂 Open File...").clicked() {
-                    ui.close();
-                    let tx_clone = state.op_tx.clone();
-                    let ctx_clone = ctx.clone();
+                    ui.close(); // Fixed deprecation
+                    state.pending_file_dialog_op = Some(FileOp::OpenEditor);
 
-                    // Spawn async file dialog
-                    tokio::spawn(async move {
-                        if let Some(handle) = rfd::AsyncFileDialog::new().pick_file().await {
-                            let _ = tx_clone.send(crate::common::FileOpMsg {
-                                op: crate::common::FileOp::OpenEditor,
-                                cancelled: false,
-                                path: Some(handle.path().to_path_buf()),
-                                attachments: None,
-                            });
-                            ctx_clone.request_repaint();
-                        }
-                    });
+                    // Route directly to the project root if it's active
+                    if let Some(root) = &state.project_root {
+                        state.file_dialog = egui_file_dialog::FileDialog::new()
+                            .initial_directory(root.clone());
+                    } else {
+                        state.file_dialog = egui_file_dialog::FileDialog::new();
+                    }
+
+                    state.file_dialog.pick_file();
                 }
             });
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(root) = &state.project_root {
                     // 1. Get the absolute path (fallback to the original root if it fails)
