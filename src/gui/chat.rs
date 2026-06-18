@@ -106,7 +106,8 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         let mut behavior = crate::gui::panes::PaneBehavior {
             state,
             split_requests: Vec::new(),
-            close_requests: Vec::new(), // NEW
+            close_requests: Vec::new(),
+            open_chat_requests: Vec::new(),
         };
 
         // 3. Render the layout
@@ -137,8 +138,13 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         }
         // ---------------------------------
 
+        // Extract the queues to drop `behavior` and release the borrow on `state`
+        let split_requests = behavior.split_requests;
+        let close_requests = behavior.close_requests;
+        let open_chat_requests = behavior.open_chat_requests;
+
         // 4. Process any requested splits safely
-        for (new_pane, direction) in behavior.split_requests {
+        for (new_pane, direction) in split_requests {
             let new_tile = tree.tiles.insert_pane(new_pane);
             let new_tabs = tree.tiles.insert_tab_tile(vec![new_tile]);
 
@@ -159,20 +165,37 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         }
 
         // 5. Process any requested closes safely
-        for dead_id in behavior.close_requests {
-            if behavior.state.active_tile_id == Some(dead_id) {
-                behavior.state.active_tile_id = None;
-                behavior.state.active_chat_id = None;
+        for dead_id in close_requests {
+            // Notice we are using `state` directly now, not `behavior.state`
+            if state.active_tile_id == Some(dead_id) {
+                state.active_tile_id = None;
+                state.active_chat_id = None;
             }
 
-            behavior.state.merge_apps.remove(&dead_id);
+            state.merge_apps.remove(&dead_id);
 
             // This safely removes the tab and cleans up its parent containers
             tree.remove_recursively(dead_id);
         }
 
-        // 6. Put the updated tree back
+        // 6. Put the updated tree back! (Safe because `behavior` is dead)
         state.pane_tree = tree;
+
+        // 7. Process any requested chat opens
+        for (chat_id, open_right) in open_chat_requests {
+            // Guarantee the target chat is loaded into application memory
+            if !state.open_chats.contains_key(&chat_id) {
+                let loaded_chat = crate::db::fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
+                state.open_chats.insert(chat_id, loaded_chat);
+            }
+
+            // Route the UI appropriately
+            if open_right {
+                crate::gui::panes::open_chat_in_right_pane(state, chat_id);
+            } else {
+                crate::gui::panes::open_chat_in_tab(state, chat_id);
+            }
+        }
     });
 }
 

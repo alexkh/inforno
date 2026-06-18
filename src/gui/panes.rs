@@ -9,6 +9,7 @@ pub enum Pane {
     Chat { chat_id: i64 },
     Editor { path: PathBuf, content: String },
     Merge { path: PathBuf },
+    SearchResults { query: String, results: Vec<crate::common::SearchResult> },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -24,6 +25,8 @@ pub struct PaneBehavior<'a> {
     pub split_requests: Vec<(Pane, SplitAction)>,
     // A queue to hold tabs that need to be closed
     pub close_requests: Vec<egui_tiles::TileId>,
+    // Tuple of (chat_id, open_in_right_pane)
+    pub open_chat_requests: Vec<(i64, bool)>,
 }
 
 impl<'a> Behavior<Pane> for PaneBehavior<'a> {
@@ -79,6 +82,9 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
             Pane::Merge { path } => {
                 let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 format!("🛠 {} ✖", filename).into()
+            }
+            Pane::SearchResults { query, .. } => {
+                format!("🔍 Search: {} ✖", query).into()
             }
         }
     }
@@ -141,7 +147,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     Pane::Chat { chat_id } => {
                         self.state.active_chat_id = Some(*chat_id);
                     }
-                    Pane::Editor { .. } | Pane::Merge { .. } => {
+                    Pane::Editor { .. } | Pane::Merge { .. } | Pane::SearchResults { .. } => {
                         self.state.active_chat_id = None; // Disconnect bottom panel!
                     }
                 }
@@ -234,6 +240,39 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                 ui.colored_label(ui.visuals().warn_fg_color, "Merge session data lost.");
                                 ui.label("Please close this tab and reopen it from the chat.");
                             });
+                        }
+                    }
+
+                    Pane::SearchResults { query, results } => {
+                        ui.heading(format!("Search Results for: \"{}\"", query));
+                        ui.separator();
+
+                        if results.is_empty() {
+                            ui.label(egui::RichText::new("No results found.").weak().italics());
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt(format!("search_scroll_{:?}", tile_id))
+                                .show(ui, |ui| {
+                                    for res in results {
+                                        ui.group(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(&res.chat_title).strong());
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    // Right Arrow
+                                                    if ui.button("➡").on_hover_text("Open chat in pane to the right").clicked() {
+                                                        self.open_chat_requests.push((res.chat_id, true));
+                                                    }
+                                                    // Open in Current
+                                                    if ui.button("📂 Open").on_hover_text("Open chat in current pane").clicked() {
+                                                        self.open_chat_requests.push((res.chat_id, false));
+                                                    }
+                                                });
+                                            });
+                                            // grep-style snippet
+                                            ui.label(egui::RichText::new(&res.snippet).weak());
+                                        });
+                                    }
+                                });
                         }
                     }
                 }
@@ -788,4 +827,179 @@ pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, le
     state.pane_tree.make_active(|tid, _| tid == new_tile_id);
     state.active_tile_id = Some(new_tile_id);
     state.active_chat_id = None;
+}
+
+pub fn open_search_results_in_tab(state: &mut crate::gui::State, query: String, results: Vec<crate::common::SearchResult>) {
+    let prev_active_id = state.active_tile_id;
+
+    let new_pane = Pane::SearchResults { query, results };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+
+    state.active_tile_id = Some(new_tile_id);
+    state.active_chat_id = None;
+
+    // Use standard injection logic
+    if let Some(ptid) = prev_active_id {
+        let mut parent_is_tabs = None;
+        for (tid, tile) in state.pane_tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
+                if t.children.contains(&ptid) {
+                    parent_is_tabs = Some(*tid);
+                    break;
+                }
+            }
+        }
+
+        if let Some(tabs_id) = parent_is_tabs {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
+                p.clone()
+            } else { return; };
+
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
+            new_tabs.active = Some(new_tile_id);
+
+            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
+                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
+            }
+        }
+    } else {
+        if let Some(root_id) = state.pane_tree.root {
+            let mut is_tabs = false;
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+                is_tabs = true;
+            }
+
+            if !is_tabs {
+                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
+                state.pane_tree.root = Some(new_tabs_id);
+
+                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
+                    tabs.set_active(new_tile_id);
+                }
+            }
+        } else {
+            state.pane_tree.root = Some(new_tile_id);
+        }
+    }
+
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+}
+
+pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
+    let active_id = match state.active_tile_id {
+        Some(id) => id,
+        None => {
+            open_chat_in_tab(state, chat_id);
+            return;
+        }
+    };
+
+    fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
+        for (id, tile) in tree.tiles.iter() {
+            if let egui_tiles::Tile::Container(c) = tile {
+                if let Some(pos) = c.children().position(|&child| child == child_id) {
+                    return Some((*id, pos));
+                }
+            }
+        }
+        None
+    }
+
+    fn find_leftmost_leaf(tree: &egui_tiles::Tree<Pane>, current: egui_tiles::TileId) -> egui_tiles::TileId {
+        if let Some(tile) = tree.tiles.get(current) {
+            match tile {
+                egui_tiles::Tile::Container(c) => {
+                    if let Some(&first) = c.children().next() {
+                        return find_leftmost_leaf(tree, first);
+                    }
+                }
+                egui_tiles::Tile::Pane(_) => return current,
+            }
+        }
+        current
+    }
+
+    let mut target_node = active_id;
+    if let Some((pid, _)) = find_parent(&state.pane_tree, active_id) {
+        if matches!(state.pane_tree.tiles.get(pid), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))) {
+            target_node = pid;
+        }
+    }
+
+    let mut right_neighbor_id = None;
+    let mut current = target_node;
+
+    while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
+            if l.dir == egui_tiles::LinearDir::Horizontal {
+                if pos + 1 < l.children.len() {
+                    right_neighbor_id = Some(l.children[pos + 1]);
+                    break;
+                }
+            }
+        }
+        current = parent_id;
+    }
+
+    let new_pane = Pane::Chat { chat_id };
+    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
+
+    if let Some(neighbor_id) = right_neighbor_id {
+        let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
+
+        let mut leaf_parent_tabs = None;
+        if let Some((pid, _)) = find_parent(&state.pane_tree, leaf_id) {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_))) = state.pane_tree.tiles.get(pid) {
+                leaf_parent_tabs = Some(pid);
+            }
+        }
+
+        if let Some(tabs_id) = leaf_parent_tabs {
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(new_tile_id);
+                tabs.set_active(new_tile_id);
+            }
+        } else {
+            let old_pane = {
+                let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
+                match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
+                    egui_tiles::Tile::Pane(p) => p,
+                    _ => return,
+                }
+            };
+
+            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
+
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(leaf_id) {
+                tabs.children = vec![old_pane_new_id, new_tile_id];
+                tabs.active = Some(new_tile_id);
+            }
+        }
+
+        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+        state.active_tile_id = Some(new_tile_id);
+        state.active_chat_id = Some(chat_id);
+        return;
+    }
+
+    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
+
+    if let Some(root_id) = state.pane_tree.root {
+        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
+        state.pane_tree.root = Some(new_root);
+    } else {
+        state.pane_tree.root = Some(new_tabs_id);
+    }
+
+    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+    state.active_tile_id = Some(new_tile_id);
+    state.active_chat_id = Some(chat_id);
 }

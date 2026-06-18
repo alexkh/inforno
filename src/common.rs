@@ -802,3 +802,10 @@ pub async fn run_chat_stream_router(
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SearchResult {
+    pub chat_id: i64,
+    pub chat_title: String,
+    pub snippet: String,
+}

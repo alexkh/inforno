@@ -109,6 +109,7 @@ pub struct State {
     merge_apps: std::collections::HashMap<egui_tiles::TileId, crate::bulat::DiffApp>,
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
+    search_query: String,
 }
 
 impl State {
@@ -331,6 +332,7 @@ impl State {
             merge_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
+            search_query: String::new(),
         }
     }
 

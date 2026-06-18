@@ -321,7 +321,7 @@ fn normalize_code_blocks(markdown: &str) -> String {
     static RE_LATEX_INLINE: OnceLock<Regex> = OnceLock::new();
 
     static RE_MATH_PAD: OnceLock<Regex> = OnceLock::new();
-    
+
     // NEW: Regexes to extract and restore code blocks
     static RE_CODE_BLOCKS: OnceLock<Regex> = OnceLock::new();
     static RE_RESTORE: OnceLock<Regex> = OnceLock::new();
@@ -331,8 +331,8 @@ fn normalize_code_blocks(markdown: &str) -> String {
     let step1 = re_code.replace_all(markdown, "\n$1");
 
     // --- NEW: Shield Code Blocks ---
-    // We extract all code blocks (both block and inline) and replace them 
-    // with a placeholder. This guarantees that table and math formatting 
+    // We extract all code blocks (both block and inline) and replace them
+    // with a placeholder. This guarantees that table and math formatting
     // does not modify the content inside code blocks.
     let re_code_blocks = RE_CODE_BLOCKS.get_or_init(|| {
         Regex::new(r"(?s)(`{3}.*?`{3}|`[^`]*`)").unwrap()
@@ -759,6 +759,90 @@ pub fn load_presets_vec(conn: &Connection)
     }
 
     Ok(results)
+}
+
+/// Helper to extract a grep-like context snippet surrounding the keyword
+pub fn extract_snippet(text: &str, keyword: &str) -> String {
+    let text_lower = text.to_lowercase();
+    let kw_lower = keyword.to_lowercase();
+
+    if let Some(idx) = text_lower.find(&kw_lower) {
+        // Grab roughly 40 chars before and 80 after
+        let start = idx.saturating_sub(40);
+        let end = (idx + keyword.len() + 80).min(text.len());
+
+        // Snap to valid UTF-8 character boundaries
+        let mut start_idx = start;
+        while start_idx > 0 && !text.is_char_boundary(start_idx) {
+            start_idx -= 1;
+        }
+        let mut end_idx = end;
+        while end_idx < text.len() && !text.is_char_boundary(end_idx) {
+            end_idx += 1;
+        }
+
+        let mut snippet = text[start_idx..end_idx].replace('\n', " ").replace('\r', "");
+        if start_idx > 0 {
+            snippet.insert_str(0, "...");
+        }
+        if end_idx < text.len() {
+            snippet.push_str("...");
+        }
+        snippet
+    } else {
+        // Fallback: just return the beginning of the string
+        let end = text.len().min(120);
+        let mut end_idx = end;
+        while end_idx < text.len() && !text.is_char_boundary(end_idx) {
+            end_idx += 1;
+        }
+        let mut snippet = text[..end_idx].replace('\n', " ").replace('\r', "");
+        if end_idx < text.len() {
+            snippet.push_str("...");
+        }
+        snippet
+    }
+}
+
+/// Searches all messages for keywords and returns deduplicated chats containing them
+pub fn search_chats(conn: &Connection, keyword: &str) -> rusqlite::Result<Vec<crate::common::SearchResult>> {
+    // We use json_each to unpack the msg_ids JSON array directly in SQLite
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT c.id, c.title, m.content, c.ts_created
+         FROM msg m
+         JOIN agent a ON EXISTS (SELECT 1 FROM json_each(a.msg_ids) WHERE value = m.id)
+         JOIN chat c ON c.id = a.chat_id
+         WHERE m.content LIKE ?1
+         ORDER BY c.ts_created DESC"
+    )?;
+
+    let kw_param = format!("%{}%", keyword);
+    let rows = stmt.query_map(rusqlite::params![kw_param], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?
+        ))
+    })?;
+
+    let mut unique_results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for row in rows {
+        let (chat_id, title, content) = row?;
+
+        // We only want one snippet per chat to keep the list clean
+        if !seen.contains(&chat_id) {
+            seen.insert(chat_id);
+            unique_results.push(crate::common::SearchResult {
+                chat_id,
+                chat_title: title,
+                snippet: extract_snippet(&content, keyword),
+            });
+        }
+    }
+
+    Ok(unique_results)
 }
 
 fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {

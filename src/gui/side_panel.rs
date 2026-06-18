@@ -16,6 +16,26 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.label(t!("chats_label"));
 
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.search_query)
+                        .hint_text("Search chats...")
+                        .desired_width(ui.available_width() - 80.0)
+                );
+
+                // Allow triggering search on button click OR pressing Enter
+                let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                if (ui.button("🔍").clicked() || enter_pressed) && !state.search_query.trim().is_empty() {
+                    if let Ok(results) = crate::db::search_chats(&state.db_conn, &state.search_query) {
+                        crate::gui::panes::open_search_results_in_tab(state, state.search_query.clone(), results);
+                    }
+                }
+            });
+            ui.add_space(5.0);
+            ui.separator();
+            ui.add_space(5.0);
+
             // --- NEW: Horizontal Layout for New Chat actions ---
             ui.horizontal(|ui| {
                 // Helper to find the next available temporary ID (0, -1, -2...)
@@ -114,7 +134,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                     // Create a safe default filename based on the chat's title
                                     let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
                                     let default_name = format!("{}.md", safe_title); // <--- Create the String
-                                    
+
                                     state.file_dialog = egui_file_dialog::FileDialog::new()
                                         .default_file_name(&default_name) // <--- Pass it as a reference (&str)
                                         .add_file_filter("Markdown", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "md")));
