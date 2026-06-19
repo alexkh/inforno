@@ -319,91 +319,80 @@ fn split_clipped_button(
     let main_response = ui.interact(main_rect, base_id.with("main"), egui::Sense::click());
     let arrow_response = ui.interact(arrow_rect, base_id.with("arrow"), egui::Sense::click());
 
-    let main_clicked = main_response.clicked();
-    let arrow_clicked = arrow_response.clicked();
-
-    // 6. Paint the Component
     if ui.is_rect_visible(rect) {
+        let active = &ui.style().visuals.widgets.active;
+        let hovered = &ui.style().visuals.widgets.hovered;
+        let inactive = &ui.style().visuals.widgets.inactive;
 
-        // --- DRAW MAIN BUTTON ---
-        // Get independent visual states for the main rectangle
-        let main_visuals = if is_selected {
-            &ui.style().visuals.widgets.active
-        } else {
-            ui.style().interact(&main_response)
-        };
-
-        let mut left_rounding = main_visuals.corner_radius;
-        if is_hovered {
-            // Flatten the right side so it sits flush against the arrow
-            left_rounding.ne = 0;
-            left_rounding.se = 0;
-        }
-
-        ui.painter().rect(
-            main_rect,
-            left_rounding,
-            main_visuals.bg_fill,
-            main_visuals.bg_stroke,
-            egui::StrokeKind::Inside,
-        );
-
-        // --- DRAW ARROW BUTTON ---
-        if arrow_width > 0.0 {
-            let arrow_visuals = ui.style().interact(&arrow_response);
-
-            let mut right_rounding = arrow_visuals.corner_radius;
-            // Flatten the left side so it sits flush against the main button
-            right_rounding.nw = 0;
-            right_rounding.sw = 0;
-
+        // 1. Draw base background if selected
+        if is_selected {
             ui.painter().rect(
-                arrow_rect,
-                right_rounding,
-                arrow_visuals.bg_fill,
-                arrow_visuals.bg_stroke,
+                rect,
+                active.corner_radius,
+                active.bg_fill,
+                egui::Stroke::NONE,
                 egui::StrokeKind::Inside,
             );
+        }
 
-            // Draw a subtle vertical divider line
-            ui.painter().vline(
-                arrow_rect.min.x,
-                arrow_rect.y_range(),
-                ui.style().visuals.widgets.noninteractive.bg_stroke,
+        // 2. Draw Main Button Border/Hover
+        let mut main_rounding = if is_selected { active.corner_radius } else { inactive.corner_radius };
+        if arrow_width > 0.0 { main_rounding.ne = 0; main_rounding.se = 0; }
+
+        if main_response.hovered() {
+            ui.painter().rect(
+                main_rect, main_rounding, hovered.bg_fill, hovered.bg_stroke, egui::StrokeKind::Inside,
             );
-
-            // Draw the arrow icon
-            ui.painter().text(
-                arrow_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "➡",
-                font_id.clone(),
-                arrow_visuals.text_color(),
+        } else if is_selected {
+            ui.painter().rect_stroke(
+                main_rect, main_rounding, active.bg_stroke, egui::StrokeKind::Inside,
             );
         }
 
-        // --- DRAW TEXT ---
-        let text_pos = main_rect.min + button_padding;
+        // 3. Draw Arrow Button Border/Hover
+        if arrow_width > 0.0 {
+            let mut arrow_rounding = inactive.corner_radius;
+            arrow_rounding.nw = 0; arrow_rounding.sw = 0;
+
+            let (bg, stroke, text_color) = if arrow_response.hovered() {
+                (hovered.bg_fill, hovered.bg_stroke, hovered.text_color())
+            } else {
+                let s = if is_selected { active.bg_stroke } else { egui::Stroke::NONE };
+                (egui::Color32::TRANSPARENT, s, inactive.text_color())
+            };
+
+            ui.painter().rect(
+                arrow_rect, arrow_rounding, bg, stroke, egui::StrokeKind::Inside,
+            );
+
+            // Divider line
+            let div_stroke = if is_selected { active.bg_stroke } else { inactive.bg_stroke };
+            ui.painter().vline(arrow_rect.min.x, arrow_rect.y_range(), div_stroke);
+
+            ui.painter().text(
+                arrow_rect.center(), egui::Align2::CENTER_CENTER, "➡", font_id.clone(), text_color,
+            );
+        }
+
+        // 4. Draw Text
+        let text_color = if main_response.hovered() {
+            hovered.text_color()
+        } else if is_selected {
+            active.text_color()
+        } else {
+            inactive.text_color()
+        };
+
         let painter = ui.painter().with_clip_rect(main_rect);
         painter.text(
-            text_pos,
-            egui::Align2::LEFT_TOP,
-            text,
-            font_id,
-            main_visuals.text_color(),
+            main_rect.min + button_padding, egui::Align2::LEFT_TOP, text, font_id, text_color,
         );
     }
 
-    // 7. Tooltips
-    main_response.on_hover_ui(|ui| {
-        ui.heading(egui::RichText::new(text).strong());
-    });
+    main_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(text).strong()); });
+    if arrow_width > 0.0 { arrow_response.clone().on_hover_text("Open chat in pane to the right"); }
 
-    if arrow_width > 0.0 {
-        arrow_response.on_hover_text("Open chat in pane to the right");
-    }
-
-    (main_clicked, arrow_clicked)
+    (main_response.clicked(), arrow_response.clicked())
 }
 
 // Helper function to handle the popup logic

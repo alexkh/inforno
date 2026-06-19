@@ -901,8 +901,13 @@ pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
     let active_id = match state.active_tile_id {
         Some(id) => id,
         None => {
-            open_chat_in_tab(state, chat_id);
-            return;
+            // If no pane is currently active, try to split from the root
+            if let Some(root_id) = state.pane_tree.root {
+                root_id
+            } else {
+                open_chat_in_tab(state, chat_id);
+                return;
+            }
         }
     };
 
