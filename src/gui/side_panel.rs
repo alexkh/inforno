@@ -101,6 +101,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
             let mut to_delete_chat_id = 0;
             let mut clicked_chat_id = None; // 1. Create a temporary holder
+            let mut right_clicked_chat_id: Option<i64> = None; // track right arrow clicks
 
             // Iterate through chats
             for db_chat in &mut state.db_chats {
@@ -169,14 +170,15 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             }
                         }
 
-                        // 3. The Main Button (Consumes ALL remaining space on the left)
-                        let btn_response = clipped_button(ui, &db_chat.title, is_selected)
-                            .on_hover_text(
-                                egui::RichText::new(&db_chat.title).heading().strong()
-                            );
+                        // 3. The Unified Split Button
+                        // We pass the full available width to our custom component, which handles the hover split automatically.
+                        let (main_clicked, arrow_clicked) = split_clipped_button(ui, db_chat.id, &db_chat.title, is_selected);
 
-                        if btn_response.clicked() {
+                        if main_clicked {
                             clicked_chat_id = Some(db_chat.id);
+                        }
+                        if arrow_clicked {
+                            right_clicked_chat_id = Some(db_chat.id);
                         }
                     });
                 });
@@ -194,6 +196,15 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     state.open_chats.insert(chat_id, loaded_chat);
                 }
                 crate::gui::panes::open_chat_in_tab(state, chat_id);
+            }
+
+            // Handle opening in the right pane!
+            if let Some(chat_id) = right_clicked_chat_id {
+                if !state.open_chats.contains_key(&chat_id) {
+                    let loaded_chat = fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
+                    state.open_chats.insert(chat_id, loaded_chat);
+                }
+                crate::gui::panes::open_chat_in_right_pane(state, chat_id);
             }
         });
     });
@@ -275,53 +286,124 @@ fn extract_prompts(
     }
 }
 
-fn clipped_button(ui: &mut egui::Ui, text: &str, is_selected: bool)
-        -> egui::Response {
-    // 1. Calculate the height based on current font style
+/// A custom button that acts as a standard clipped button, but reveals a split-action
+/// arrow on the right side when hovered.
+fn split_clipped_button(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash, // <-- NEW: Unique salt parameter
+    text: &str,
+    is_selected: bool
+) -> (bool, bool) {
+    // 1. Calculate standard button dimensions
+    let button_padding = ui.spacing().button_padding;
     let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let height = ui.text_style_height(&egui::TextStyle::Button)
-            + ui.spacing().button_padding.y * 2.0;
+    let text_height = ui.text_style_height(&egui::TextStyle::Button);
+    let height = text_height + button_padding.y * 2.0;
 
-    // 2. Allocate space strictly based on AVAILABLE width, ignoring text length.
-    //    We use allocate_rect to tell the layout: "I only exist in this box."
-    let desired_size = egui::vec2(ui.available_width(), height);
-    let (rect, response) = ui.allocate_exact_size(desired_size,
-            egui::Sense::click());
+    let available_width = ui.available_width();
+    let desired_size = egui::vec2(available_width, height);
 
-    // 3. Draw the Interaction (Hover/Click/Selected effects)
+    // 2. Allocate the boundary (reserves space in the layout)
+    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+
+    // 3. Check physical pointer presence (immune to click-stealing)
+    let is_hovered = ui.rect_contains_pointer(rect);
+
+    // 4. Dynamically shift width. (The widgets ALWAYS exist to prevent dropped clicks!)
+    let arrow_width = if is_hovered { height } else { 0.0 };
+    let main_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x - arrow_width, rect.max.y));
+    let arrow_rect = egui::Rect::from_min_max(egui::pos2(rect.max.x - arrow_width, rect.min.y), rect.max);
+
+    // 5. Create independent interactable components
+    let base_id = ui.id().with(id_salt);
+    let main_response = ui.interact(main_rect, base_id.with("main"), egui::Sense::click());
+    let arrow_response = ui.interact(arrow_rect, base_id.with("arrow"), egui::Sense::click());
+
+    let main_clicked = main_response.clicked();
+    let arrow_clicked = arrow_response.clicked();
+
+    // 6. Paint the Component
     if ui.is_rect_visible(rect) {
-        // Decide visual style (selected vs normal)
-        let visuals = if is_selected {
-            &ui.style().visuals.widgets.active // or open
+
+        // --- DRAW MAIN BUTTON ---
+        // Get independent visual states for the main rectangle
+        let main_visuals = if is_selected {
+            &ui.style().visuals.widgets.active
         } else {
-            ui.style().interact(&response)
+            ui.style().interact(&main_response)
         };
 
-        // Draw background
+        let mut left_rounding = main_visuals.corner_radius;
+        if is_hovered {
+            // Flatten the right side so it sits flush against the arrow
+            left_rounding.ne = 0;
+            left_rounding.se = 0;
+        }
+
         ui.painter().rect(
-            rect,
-            visuals.corner_radius,
-            visuals.bg_fill,
-            visuals.bg_stroke,
+            main_rect,
+            left_rounding,
+            main_visuals.bg_fill,
+            main_visuals.bg_stroke,
             egui::StrokeKind::Inside,
         );
 
-        // 4. Draw Text with Hard Clipping
-        //    We create a temporary painter that ONLY draws inside the button rect.
-        //    Any text spilling out is strictly invisible.
-        let painter = ui.painter().with_clip_rect(rect);
+        // --- DRAW ARROW BUTTON ---
+        if arrow_width > 0.0 {
+            let arrow_visuals = ui.style().interact(&arrow_response);
 
-        let text_pos = rect.min + ui.spacing().button_padding;
+            let mut right_rounding = arrow_visuals.corner_radius;
+            // Flatten the left side so it sits flush against the main button
+            right_rounding.nw = 0;
+            right_rounding.sw = 0;
+
+            ui.painter().rect(
+                arrow_rect,
+                right_rounding,
+                arrow_visuals.bg_fill,
+                arrow_visuals.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+
+            // Draw a subtle vertical divider line
+            ui.painter().vline(
+                arrow_rect.min.x,
+                arrow_rect.y_range(),
+                ui.style().visuals.widgets.noninteractive.bg_stroke,
+            );
+
+            // Draw the arrow icon
+            ui.painter().text(
+                arrow_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "➡",
+                font_id.clone(),
+                arrow_visuals.text_color(),
+            );
+        }
+
+        // --- DRAW TEXT ---
+        let text_pos = main_rect.min + button_padding;
+        let painter = ui.painter().with_clip_rect(main_rect);
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,
             text,
             font_id,
-            visuals.text_color(),
+            main_visuals.text_color(),
         );
     }
 
-    response
+    // 7. Tooltips
+    main_response.on_hover_ui(|ui| {
+        ui.heading(egui::RichText::new(text).strong());
+    });
+
+    if arrow_width > 0.0 {
+        arrow_response.on_hover_text("Open chat in pane to the right");
+    }
+
+    (main_clicked, arrow_clicked)
 }
 
 // Helper function to handle the popup logic
