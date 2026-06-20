@@ -45,14 +45,44 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     id
                 };
 
-                if ui.button(t!("new_chat_btn")).on_hover_text(
-                    egui::RichText::new(t!("new_chat_tooltip")).strong().heading()
-                    ).clicked() {
+                let new_chat_text = t!("new_chat_btn").to_string();
+                let new_chat_tooltip = t!("new_chat_tooltip").to_string();
+
+                // Calculate exactly how much width the button needs
+                let font_id = egui::TextStyle::Button.resolve(ui.style());
+                                let text_width = ui.painter().layout_no_wrap(
+                                    new_chat_text.clone(), font_id,
+                                    egui::Color32::TRANSPARENT).size().x;
+                let button_padding = ui.spacing().button_padding;
+                let text_height = ui.text_style_height(&egui::TextStyle::Button);
+                let height = text_height + button_padding.y * 2.0;
+
+                // Base text width + extra allocated space for the double-wide arrow
+                let desired_width = text_width + button_padding.x * 2.0;
+
+                let (main_clicked, arrow_clicked) = split_clipped_button(
+                    ui,
+                    "new_chat_split_btn",
+                    &new_chat_text,
+                    &new_chat_tooltip,
+                    false,
+                    desired_width
+                );
+
+                if main_clicked {
                     let temp_id = get_temp_id(state);
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
                     state.open_chats.insert(temp_id, new_chat);
                     crate::gui::panes::open_chat_in_tab(state, temp_id);
+                }
+
+                if arrow_clicked {
+                    let temp_id = get_temp_id(state);
+                    let mut new_chat = Chat::default();
+                    new_chat.id = temp_id;
+                    state.open_chats.insert(temp_id, new_chat);
+                    crate::gui::panes::open_chat_in_right_pane(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_tooltip")).strong().heading()).clicked() {
@@ -172,7 +202,15 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                         // 3. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
-                        let (main_clicked, arrow_clicked) = split_clipped_button(ui, db_chat.id, &db_chat.title, is_selected);
+                        let available_width = ui.available_width();
+                        let (main_clicked, arrow_clicked) = split_clipped_button(
+                            ui,
+                            db_chat.id,
+                            &db_chat.title,
+                            &db_chat.title,
+                            is_selected,
+                            available_width
+                        );
 
                         if main_clicked {
                             clicked_chat_id = Some(db_chat.id);
@@ -290,9 +328,11 @@ fn extract_prompts(
 /// arrow on the right side when hovered.
 fn split_clipped_button(
     ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash, // <-- NEW: Unique salt parameter
+    id_salt: impl std::hash::Hash,
     text: &str,
-    is_selected: bool
+    tooltip_text: &str,
+    is_selected: bool,
+    width: f32,
 ) -> (bool, bool) {
     // 1. Calculate standard button dimensions
     let button_padding = ui.spacing().button_padding;
@@ -300,8 +340,8 @@ fn split_clipped_button(
     let text_height = ui.text_style_height(&egui::TextStyle::Button);
     let height = text_height + button_padding.y * 2.0;
 
-    let available_width = ui.available_width();
-    let desired_size = egui::vec2(available_width, height);
+    // Use the explicitly provided width
+    let desired_size = egui::vec2(width, height);
 
     // 2. Allocate the boundary (reserves space in the layout)
     let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
@@ -310,7 +350,7 @@ fn split_clipped_button(
     let is_hovered = ui.rect_contains_pointer(rect);
 
     // 4. Dynamically shift width. (The widgets ALWAYS exist to prevent dropped clicks!)
-    let arrow_width = if is_hovered { height } else { 0.0 };
+    let arrow_width = if is_hovered { height * 2.0 } else { 0.0 };
     let main_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x - arrow_width, rect.max.y));
     let arrow_rect = egui::Rect::from_min_max(egui::pos2(rect.max.x - arrow_width, rect.min.y), rect.max);
 
@@ -389,8 +429,8 @@ fn split_clipped_button(
         );
     }
 
-    main_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(text).strong()); });
-    if arrow_width > 0.0 { arrow_response.clone().on_hover_text("Open chat in pane to the right"); }
+    main_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(tooltip_text).strong()); });
+    if arrow_width > 0.0 { arrow_response.clone().on_hover_text("In a pane to the right"); }
 
     (main_response.clicked(), arrow_response.clicked())
 }
