@@ -2,6 +2,8 @@ use egui_tiles::{Behavior, TileId, UiResponse};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::gui::SplitButton;
+
 /// This enum represents the data we save to the .ron file.
 /// It is lightweight and only contains the instructions on WHAT to render.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -259,7 +261,10 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                             // --- USE THE NEW HELPER HERE ---
                                             // We pass the chat title to act as the button text.
                                             // It returns true/false for which part was clicked.
-                                            let (open_current, open_right) = split_hover_button(ui, &res.chat_title);
+                                            let (open_current, open_right) = SplitButton::new(&res.chat_title)
+                                                .id_salt(res.chat_id)
+                                                .arrow_tooltip("Open in right pane")
+                                                .show(ui);
 
                                             if open_current {
                                                 // Main button clicked: open in current pane
@@ -1011,53 +1016,4 @@ pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
     state.pane_tree.make_active(|tid, _| tid == new_tile_id);
     state.active_tile_id = Some(new_tile_id);
     state.active_chat_id = Some(chat_id);
-}
-
-/// Returns a tuple of booleans: (main_button_clicked, right_arrow_clicked)
-pub fn split_hover_button(ui: &mut egui::Ui, text: &str) -> (bool, bool) {
-    let mut main_clicked = false;
-    let mut arrow_clicked = false;
-
-    // 1. Peek at the available space to detect the hover state *before* drawing
-    let available_width = ui.available_width();
-    let button_height = 24.0; // Standard button height
-
-    // Create a virtual rectangle to check if the mouse is over this row
-    let interact_rect = egui::Rect::from_min_size(
-        ui.cursor().min,
-        egui::vec2(available_width, button_height)
-    );
-
-    let is_hovered = ui.rect_contains_pointer(interact_rect);
-
-    // 2. Draw the UI conditionally
-    ui.horizontal(|ui| {
-        // Optional: Remove spacing so the two buttons look like one continuous element
-        ui.spacing_mut().item_spacing.x = 2.0;
-
-        if is_hovered {
-            // Mouse is here! Draw the main button slightly shorter to make room
-            let main_width = available_width - button_height - ui.spacing().item_spacing.x;
-
-            if ui.add_sized([main_width, button_height], egui::Button::new(text)).clicked() {
-                main_clicked = true;
-            }
-
-            // Draw the square right-arrow button next to it
-            let arrow_btn = egui::Button::new("➡");
-            if ui.add_sized([button_height, button_height], arrow_btn)
-                .on_hover_text("Open in right pane")
-                .clicked()
-            {
-                arrow_clicked = true;
-            }
-        } else {
-            // Mouse is away! Draw just the main button taking up the full width
-            if ui.add_sized([available_width, button_height], egui::Button::new(text)).clicked() {
-                main_clicked = true;
-            }
-        }
-    });
-
-    (main_clicked, arrow_clicked)
 }

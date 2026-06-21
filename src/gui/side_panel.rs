@@ -1,5 +1,6 @@
-use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::State};
+use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::{State, split_button}};
 use rust_i18n::t;
+use split_button::SplitButton;
 
 pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
     egui::SidePanel::new(egui::panel::Side::Left, "panel").show(ctx, |ui| {
@@ -32,9 +33,6 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     }
                 }
             });
-            ui.add_space(5.0);
-            ui.separator();
-            ui.add_space(5.0);
 
             // --- NEW: Horizontal Layout for New Chat actions ---
             ui.horizontal(|ui| {
@@ -50,9 +48,9 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                 // Calculate exactly how much width the button needs
                 let font_id = egui::TextStyle::Button.resolve(ui.style());
-                                let text_width = ui.painter().layout_no_wrap(
-                                    new_chat_text.clone(), font_id,
-                                    egui::Color32::TRANSPARENT).size().x;
+                let text_width = ui.painter().layout_no_wrap(
+                    new_chat_text.clone(), font_id,
+                    egui::Color32::TRANSPARENT).size().x;
                 let button_padding = ui.spacing().button_padding;
                 let text_height = ui.text_style_height(&egui::TextStyle::Button);
                 let height = text_height + button_padding.y * 2.0;
@@ -60,14 +58,10 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                 // Base text width + extra allocated space for the double-wide arrow
                 let desired_width = text_width + button_padding.x * 2.0;
 
-                let (main_clicked, arrow_clicked) = split_clipped_button(
-                    ui,
-                    "new_chat_split_btn",
-                    &new_chat_text,
-                    &new_chat_tooltip,
-                    false,
-                    desired_width
-                );
+                let (main_clicked, arrow_clicked) = SplitButton::new(&new_chat_text)
+                    .main_tooltip(&new_chat_tooltip)
+                    .desired_width(desired_width)
+                    .show(ui);
 
                 if main_clicked {
                     let temp_id = get_temp_id(state);
@@ -203,14 +197,13 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         // 3. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
                         let available_width = ui.available_width();
-                        let (main_clicked, arrow_clicked) = split_clipped_button(
-                            ui,
-                            db_chat.id,
-                            &db_chat.title,
-                            &db_chat.title,
-                            is_selected,
-                            available_width
-                        );
+                        let (main_clicked, arrow_clicked) = SplitButton::new(&db_chat.title)
+                            .id_salt(db_chat.id)
+                            .selected(is_selected)
+                            .transparent(true) // Transparent for sidebar!
+                            .desired_width(available_width)
+                            .arrow_width(35.0)
+                            .show(ui);
 
                         if main_clicked {
                             clicked_chat_id = Some(db_chat.id);
@@ -322,117 +315,6 @@ fn extract_prompts(
             }
         }
     }
-}
-
-/// A custom button that acts as a standard clipped button, but reveals a split-action
-/// arrow on the right side when hovered.
-fn split_clipped_button(
-    ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
-    text: &str,
-    tooltip_text: &str,
-    is_selected: bool,
-    width: f32,
-) -> (bool, bool) {
-    // 1. Calculate standard button dimensions
-    let button_padding = ui.spacing().button_padding;
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let text_height = ui.text_style_height(&egui::TextStyle::Button);
-    let height = text_height + button_padding.y * 2.0;
-
-    // Use the explicitly provided width
-    let desired_size = egui::vec2(width, height);
-
-    // 2. Allocate the boundary (reserves space in the layout)
-    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-
-    // 3. Check physical pointer presence (immune to click-stealing)
-    let is_hovered = ui.rect_contains_pointer(rect);
-
-    // 4. Dynamically shift width. (The widgets ALWAYS exist to prevent dropped clicks!)
-    let arrow_width = if is_hovered { height * 2.0 } else { 0.0 };
-    let main_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x - arrow_width, rect.max.y));
-    let arrow_rect = egui::Rect::from_min_max(egui::pos2(rect.max.x - arrow_width, rect.min.y), rect.max);
-
-    // 5. Create independent interactable components
-    let base_id = ui.id().with(id_salt);
-    let main_response = ui.interact(main_rect, base_id.with("main"), egui::Sense::click());
-    let arrow_response = ui.interact(arrow_rect, base_id.with("arrow"), egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        let active = &ui.style().visuals.widgets.active;
-        let hovered = &ui.style().visuals.widgets.hovered;
-        let inactive = &ui.style().visuals.widgets.inactive;
-
-        // 1. Draw base background if selected
-        if is_selected {
-            ui.painter().rect(
-                rect,
-                active.corner_radius,
-                active.bg_fill,
-                egui::Stroke::NONE,
-                egui::StrokeKind::Inside,
-            );
-        }
-
-        // 2. Draw Main Button Border/Hover
-        let mut main_rounding = if is_selected { active.corner_radius } else { inactive.corner_radius };
-        if arrow_width > 0.0 { main_rounding.ne = 0; main_rounding.se = 0; }
-
-        if main_response.hovered() {
-            ui.painter().rect(
-                main_rect, main_rounding, hovered.bg_fill, hovered.bg_stroke, egui::StrokeKind::Inside,
-            );
-        } else if is_selected {
-            ui.painter().rect_stroke(
-                main_rect, main_rounding, active.bg_stroke, egui::StrokeKind::Inside,
-            );
-        }
-
-        // 3. Draw Arrow Button Border/Hover
-        if arrow_width > 0.0 {
-            let mut arrow_rounding = inactive.corner_radius;
-            arrow_rounding.nw = 0; arrow_rounding.sw = 0;
-
-            let (bg, stroke, text_color) = if arrow_response.hovered() {
-                (hovered.bg_fill, hovered.bg_stroke, hovered.text_color())
-            } else {
-                let s = if is_selected { active.bg_stroke } else { egui::Stroke::NONE };
-                (egui::Color32::TRANSPARENT, s, inactive.text_color())
-            };
-
-            ui.painter().rect(
-                arrow_rect, arrow_rounding, bg, stroke, egui::StrokeKind::Inside,
-            );
-
-            // Divider line
-            let div_stroke = if is_selected { active.bg_stroke } else { inactive.bg_stroke };
-            ui.painter().vline(arrow_rect.min.x, arrow_rect.y_range(), div_stroke);
-
-            ui.painter().text(
-                arrow_rect.center(), egui::Align2::CENTER_CENTER, "➡", font_id.clone(), text_color,
-            );
-        }
-
-        // 4. Draw Text
-        let text_color = if main_response.hovered() {
-            hovered.text_color()
-        } else if is_selected {
-            active.text_color()
-        } else {
-            inactive.text_color()
-        };
-
-        let painter = ui.painter().with_clip_rect(main_rect);
-        painter.text(
-            main_rect.min + button_padding, egui::Align2::LEFT_TOP, text, font_id, text_color,
-        );
-    }
-
-    main_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(tooltip_text).strong()); });
-    if arrow_width > 0.0 { arrow_response.clone().on_hover_text("In a pane to the right"); }
-
-    (main_response.clicked(), arrow_response.clicked())
 }
 
 // Helper function to handle the popup logic

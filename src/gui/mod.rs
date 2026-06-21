@@ -36,6 +36,8 @@ mod agent_config;
 pub mod math_render;
 mod autocomplete;
 mod panes;
+pub mod split_button;
+pub use split_button::SplitButton;
 
 pub struct MyAppPermanent {
     pub rt: Handle,
