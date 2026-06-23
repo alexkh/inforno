@@ -59,7 +59,9 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                 let desired_width = text_width + button_padding.x * 2.0;
 
                 let (main_clicked, arrow_clicked) = SplitButton::new(&new_chat_text)
+                    .id_salt("new_chat_btn")
                     .main_tooltip(&new_chat_tooltip)
+                    .arrow_tooltip(t!("right_button_tooltip"))
                     .desired_width(desired_width)
                     .show(ui);
 
@@ -201,6 +203,8 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             .id_salt(db_chat.id)
                             .selected(is_selected)
                             .transparent(true) // Transparent for sidebar!
+                            .main_tooltip(&db_chat.title)
+                            .arrow_tooltip(t!("right_button_tooltip"))
                             .desired_width(available_width)
                             .arrow_width(35.0)
                             .show(ui);

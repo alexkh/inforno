@@ -261,18 +261,16 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                             // --- USE THE NEW HELPER HERE ---
                                             // We pass the chat title to act as the button text.
                                             // It returns true/false for which part was clicked.
-                                            let (open_current, open_right) = SplitButton::new(&res.chat_title)
+                                            let (open_current, open_right) = crate::gui::SplitButton::new(&res.chat_title)
                                                 .id_salt(res.chat_id)
                                                 .arrow_tooltip("Open in right pane")
                                                 .show(ui);
 
                                             if open_current {
-                                                // Main button clicked: open in current pane
                                                 self.open_chat_requests.push((res.chat_id, false));
                                             }
 
                                             if open_right {
-                                                // Arrow clicked: open in right pane
                                                 self.open_chat_requests.push((res.chat_id, true));
                                             }
                                             // -------------------------------
@@ -363,42 +361,15 @@ pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>) -> (
     (tile_labels, chat_locations)
 }
 
-// The smart tab spawner/focuser we discussed
-pub fn open_chat_in_tab(state: &mut crate::gui::State, new_chat_id: i64) {
-    let prev_chat_id = state.active_chat_id;
-    state.active_chat_id = Some(new_chat_id);
+// --- UNIFIED SPAWNER HELPERS ---
 
-    // If already open, just focus it
-    let mut found_tile_id = None;
-    for (tile_id, tile) in state.pane_tree.tiles.iter() {
-        if let egui_tiles::Tile::Pane(Pane::Chat { chat_id }) = tile {
-            if *chat_id == new_chat_id {
-                found_tile_id = Some(*tile_id);
-                break;
-            }
-        }
-    }
-
-    if let Some(tile_id) = found_tile_id {
-        state.pane_tree.make_active(|tid, _| tid == tile_id);
-        return;
-    }
-
-    let new_pane = Pane::Chat { chat_id: new_chat_id };
+/// Core engine logic to spawn a pane into the currently active tab container.
+fn spawn_in_tab(state: &mut crate::gui::State, new_pane: Pane) -> egui_tiles::TileId {
+    let prev_active_id = state.active_tile_id;
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
 
-    // Find the TileId of the previously active chat
-    let mut prev_tile_id = None;
-    if let Some(prev_id) = prev_chat_id {
-        for (tid, tile) in state.pane_tree.tiles.iter() {
-            if let egui_tiles::Tile::Pane(Pane::Chat { chat_id }) = tile {
-                if *chat_id == prev_id { prev_tile_id = Some(*tid); break; }
-            }
-        }
-    }
-
-    if let Some(ptid) = prev_tile_id {
-        // Check if the previous pane is already inside a Tabs container
+    if let Some(ptid) = prev_active_id {
+        // 1. Check if the active pane is already inside a Tabs container
         let mut parent_is_tabs = None;
         for (tid, tile) in state.pane_tree.tiles.iter() {
             if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
@@ -410,36 +381,31 @@ pub fn open_chat_in_tab(state: &mut crate::gui::State, new_chat_id: i64) {
         }
 
         if let Some(tabs_id) = parent_is_tabs {
-            // It was inside a Tabs container -> Inject it natively!
+            // It is inside a Tabs container -> Inject it natively!
             if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
                 tabs.add_child(new_tile_id);
                 tabs.set_active(new_tile_id);
             }
         } else {
             // The active pane is floating (e.g., freshly split or root).
-            // We mutate the tile IN-PLACE so parent pointers (Linear, Grid, Root) remain perfectly intact!
-
-            // 1. Extract the old Pane payload safely
+            // We mutate the tile IN-PLACE so parent pointers remain perfectly intact!
             let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
                 p.clone()
             } else {
-                return;
+                return new_tile_id;
             };
 
-            // 2. Relocate the old pane to a new ID
             let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-
-            // 3. Generate a fresh Tabs container holding both the old pane and the new pane
             let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
             new_tabs.active = Some(new_tile_id);
 
-            // 4. Overwrite the existing floating pane with the new Tabs container!
+            // Overwrite the existing floating pane with the new Tabs container!
             if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
                 *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
             }
         }
     } else {
-        // No previous chat found. Inject into root.
+        // 2. Tree is empty or nothing is selected. Inject at root.
         if let Some(root_id) = state.pane_tree.root {
             let mut is_tabs = false;
             if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
@@ -448,7 +414,7 @@ pub fn open_chat_in_tab(state: &mut crate::gui::State, new_chat_id: i64) {
                 is_tabs = true;
             }
 
-            // Only wrap if the root isn't already a Tabs container
+            // Enforce SimplificationOptions::all_panes_must_have_tabs
             if !is_tabs {
                 let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
                 state.pane_tree.root = Some(new_tabs_id);
@@ -457,85 +423,24 @@ pub fn open_chat_in_tab(state: &mut crate::gui::State, new_chat_id: i64) {
                 }
             }
         } else {
-            // Tree is entirely empty
-            state.pane_tree.root = Some(new_tile_id);
-        }
-    }
-}
-
-pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content: String) {
-    let prev_active_id = state.active_tile_id; // Capture current focus
-
-    let new_pane = Pane::Editor { path, content };
-    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-
-    state.active_tile_id = Some(new_tile_id); // Focus new tab globally
-    state.active_chat_id = None; // Ensure bottom panel disconnects when editor opens
-
-    if let Some(ptid) = prev_active_id {
-        let mut parent_is_tabs = None;
-        for (tid, tile) in state.pane_tree.tiles.iter() {
-            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
-                if t.children.contains(&ptid) {
-                    parent_is_tabs = Some(*tid);
-                    break;
-                }
-            }
-        }
-
-        if let Some(tabs_id) = parent_is_tabs {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-            }
-        } else {
-            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
-                p.clone()
-            } else { return; };
-
-            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
-            new_tabs.active = Some(new_tile_id);
-
-            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
-                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
-            }
-        }
-    } else {
-        if let Some(root_id) = state.pane_tree.root {
-            // FIXED: Check if the root is already a tabs container
-            let mut is_tabs = false;
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-                is_tabs = true;
-            }
-
-            if !is_tabs {
-                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
-                state.pane_tree.root = Some(new_tabs_id);
-
-                // FIXED: Tell the brand new Tabs container to focus our new tile
-                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
-                    tabs.set_active(new_tile_id);
-                }
-            }
-        } else {
-            state.pane_tree.root = Some(new_tile_id);
+            // Tree is entirely empty. Create a root Tabs container.
+            let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
+            state.pane_tree.root = Some(new_tabs_id);
         }
     }
 
-    // Force egui_tiles to traverse the tree and verify focus
     state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+    state.active_tile_id = Some(new_tile_id);
+    new_tile_id
 }
 
-pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path::PathBuf, content: String) {
+/// Core engine logic to spawn a pane into the column to the right (or create one).
+fn spawn_in_right_pane(state: &mut crate::gui::State, new_pane: Pane) -> egui_tiles::TileId {
     let active_id = match state.active_tile_id {
         Some(id) => id,
         None => {
             // Fallback to normal open if nothing is active
-            open_editor_in_tab(state, path, content);
-            return;
+            return spawn_in_tab(state, new_pane);
         }
     };
 
@@ -543,7 +448,6 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
     fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
         for (id, tile) in tree.tiles.iter() {
             if let egui_tiles::Tile::Container(c) = tile {
-                // FIXED: children() is an iterator, so we call .position() directly
                 if let Some(pos) = c.children().position(|&child| child == child_id) {
                     return Some((*id, pos));
                 }
@@ -557,7 +461,6 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
         if let Some(tile) = tree.tiles.get(current) {
             match tile {
                 egui_tiles::Tile::Container(c) => {
-                    // FIXED: Since children() is an iterator, use .next() to get the first item
                     if let Some(&first) = c.children().next() {
                         return find_leftmost_leaf(tree, first);
                     }
@@ -581,7 +484,6 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
     let mut current = target_node;
 
     while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
-        // FIXED: Match on Linear container and check its direction
         if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
             if l.dir == egui_tiles::LinearDir::Horizontal {
                 if pos + 1 < l.children.len() {
@@ -593,11 +495,9 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
         current = parent_id;
     }
 
-    // 3. Create the new pane
-    let new_pane = Pane::Editor { path, content };
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
 
-    // 4. If a neighbor exists on the right, inject the tab!
+    // 3. If a neighbor exists on the right, inject the tab!
     if let Some(neighbor_id) = right_neighbor_id {
         let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
 
@@ -616,197 +516,11 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: std::path:
             }
         } else {
             // Found a floating Pane on the right! Wrap it in a Tabs container in-place.
-
-            // 1. Use a tightly scoped block to extract the old pane and drop the borrow immediately
             let old_pane = {
                 let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
                 match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
                     egui_tiles::Tile::Pane(p) => p,
-                    _ => return, // Safely abort if something went wrong
-                }
-            }; // <-- tile_ref is dropped here, ending the first mutable borrow
-
-            // 2. Now it is perfectly safe to borrow the tree again to insert the new pane
-            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-
-            // 3. Re-borrow the original leaf one last time to populate its new Tabs container
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(leaf_id) {
-                tabs.children = vec![old_pane_new_id, new_tile_id];
-                tabs.active = Some(new_tile_id);
-            }
-        }
-
-        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-        state.active_tile_id = Some(new_tile_id);
-        state.active_chat_id = None;
-        return;
-    }
-
-    // 5. No right neighbor found? Split horizontally to create one.
-    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
-
-    if let Some(root_id) = state.pane_tree.root {
-        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
-        state.pane_tree.root = Some(new_root);
-    } else {
-        state.pane_tree.root = Some(new_tabs_id);
-    }
-
-    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-    state.active_tile_id = Some(new_tile_id);
-    state.active_chat_id = None;
-}
-
-// Tile spawners at the bottom of the file
-pub fn open_merge_in_tab(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
-    let prev_active_id = state.active_tile_id;
-
-    let new_pane = Pane::Merge { path };
-    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-
-    // Inject the heavy DiffApp into State memory
-    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
-
-    state.active_tile_id = Some(new_tile_id);
-    state.active_chat_id = None;
-
-    if let Some(ptid) = prev_active_id {
-        let mut parent_is_tabs = None;
-        for (tid, tile) in state.pane_tree.tiles.iter() {
-            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
-                if t.children.contains(&ptid) {
-                    parent_is_tabs = Some(*tid);
-                    break;
-                }
-            }
-        }
-
-        if let Some(tabs_id) = parent_is_tabs {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-            }
-        } else {
-            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
-                p.clone()
-            } else { return; };
-
-            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
-            new_tabs.active = Some(new_tile_id);
-
-            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
-                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
-            }
-        }
-    } else {
-        if let Some(root_id) = state.pane_tree.root {
-            let mut is_tabs = false;
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-                is_tabs = true;
-            }
-
-            if !is_tabs {
-                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
-                state.pane_tree.root = Some(new_tabs_id);
-
-                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
-                    tabs.set_active(new_tile_id);
-                }
-            }
-        } else {
-            state.pane_tree.root = Some(new_tile_id);
-        }
-    }
-
-    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-}
-
-pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
-    let active_id = match state.active_tile_id {
-        Some(id) => id,
-        None => {
-            open_merge_in_tab(state, path, left, right);
-            return;
-        }
-    };
-
-    fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
-        for (id, tile) in tree.tiles.iter() {
-            if let egui_tiles::Tile::Container(c) = tile {
-                if let Some(pos) = c.children().position(|&child| child == child_id) {
-                    return Some((*id, pos));
-                }
-            }
-        }
-        None
-    }
-
-    fn find_leftmost_leaf(tree: &egui_tiles::Tree<Pane>, current: egui_tiles::TileId) -> egui_tiles::TileId {
-        if let Some(tile) = tree.tiles.get(current) {
-            match tile {
-                egui_tiles::Tile::Container(c) => {
-                    if let Some(&first) = c.children().next() {
-                        return find_leftmost_leaf(tree, first);
-                    }
-                }
-                egui_tiles::Tile::Pane(_) => return current,
-            }
-        }
-        current
-    }
-
-    let mut target_node = active_id;
-    if let Some((pid, _)) = find_parent(&state.pane_tree, active_id) {
-        if matches!(state.pane_tree.tiles.get(pid), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))) {
-            target_node = pid;
-        }
-    }
-
-    let mut right_neighbor_id = None;
-    let mut current = target_node;
-
-    while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
-        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
-            if l.dir == egui_tiles::LinearDir::Horizontal {
-                if pos + 1 < l.children.len() {
-                    right_neighbor_id = Some(l.children[pos + 1]);
-                    break;
-                }
-            }
-        }
-        current = parent_id;
-    }
-
-    let new_pane = Pane::Merge { path };
-    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-
-    // Inject the heavy DiffApp into State memory
-    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
-
-    if let Some(neighbor_id) = right_neighbor_id {
-        let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
-
-        let mut leaf_parent_tabs = None;
-        if let Some((pid, _)) = find_parent(&state.pane_tree, leaf_id) {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_))) = state.pane_tree.tiles.get(pid) {
-                leaf_parent_tabs = Some(pid);
-            }
-        }
-
-        if let Some(tabs_id) = leaf_parent_tabs {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-            }
-        } else {
-            let old_pane = {
-                let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
-                match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
-                    egui_tiles::Tile::Pane(p) => p,
-                    _ => return,
+                    _ => return new_tile_id, // Safely abort
                 }
             };
 
@@ -817,203 +531,76 @@ pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, le
                 tabs.active = Some(new_tile_id);
             }
         }
-
-        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-        state.active_tile_id = Some(new_tile_id);
-        state.active_chat_id = None;
-        return;
-    }
-
-    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
-
-    if let Some(root_id) = state.pane_tree.root {
-        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
-        state.pane_tree.root = Some(new_root);
     } else {
-        state.pane_tree.root = Some(new_tabs_id);
-    }
+        // 4. No right neighbor found? Split horizontally to create one.
+        let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
 
-    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-    state.active_tile_id = Some(new_tile_id);
-    state.active_chat_id = None;
-}
-
-pub fn open_search_results_in_tab(state: &mut crate::gui::State, query: String, results: Vec<crate::common::SearchResult>) {
-    let prev_active_id = state.active_tile_id;
-
-    let new_pane = Pane::SearchResults { query, results };
-    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-
-    state.active_tile_id = Some(new_tile_id);
-    state.active_chat_id = None;
-
-    // Use standard injection logic
-    if let Some(ptid) = prev_active_id {
-        let mut parent_is_tabs = None;
-        for (tid, tile) in state.pane_tree.tiles.iter() {
-            if let egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)) = tile {
-                if t.children.contains(&ptid) {
-                    parent_is_tabs = Some(*tid);
-                    break;
-                }
-            }
-        }
-
-        if let Some(tabs_id) = parent_is_tabs {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-            }
-        } else {
-            let old_pane = if let Some(egui_tiles::Tile::Pane(p)) = state.pane_tree.tiles.get(ptid) {
-                p.clone()
-            } else { return; };
-
-            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-            let mut new_tabs = egui_tiles::Tabs::new(vec![old_pane_new_id, new_tile_id]);
-            new_tabs.active = Some(new_tile_id);
-
-            if let Some(tile_ref) = state.pane_tree.tiles.get_mut(ptid) {
-                *tile_ref = egui_tiles::Tile::Container(egui_tiles::Container::Tabs(new_tabs));
-            }
-        }
-    } else {
         if let Some(root_id) = state.pane_tree.root {
-            let mut is_tabs = false;
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(root_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-                is_tabs = true;
-            }
-
-            if !is_tabs {
-                let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![root_id, new_tile_id]);
-                state.pane_tree.root = Some(new_tabs_id);
-
-                if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(new_tabs_id) {
-                    tabs.set_active(new_tile_id);
-                }
-            }
+            let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
+            state.pane_tree.root = Some(new_root);
         } else {
-            state.pane_tree.root = Some(new_tile_id);
+            state.pane_tree.root = Some(new_tabs_id);
         }
     }
 
     state.pane_tree.make_active(|tid, _| tid == new_tile_id);
+    state.active_tile_id = Some(new_tile_id);
+    new_tile_id
 }
 
-pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
-    let active_id = match state.active_tile_id {
-        Some(id) => id,
-        None => {
-            // If no pane is currently active, try to split from the root
-            if let Some(root_id) = state.pane_tree.root {
-                root_id
-            } else {
-                open_chat_in_tab(state, chat_id);
-                return;
-            }
-        }
-    };
+// --- PUBLIC API WRAPPERS ---
 
-    fn find_parent(tree: &egui_tiles::Tree<Pane>, child_id: egui_tiles::TileId) -> Option<(egui_tiles::TileId, usize)> {
-        for (id, tile) in tree.tiles.iter() {
-            if let egui_tiles::Tile::Container(c) = tile {
-                if let Some(pos) = c.children().position(|&child| child == child_id) {
-                    return Some((*id, pos));
-                }
+pub fn open_chat_in_tab(state: &mut crate::gui::State, chat_id: i64) {
+    // If already open, just focus it
+    let mut found_tile_id = None;
+    for (tile_id, tile) in state.pane_tree.tiles.iter() {
+        if let egui_tiles::Tile::Pane(Pane::Chat { chat_id: id }) = tile {
+            if *id == chat_id {
+                found_tile_id = Some(*tile_id);
+                break;
             }
-        }
-        None
-    }
-
-    fn find_leftmost_leaf(tree: &egui_tiles::Tree<Pane>, current: egui_tiles::TileId) -> egui_tiles::TileId {
-        if let Some(tile) = tree.tiles.get(current) {
-            match tile {
-                egui_tiles::Tile::Container(c) => {
-                    if let Some(&first) = c.children().next() {
-                        return find_leftmost_leaf(tree, first);
-                    }
-                }
-                egui_tiles::Tile::Pane(_) => return current,
-            }
-        }
-        current
-    }
-
-    let mut target_node = active_id;
-    if let Some((pid, _)) = find_parent(&state.pane_tree, active_id) {
-        if matches!(state.pane_tree.tiles.get(pid), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))) {
-            target_node = pid;
         }
     }
 
-    let mut right_neighbor_id = None;
-    let mut current = target_node;
-
-    while let Some((parent_id, pos)) = find_parent(&state.pane_tree, current) {
-        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = state.pane_tree.tiles.get(parent_id) {
-            if l.dir == egui_tiles::LinearDir::Horizontal {
-                if pos + 1 < l.children.len() {
-                    right_neighbor_id = Some(l.children[pos + 1]);
-                    break;
-                }
-            }
-        }
-        current = parent_id;
-    }
-
-    let new_pane = Pane::Chat { chat_id };
-    let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
-
-    if let Some(neighbor_id) = right_neighbor_id {
-        let leaf_id = find_leftmost_leaf(&state.pane_tree, neighbor_id);
-
-        let mut leaf_parent_tabs = None;
-        if let Some((pid, _)) = find_parent(&state.pane_tree, leaf_id) {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_))) = state.pane_tree.tiles.get(pid) {
-                leaf_parent_tabs = Some(pid);
-            }
-        }
-
-        if let Some(tabs_id) = leaf_parent_tabs {
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(tabs_id) {
-                tabs.add_child(new_tile_id);
-                tabs.set_active(new_tile_id);
-            }
-        } else {
-            let old_pane = {
-                let tile_ref = state.pane_tree.tiles.get_mut(leaf_id).unwrap();
-                match std::mem::replace(tile_ref, egui_tiles::Tile::Container(egui_tiles::Container::Tabs(egui_tiles::Tabs::new(vec![])))) {
-                    egui_tiles::Tile::Pane(p) => p,
-                    _ => return,
-                }
-            };
-
-            let old_pane_new_id = state.pane_tree.tiles.insert_pane(old_pane);
-
-            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = state.pane_tree.tiles.get_mut(leaf_id) {
-                tabs.children = vec![old_pane_new_id, new_tile_id];
-                tabs.active = Some(new_tile_id);
-            }
-        }
-
-        state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-        state.active_tile_id = Some(new_tile_id);
+    if let Some(tile_id) = found_tile_id {
+        state.pane_tree.make_active(|tid, _| tid == tile_id);
+        state.active_tile_id = Some(tile_id);
         state.active_chat_id = Some(chat_id);
         return;
     }
 
-    let new_tabs_id = state.pane_tree.tiles.insert_tab_tile(vec![new_tile_id]);
+    spawn_in_tab(state, Pane::Chat { chat_id });
+    state.active_chat_id = Some(chat_id); // Connect the bottom panel
+}
 
-    if let Some(root_id) = state.pane_tree.root {
-        let new_root = state.pane_tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs_id]);
-        state.pane_tree.root = Some(new_root);
-    } else {
-        state.pane_tree.root = Some(new_tabs_id);
-    }
-
-    state.pane_tree.make_active(|tid, _| tid == new_tile_id);
-    state.active_tile_id = Some(new_tile_id);
+pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
+    spawn_in_right_pane(state, Pane::Chat { chat_id });
     state.active_chat_id = Some(chat_id);
+}
+
+pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content: String) {
+    spawn_in_tab(state, Pane::Editor { path, content });
+    state.active_chat_id = None; // Disconnect the bottom panel
+}
+
+pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: PathBuf, content: String) {
+    spawn_in_right_pane(state, Pane::Editor { path, content });
+    state.active_chat_id = None;
+}
+
+pub fn open_merge_in_tab(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+    let new_tile_id = spawn_in_tab(state, Pane::Merge { path });
+    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+    state.active_chat_id = None;
+}
+
+pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+    let new_tile_id = spawn_in_right_pane(state, Pane::Merge { path });
+    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+    state.active_chat_id = None;
+}
+
+pub fn open_search_results_in_tab(state: &mut crate::gui::State, query: String, results: Vec<crate::common::SearchResult>) {
+    spawn_in_tab(state, Pane::SearchResults { query, results });
+    state.active_chat_id = None;
 }

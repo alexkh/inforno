@@ -273,15 +273,36 @@ impl State {
         if pane_tree.is_empty() {
             let mut tiles = egui_tiles::Tiles::default();
             let chat_pane = tiles.insert_pane(crate::gui::panes::Pane::Chat {
-                chat_id: active_chat_id.unwrap_or(0) });
-            pane_tree = egui_tiles::Tree::new("main_pane_tree", chat_pane, tiles);
+                chat_id: active_chat_id.unwrap_or(0)
+            });
+
+            // FIX 1: Wrap the initial pane in a Tabs container!
+            let tabs_container = tiles.insert_tab_tile(vec![chat_pane]);
+            pane_tree = egui_tiles::Tree::new("main_pane_tree", tabs_container, tiles);
+        }
+
+        // Find the first available pane to act as our active tile on startup
+        let mut initial_active_tile = None;
+        if pane_tree.root.is_some() {
+            // Step A: Just grab the ID we need (Immutable borrow)
+            for (id, tile) in pane_tree.tiles.iter() {
+                if matches!(tile, egui_tiles::Tile::Pane(_)) {
+                    initial_active_tile = Some(*id);
+                    break;
+                }
+            }
+        }
+
+        // Step B: Now that the loop is over, we can safely mutate the tree!
+        if let Some(target_id) = initial_active_tile {
+            pane_tree.make_active(|tid, _| tid == target_id);
         }
 
         // --- 4. Construct State ---
         Self {
             perma: permanent,
             tile_labels: std::collections::HashMap::new(),
-            active_tile_id: None,
+            active_tile_id: initial_active_tile,
             chat_locations: std::collections::HashMap::new(),
             open_chats,
             active_chat_id,

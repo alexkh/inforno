@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::bulat::editor::{CodeEditor, Syntax, ColorTheme};
+use crate::gui::SplitButton;
 
 use crate::{
     common::{
@@ -614,64 +615,68 @@ fn render_msg_content(
                         if let Some(path) = filepath {
                             if let Some(root) = project_root {
                                 let full_path = root.join(&path);
+                                ui.spacing_mut().item_spacing.x = 6.0;
 
-                                // Group the open buttons together tightly
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 2.0;
-                                    if ui.button(format!("📄 {}", path)).on_hover_text("Open file in editor").clicked() {
-                                        let _ = op_tx.send(crate::common::FileOpMsg {
-                                            op: crate::common::FileOp::OpenEditor,
-                                            cancelled: false,
-                                            path: Some(full_path.clone()),
-                                            attachments: None,
-                                            left_content: None,
-                                            right_content: None,
-                                        });
-                                    }
-                                    if ui.button("➡").on_hover_text("Open file in pane to the right").clicked() {
-                                        let _ = op_tx.send(crate::common::FileOpMsg {
-                                            op: crate::common::FileOp::OpenEditorRight,
-                                            cancelled: false,
-                                            path: Some(full_path.clone()),
-                                            attachments: None,
-                                            left_content: None,
-                                            right_content: None,
-                                        });
-                                    }
-                                });
+                                let (open_main, open_arrow) = SplitButton::new(format!("📄 {}", path))
+                                    .id_salt(format!("open_btn_{}_{}", msg.id, i)) // <--- ADD UNIQUE ID
+                                    .main_tooltip(t!("open_file_in_editor_tooltip"))
+                                    .arrow_tooltip(t!("right_button_tooltip"))
+                                    .show(ui);
 
-                                // Group the Open Merge buttons together tightly
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 2.0;
-                                    if ui.button("🛠 Open in Merge Tool").clicked() {
-                                        let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                                        let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+                                if open_main {
+                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                        op: crate::common::FileOp::OpenEditor,
+                                        cancelled: false,
+                                        path: Some(full_path.clone()),
+                                        attachments: None,
+                                        left_content: None,
+                                        right_content: None,
+                                    });
+                                }
+                                if open_arrow {
+                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                        op: crate::common::FileOp::OpenEditorRight,
+                                        cancelled: false,
+                                        path: Some(full_path.clone()),
+                                        attachments: None,
+                                        left_content: None,
+                                        right_content: None,
+                                    });
+                                }
 
-                                        let _ = op_tx.send(crate::common::FileOpMsg {
-                                            op: crate::common::FileOp::OpenMerge,
-                                            path: Some(full_path.clone()),
-                                            left_content: Some(original_content),
-                                            right_content: Some(right_content),
-                                            ..Default::default()
-                                        });
-                                    }
-                                    if ui.button("➡").on_hover_text("Open Merge Tool in pane to the right").clicked() {
-                                        let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                                        let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+                                let (merge_main, merge_arrow) = SplitButton::new(t!("open_in_merge_tool_btn"))
+                                    .id_salt(format!("merge_btn_{}_{}", msg.id, i))
+                                    .main_tooltip(t!("open_in_merge_tool_tooltip"))
+                                    .arrow_tooltip(t!("right_button_tooltip"))
+                                    .show(ui);
 
-                                        let _ = op_tx.send(crate::common::FileOpMsg {
-                                            op: crate::common::FileOp::OpenMergeRight,
-                                            path: Some(full_path.clone()),
-                                            left_content: Some(original_content),
-                                            right_content: Some(right_content),
-                                            ..Default::default()
-                                        });
-                                    }
-                                });
+                                if merge_main {
+                                    let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                                    let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+
+                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                        op: crate::common::FileOp::OpenMerge,
+                                        path: Some(full_path.clone()),
+                                        left_content: Some(original_content),
+                                        right_content: Some(right_content),
+                                        ..Default::default()
+                                    });
+                                }
+                                if merge_arrow {
+                                    let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                                    let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+
+                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                        op: crate::common::FileOp::OpenMergeRight,
+                                        path: Some(full_path.clone()),
+                                        left_content: Some(original_content),
+                                        right_content: Some(right_content),
+                                        ..Default::default()
+                                    });
+                                }
                             } else {
                                 // NEW: Fallback button if there's no project root
-                                if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
-                                    let _ = op_tx.send(crate::common::FileOpMsg {
+                                if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {                                    let _ = op_tx.send(crate::common::FileOpMsg {
                                         op: crate::common::FileOp::OpenEditor,
                                         cancelled: false,
                                         path: Some(std::path::PathBuf::from(&path)),

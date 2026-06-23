@@ -76,9 +76,17 @@ impl SplitButton {
         let text_height = ui.text_style_height(&egui::TextStyle::Button);
         let height = text_height + button_padding.y * 2.0;
 
-        // Fallbacks
-        let width = self.desired_width.unwrap_or_else(|| ui.available_width());
         let arrow_w = self.arrow_width.unwrap_or(height); // Default to square!
+
+        // --- NEW: Smart Width Calculation ---
+        let width = self.desired_width.unwrap_or_else(|| {
+            // Measure the exact width of the text
+            let text_width = ui.painter().layout_no_wrap(
+                self.text.clone(), font_id.clone(), egui::Color32::TRANSPARENT
+            ).size().x;
+            // Total width = text + padding + reserved space for the arrow
+            text_width + button_padding.x * 2.0
+        });
 
         let desired_size = egui::vec2(width, height);
         let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
@@ -138,10 +146,16 @@ impl SplitButton {
                 ui.painter().text(arrow_rect.center(), egui::Align2::CENTER_CENTER, "➡", font_id.clone(), text_color);
             }
 
-            // 4. Draw Main Text
+            // 4. Draw Main Text (NEW: Centered vertically so it looks like a normal egui button)
             let text_color = if main_response.hovered() { hovered.text_color() } else if self.is_selected { active.text_color() } else { inactive.text_color() };
             let painter = ui.painter().with_clip_rect(main_rect);
-            painter.text(main_rect.min + button_padding, egui::Align2::LEFT_TOP, &self.text, font_id, text_color);
+            painter.text(
+                egui::pos2(main_rect.min.x + button_padding.x, main_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &self.text,
+                font_id,
+                text_color
+            );
         }
 
         // Attach Tooltips
@@ -149,8 +163,9 @@ impl SplitButton {
             main_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(tooltip).strong()); });
         }
         if active_arrow_w > 0.0 {
-            let tooltip = self.arrow_tooltip.unwrap_or(t!("right_button_tooltip").into());
-            arrow_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(tooltip).strong()); });
+            if let Some(tooltip) = self.arrow_tooltip {
+                arrow_response.clone().on_hover_ui(|ui| { ui.heading(egui::RichText::new(tooltip).strong()); });
+            }
         }
 
         (main_response.clicked(), arrow_response.clicked())
