@@ -4,6 +4,8 @@ use super::syntax::{TokenType, rust::RustToken};
 use super::Syntax;
 use logos::Logos;
 
+use crate::bulat::editor::syntax::DynamicRule;
+
 #[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Token {
     ty: TokenType,
@@ -33,7 +35,73 @@ impl Token {
         job
     }
 
-    pub fn tokens(&mut self, _syntax: &Syntax, text: &str) -> Vec<Self> {
+    pub fn tokens(&mut self, syntax: &Syntax, text: &str) -> Vec<Self> {
+        // 1. If dynamic rules exist, use the Runtime Engine
+        if let Some(rules) = &syntax.dynamic_rules {
+            println!("Using dynamic syntax...");
+            return self.tokens_dynamic(rules, text);
+        }
+
+        // 2. Check if the language is explicitly Rust
+        if syntax.language == "Rust" {
+            return self.tokens_logos(text);
+        }
+
+        println!("No syntax highlighting");
+
+        // 3. True fallback for Syntax::text() or failed plugins
+        // Returns the entire block of text as a standard Literal (standard foreground color)
+        vec![Self {
+            ty: TokenType::Literal,
+            buffer: text.to_string(),
+        }]
+    }
+
+    fn tokens_dynamic(&self, dynamic_rules: &[DynamicRule], mut text: &str) -> Vec<Self> {
+        let mut tokens = Vec::new();
+
+        while !text.is_empty() {
+            let mut matched = false;
+
+            // Test each regex rule in the order defined by the Rhai script
+            for rule in dynamic_rules {
+                if let Some(mat) = rule.regex.find(text) {
+                    let matched_str = mat.as_str();
+                    tokens.push(Token {
+                        ty: rule.token_type,
+                        buffer: matched_str.to_string(),
+                    });
+
+                    // Advance the text buffer forward
+                    text = &text[matched_str.len()..];
+                    matched = true;
+                    break;
+                }
+            }
+
+            // If no regex matched, safely consume one character as "Unknown"
+            // so we don't get trapped in an infinite loop.
+            if !matched {
+                let mut chars = text.chars();
+                let c = chars.next().unwrap();
+
+                let ty = if c.is_whitespace() {
+                    TokenType::Whitespace(c)
+                } else {
+                    TokenType::Unknown
+                };
+
+                tokens.push(Token {
+                    ty,
+                    buffer: c.to_string(),
+                });
+                text = chars.as_str();
+            }
+        }
+        tokens
+    }
+
+    pub fn tokens_logos(&mut self, text: &str) -> Vec<Self> {
         let lexer = RustToken::lexer(text);
 
         // 1. Collect all raw tokens first so we can look ahead

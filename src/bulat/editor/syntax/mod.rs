@@ -1,7 +1,31 @@
 #![allow(dead_code)]
 pub mod rust;
+pub mod loader;
 
 use std::collections::BTreeSet;
+use regex::Regex;
+use std::hash::{Hash, Hasher};
+
+#[derive(Clone, Debug)]
+pub struct DynamicRule {
+    pub token_type: TokenType,
+    pub pattern: String,
+    pub regex: Regex,
+}
+
+impl PartialEq for DynamicRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.token_type == other.token_type && self.pattern == other.pattern
+    }
+}
+impl Eq for DynamicRule {}
+
+impl Hash for DynamicRule {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.token_type.hash(state);
+        self.pattern.hash(state);
+    }
+}
 
 // Added Hash to TokenType
 #[derive(Default, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
@@ -32,6 +56,7 @@ pub struct Syntax {
     pub keywords: BTreeSet<&'static str>,
     pub types: BTreeSet<&'static str>,
     pub special: BTreeSet<&'static str>,
+    pub dynamic_rules: Option<Vec<DynamicRule>>,
 }
 
 impl Default for Syntax {
@@ -52,6 +77,7 @@ impl Syntax {
             keywords: BTreeSet::new(),
             types: BTreeSet::new(),
             special: BTreeSet::new(),
+            dynamic_rules: None,
         }
     }
 
@@ -66,6 +92,7 @@ impl Syntax {
             keywords: BTreeSet::new(),
             types: BTreeSet::new(),
             special: BTreeSet::new(),
+            dynamic_rules: None,
         }
     }
 
@@ -73,4 +100,57 @@ impl Syntax {
     pub fn is_keyword(&self, word: &str) -> bool { self.keywords.contains(word) }
     pub fn is_type(&self, word: &str) -> bool { self.types.contains(word) }
     pub fn is_special(&self, word: &str) -> bool { self.special.contains(word) }
+}
+
+#[derive(Clone, Default)]
+pub struct SyntaxCache {
+    pub plugins: std::collections::HashMap<String, Syntax>,
+}
+
+impl Syntax {
+    /// Lazily loads a syntax plugin and caches it securely inside egui's context memory.
+    pub fn get_or_load(ctx: &egui::Context, ext: &str) -> Self {
+        // 1. Fallback logic for hardcoded languages
+        if ext != "c" && ext != "h" {
+            return Syntax::rust();
+        }
+
+        let cache_id = egui::Id::new("editor_syntax_cache");
+
+        // 2. Check egui's internal memory cache for a hit
+        let cached_syntax = ctx.data_mut(|d| {
+            let cache = d.get_temp_mut_or_default::<SyntaxCache>(cache_id);
+            cache.plugins.get(ext).cloned()
+        });
+
+        if let Some(syntax) = cached_syntax {
+            return syntax; // Cache Hit: Instant return
+        }
+
+        // 3. Cache Miss: Load the plugin from disk
+        // (For a truly standalone editor, you could later pass a base directory here
+        // instead of hardcoding the inforno path)
+        let plugin_path = std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or_default()
+        ).join(".config/inforno/scripts/syntax/v1/my_c_syntax.rhai");
+
+        let loaded_syntax = match crate::bulat::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
+            Ok(syn) => {
+                println!("✅ Lazy-loaded Rhai syntax plugin for '.{}' into egui memory!", ext);
+                syn
+            }
+            Err(e) => {
+                println!("❌ Failed to lazy-load Rhai plugin: {}", e);
+                Syntax::text()
+            }
+        };
+
+        // 4. Save it back to egui's memory for the next frame
+        ctx.data_mut(|d| {
+            let cache = d.get_temp_mut_or_default::<SyntaxCache>(cache_id);
+            cache.plugins.insert(ext.to_string(), loaded_syntax.clone());
+        });
+
+        loaded_syntax
+    }
 }

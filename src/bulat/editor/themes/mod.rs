@@ -102,7 +102,7 @@ impl ColorTheme {
             TokenType::Special => self.special,
             TokenType::Str(_) => self.strs,
             TokenType::Type => self.types,
-            TokenType::Whitespace(_) | TokenType::Unknown => self.comments,
+            TokenType::Whitespace(_) | TokenType::Unknown => self.literals,
         }
     }
 
@@ -118,7 +118,7 @@ impl ColorTheme {
             TokenType::Special => color_from_hex(self.special),
             TokenType::Str(_) => color_from_hex(self.strs),
             TokenType::Type => color_from_hex(self.types),
-            TokenType::Whitespace(_) | TokenType::Unknown => color_from_hex(self.comments),
+            TokenType::Whitespace(_) | TokenType::Unknown => color_from_hex(self.literals),
         }
         .unwrap_or(ERROR_COLOR)
     }

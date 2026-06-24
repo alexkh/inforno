@@ -100,6 +100,7 @@ impl Syntax {
                 "bool", "char", "usize", "isize"
             ]),
             special: BTreeSet::new(),
+            dynamic_rules: None,
         }
     }
 }

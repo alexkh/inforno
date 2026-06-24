@@ -204,12 +204,15 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                         ui.separator();
 
                         let available_width = ui.available_width();
+                        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
-                        // No more outer scroll area! Let the editor fill the space.
+                        // The editor handles its own caching and loading now!
+                        let syntax = crate::bulat::editor::Syntax::get_or_load(ui.ctx(), ext);
+
                         crate::bulat::editor::CodeEditor::default()
                             .id_source(format!("editor_code_{:?}", tile_id))
                             .with_theme(crate::bulat::editor::ColorTheme::SV)
-                            .with_syntax(crate::bulat::editor::Syntax::rust())
+                            .with_syntax(syntax)
                             .vscroll(true)
                             .v_auto_shrink(false)
                             .desired_width(available_width)
