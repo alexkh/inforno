@@ -132,7 +132,7 @@ impl Syntax {
         // instead of hardcoding the inforno path)
         let plugin_path = std::path::PathBuf::from(
             std::env::var("HOME").unwrap_or_default()
-        ).join(".config/inforno/scripts/syntax/v1/my_c_syntax.rhai");
+        ).join(".config/bulat/scripts/syntax/v1/my_c_syntax.rhai");
 
         let loaded_syntax = match crate::bulat::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
             Ok(syn) => {
