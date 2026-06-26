@@ -146,7 +146,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                             if ui.button(egui::RichText::new(t!("rename_chat_btn"))).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
                                 state.chat_to_rename = Some(db_chat.id);
-                                state.chat_rename_buffer = db_chat.title.clone();
+                                state.chat_rename_buffer = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim().to_string();
                                 ui.close();
                             }
 
@@ -199,7 +199,8 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         // 3. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
                         let available_width = ui.available_width();
-                        let (main_clicked, arrow_clicked) = SplitButton::new(&db_chat.title)
+                        let display_title = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim();
+                        let (main_clicked, arrow_clicked) = SplitButton::new(display_title)
                             .id_salt(db_chat.id)
                             .selected(is_selected)
                             .transparent(true) // Transparent for sidebar!
@@ -371,15 +372,17 @@ fn save_rename(state: &mut State, chat_id: i64) {
     if let Some(target_db_chat) =
             state.db_chats.iter_mut().find(|c| c.id == chat_id) {
 
+        let clean_title = state.chat_rename_buffer.split('\n').next().unwrap_or(&state.chat_rename_buffer).trim().to_string();
+
         // Update DB
         if let Err(error) = crate::db::mod_chat_title(&state.db_conn,
-                chat_id, &state.chat_rename_buffer) {
+                chat_id, &clean_title) {
             println!("Error: could not rename chat in the Sandbox: {}", error);
             return;
         }
 
         // Update the sidebar chat list locally
-        target_db_chat.title = state.chat_rename_buffer.clone();
+        target_db_chat.title = clean_title;
 
         // --- NEW: Unconditionally update the chat object if it's loaded in memory ---
         if let Some(chat) = state.open_chats.get_mut(&chat_id) {

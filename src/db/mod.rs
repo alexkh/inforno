@@ -174,6 +174,9 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
     conn.execute("BEGIN", [])?;
 
     let mut run_transaction = || -> rusqlite::Result<()> {
+        // Clean title to ensure no newlines are saved
+        chat.title = chat.title.split('\n').next().unwrap_or(&chat.title).trim().to_string();
+
         // 2. Insert Chat Row
         conn.execute("INSERT INTO chat (title) VALUES (?1)", [&chat.title])?;
 
@@ -669,8 +672,9 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
 
 pub fn mod_chat_title(conn: &Connection, chat_id: i64,  new_title: &str)
         -> rusqlite::Result<()> {
+    let clean_title = new_title.split('\n').next().unwrap_or(new_title).trim();
     conn.execute("update chat set title = ?1 where id = ?2",
-        params![new_title, chat_id])?;
+        params![clean_title, chat_id])?;
     Ok(())
 }
 
@@ -834,9 +838,10 @@ pub fn search_chats(conn: &Connection, keyword: &str) -> rusqlite::Result<Vec<cr
         // We only want one snippet per chat to keep the list clean
         if !seen.contains(&chat_id) {
             seen.insert(chat_id);
+            let clean_title = title.split('\n').next().unwrap_or(&title).trim().to_string();
             unique_results.push(crate::common::SearchResult {
                 chat_id,
-                chat_title: title,
+                chat_title: clean_title,
                 snippet: extract_snippet(&content, keyword),
             });
         }
