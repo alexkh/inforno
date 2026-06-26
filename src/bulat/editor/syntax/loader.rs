@@ -24,6 +24,11 @@ pub fn load_syntax_plugin(script_path: &Path) -> Result<Syntax, Box<dyn std::err
         let token_str = rule_map.get("token").unwrap().clone().into_string().unwrap();
         let pattern = rule_map.get("regex").unwrap().clone().into_string().unwrap();
 
+        // --- NEW: Safely extract the optional followed_by field ---
+        let followed_by = rule_map
+            .get("followed_by")
+            .and_then(|val| val.clone().into_string().ok());
+
         let token_type = match token_str.as_str() {
             "keyword" => TokenType::Keyword,
             "type" => TokenType::Type,
@@ -32,17 +37,17 @@ pub fn load_syntax_plugin(script_path: &Path) -> Result<Syntax, Box<dyn std::err
             "comment" => TokenType::Comment(false),
             "numeric" => TokenType::Numeric(false),
             "punctuation" => TokenType::Punctuation(' '),
+            "function" => TokenType::Function, // <-- Make sure this is here!
             _ => TokenType::Literal,
         };
 
-        // CRITICAL: We wrap the user's regex in ^(...) so it only matches
-        // the EXACT beginning of the remaining text buffer.
         let regex = Regex::new(&format!("^({})", pattern))?;
 
         dynamic_rules.push(DynamicRule {
             token_type,
             pattern,
-            regex
+            regex,
+            followed_by, // <-- Add it to the struct
         });
     }
 
@@ -56,5 +61,6 @@ pub fn load_syntax_plugin(script_path: &Path) -> Result<Syntax, Box<dyn std::err
         types: BTreeSet::new(),
         special: BTreeSet::new(),
         dynamic_rules: Some(dynamic_rules),
+        native_parser: None,
     })
 }

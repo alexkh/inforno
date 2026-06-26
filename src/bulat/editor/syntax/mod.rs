@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod c;
 pub mod rust;
 pub mod loader;
 
@@ -6,16 +7,23 @@ use std::collections::BTreeSet;
 use regex::Regex;
 use std::hash::{Hash, Hasher};
 
+// native parser is a compiled-in .rs file, as opposed to dynamic parser which
+// is a .rhai file
+pub type NativeParser = fn(&str) -> Vec<crate::bulat::editor::Token>;
+
 #[derive(Clone, Debug)]
 pub struct DynamicRule {
     pub token_type: TokenType,
     pub pattern: String,
     pub regex: Regex,
+    pub followed_by: Option<String>,
 }
 
 impl PartialEq for DynamicRule {
     fn eq(&self, other: &Self) -> bool {
-        self.token_type == other.token_type && self.pattern == other.pattern
+        self.token_type == other.token_type &&
+        self.pattern == other.pattern &&
+        self.followed_by == other.followed_by
     }
 }
 impl Eq for DynamicRule {}
@@ -57,6 +65,7 @@ pub struct Syntax {
     pub types: BTreeSet<&'static str>,
     pub special: BTreeSet<&'static str>,
     pub dynamic_rules: Option<Vec<DynamicRule>>,
+    pub native_parser: Option<NativeParser>,
 }
 
 impl Default for Syntax {
@@ -78,6 +87,7 @@ impl Syntax {
             types: BTreeSet::new(),
             special: BTreeSet::new(),
             dynamic_rules: None,
+            native_parser: None,
         }
     }
 
@@ -93,6 +103,7 @@ impl Syntax {
             types: BTreeSet::new(),
             special: BTreeSet::new(),
             dynamic_rules: None,
+            native_parser: None,
         }
     }
 

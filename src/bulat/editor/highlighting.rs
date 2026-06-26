@@ -35,22 +35,18 @@ impl Token {
         job
     }
 
-    pub fn tokens(&mut self, syntax: &Syntax, text: &str) -> Vec<Self> {
-        // 1. If dynamic rules exist, use the Runtime Engine
+        pub fn tokens(&mut self, syntax: &Syntax, text: &str) -> Vec<Self> {
+        // 1. If dynamic rules exist, use the Rhai Runtime Engine
         if let Some(rules) = &syntax.dynamic_rules {
-            println!("Using dynamic syntax...");
             return self.tokens_dynamic(rules, text);
         }
 
-        // 2. Check if the language is explicitly Rust
-        if syntax.language == "Rust" {
-            return self.tokens_logos(text);
+        // 2. If a Native Parser is attached, execute it dynamically
+        if let Some(parser) = syntax.native_parser {
+            return parser(text);
         }
 
-        println!("No syntax highlighting");
-
-        // 3. True fallback for Syntax::text() or failed plugins
-        // Returns the entire block of text as a standard Literal (standard foreground color)
+        // 3. True fallback (Plain Text)
         vec![Self {
             ty: TokenType::Literal,
             buffer: text.to_string(),
@@ -63,24 +59,31 @@ impl Token {
         while !text.is_empty() {
             let mut matched = false;
 
-            // Test each regex rule in the order defined by the Rhai script
             for rule in dynamic_rules {
                 if let Some(mat) = rule.regex.find(text) {
                     let matched_str = mat.as_str();
+                    let remainder = &text[matched_str.len()..];
+
+                    // --- NEW: Process the optional lookahead ---
+                    if let Some(req_char) = &rule.followed_by {
+                        // If the remainder doesn't start with the required string
+                        // (ignoring leading whitespace), this is NOT a match.
+                        if !remainder.trim_start().starts_with(req_char) {
+                            continue; // Skip to the next regex rule!
+                        }
+                    }
+
                     tokens.push(Token {
                         ty: rule.token_type,
                         buffer: matched_str.to_string(),
                     });
 
-                    // Advance the text buffer forward
-                    text = &text[matched_str.len()..];
+                    text = remainder;
                     matched = true;
                     break;
                 }
             }
 
-            // If no regex matched, safely consume one character as "Unknown"
-            // so we don't get trapped in an infinite loop.
             if !matched {
                 let mut chars = text.chars();
                 let c = chars.next().unwrap();
@@ -98,63 +101,6 @@ impl Token {
                 text = chars.as_str();
             }
         }
-        tokens
-    }
-
-    pub fn tokens_logos(&mut self, text: &str) -> Vec<Self> {
-        let lexer = RustToken::lexer(text);
-
-        // 1. Collect all raw tokens first so we can look ahead
-        let raw_tokens: Vec<(RustToken, &str)> = lexer
-            .spanned()
-            .map(|(token, span)| (token.unwrap_or(RustToken::Error), &text[span]))
-            .collect();
-
-        let mut tokens = Vec::new();
-
-        for (i, (token, buffer)) in raw_tokens.iter().enumerate() {
-            let ty = match token {
-                RustToken::Keyword => TokenType::Keyword,
-                RustToken::Type => TokenType::Type,
-                RustToken::Special | RustToken::Lifetime => TokenType::Special,
-                RustToken::String => TokenType::Str('"'),
-                RustToken::Char => TokenType::Str('\''),
-                RustToken::Comment => TokenType::Comment(false),
-                RustToken::CommentMulti => TokenType::Comment(true),
-                RustToken::Number => TokenType::Numeric(buffer.contains('.')),
-
-                RustToken::Punctuation => {
-                    let c = buffer.chars().next().unwrap_or('?');
-                    TokenType::Punctuation(c)
-                }
-
-                RustToken::Identifier => {
-                    // Check if the NEXT token is a Punctuation "("
-                    // raw_tokens[i+1] is a reference to (RustToken, &str)
-                    let next_token = raw_tokens.get(i + 1);
-
-                    // We match against the Tuple reference
-                    if let Some((RustToken::Punctuation, "(")) = next_token {
-                        TokenType::Function
-                    } else {
-                        TokenType::Literal
-                    }
-                }
-
-                RustToken::Whitespace => {
-                    let c = buffer.chars().next().unwrap_or(' ');
-                    TokenType::Whitespace(c)
-                }
-
-                RustToken::Error => TokenType::Unknown,
-            };
-
-            tokens.push(Token {
-                ty,
-                buffer: buffer.to_string(),
-            });
-        }
-
         tokens
     }
 }
