@@ -24,22 +24,156 @@ enum ContentChunk<'a> {
     RustCode {
         code: &'a str,
         filepath: Option<String>,
-    },
+    }
+}
+
+fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
+    static RE_DIFF: OnceLock<Regex> = OnceLock::new();
+    let re_diff = RE_DIFF.get_or_init(|| {
+        Regex::new(r"(?ms)^[ \t]*<{4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*={4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*>{4,}[ \t]*[^\n]*").unwrap()
+    });
+
+    let mut current_text = original.to_string();
+    let mut diff_block_found = false;
+
+    for caps in re_diff.captures_iter(snippet) {
+        diff_block_found = true;
+        
+        let search_block = caps.get(1).map_or("", |m| m.as_str());
+        let replace_block = caps.get(2).map_or("", |m| m.as_str());
+
+        // 1. Try exact match
+        if let Some(idx) = current_text.find(search_block) {
+            let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
+            new_text.push_str(&current_text[..idx]);
+            new_text.push_str(replace_block);
+            new_text.push_str(&current_text[idx + search_block.len()..]);
+            current_text = new_text;
+            continue;
+        }
+        
+        // 2. Try normalized match (ignoring \r and leading/trailing whitespace of the block)
+        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+        let orig_norm = current_text.replace("\r\n", "\n");
+        if let Some(idx) = orig_norm.find(&search_norm) {
+            let replace_norm = replace_block.replace("\r\n", "\n");
+            let mut new_text = String::with_capacity(orig_norm.len() + replace_norm.len());
+            new_text.push_str(&orig_norm[..idx]);
+            new_text.push_str(&replace_norm);
+            new_text.push_str(&orig_norm[idx + search_norm.len()..]);
+            current_text = new_text;
+            continue;
+        }
+
+        // 3. Try highly tolerant fuzzy match (ignores all internal whitespace differences)
+        let search_trimmed = search_block.trim();
+        if !search_trimmed.is_empty() {
+            let escaped_search = regex::escape(search_trimmed);
+            let fuzzy_pattern = escaped_search.split_whitespace().collect::<Vec<_>>().join(r"\s+");
+            if let Ok(re) = Regex::new(&fuzzy_pattern) {
+                if let Some(mat) = re.find(&current_text) {
+                    let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
+                    new_text.push_str(&current_text[..mat.start()]);
+                    new_text.push_str(replace_block);
+                    new_text.push_str(&current_text[mat.end()..]);
+                    current_text = new_text;
+                    continue;
+                }
+            }
+        }
+    }
+    
+    // If we detected diff markers, we MUST return Some() so we don't fall back 
+    // to passing raw <<<< markers to the merge tool. If patching failed, returning 
+    // the un-patched original simply shows 0 diffs in the merge tool instead of a broken file.
+    if diff_block_found {
+        Some(current_text)
+    } else {
+        None
+    }
+}
+
+fn resolve_filepath(project_root: &std::path::Path, requested_path: &str) -> Option<(std::path::PathBuf, bool)> {
+    let req_path = std::path::Path::new(requested_path);
+    let full_path = project_root.join(req_path);
+    if full_path.exists() && full_path.is_file() {
+        return Some((full_path, false));
+    }
+
+    let target_name = req_path.file_name()?;
+    
+    let mut best_match = None;
+    let mut best_score = -1;
+
+    let mut dirs_to_visit = vec![project_root.to_path_buf()];
+    let req_components: Vec<_> = req_path.components().rev().collect();
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().unwrap_or_default();
+                    if name != "target" && name != ".git" && name != ".inforno" {
+                        dirs_to_visit.push(path);
+                    }
+                } else if path.is_file() {
+                    let is_match = {
+                        let path_name = path.file_name().unwrap_or_default();
+                        if path_name == target_name {
+                            true
+                        } else {
+                            // fuzzy fallback: if the stem matches exactly!
+                            let path_stem = path.file_stem().unwrap_or_default();
+                            let target_stem = req_path.file_stem().unwrap_or_default();
+                            path_stem == target_stem && !path_stem.is_empty()
+                        }
+                    };
+
+                    if is_match {
+                        let path_components: Vec<_> = path.components().rev().collect();
+                        let mut score = 0;
+                        for (a, b) in req_components.iter().zip(path_components.iter()) {
+                            if a == b {
+                                score += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if score > best_score {
+                            best_score = score;
+                            best_match = Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(matched) = best_match {
+        return Some((matched, true));
+    }
+    
+    None
 }
 
 fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
-    static RE_RUST_BLOCK: OnceLock<Regex> = OnceLock::new();
+    static RE_CODE: OnceLock<Regex> = OnceLock::new();
     static RE_FILEPATH: OnceLock<Regex> = OnceLock::new();
+    static RE_INNER_FILE: OnceLock<Regex> = OnceLock::new();
 
-    // (?m) multi-line mode: ^ and $ match line boundaries.
-    // (?s) dot-all mode: . matches newlines.
-    let re = RE_RUST_BLOCK.get_or_init(|| {
-        Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}(?:rust|rs)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*$").unwrap()
+    let re_code = RE_CODE.get_or_init(|| {
+        Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}([a-zA-Z0-9]*)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*(?:\r?\n|$)").unwrap()
     });
 
     // Broadened regex: Matches strings ending in ".rs" ANYWHERE in the text.
     let re_filepath = RE_FILEPATH.get_or_init(|| {
-        Regex::new(r"(?i)([a-z0-9_/\.\-]+\.rs)").unwrap()
+        Regex::new(r"(?i)([a-z0-9_/\.\-]+\.[a-z]+)").unwrap()
+    });
+
+    // Specifically targets filenames embedded directly inside the code block
+    let re_inner_file = RE_INNER_FILE.get_or_init(|| {
+        Regex::new(r"(?im)^[ \t]*---[ \t]*(?:File:)?[ \t]*([a-z0-9_/\.\-]+\.[a-z]+)[ \t]*---").unwrap()
     });
 
     let mut chunks = Vec::new();
@@ -48,9 +182,9 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
     // NEW: State variable to remember the filename across multiple code blocks
     let mut current_filepath: Option<String> = None;
 
-    for caps in re.captures_iter(text) {
-        let full_match = caps.get(0).unwrap();
-        let code_match = caps.get(1).unwrap();
+    for caps in re_code.captures_iter(text) {
+        // Safe extraction of the full match
+        let full_match = if let Some(m) = caps.get(0) { m } else { continue; };
 
         if full_match.start() > last_end {
             let md_text = &text[last_end..full_match.start()];
@@ -59,8 +193,9 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
             // Search the entire markdown chunk for filepaths
             let mut found_in_chunk = None;
             for path_caps in re_filepath.captures_iter(md_text) {
-                // Keep overwriting so we end up with the LAST match (closest to the code block)
-                found_in_chunk = Some(path_caps.get(1).unwrap().as_str().to_string());
+                if let Some(m) = path_caps.get(1) {
+                    found_in_chunk = Some(m.as_str().to_string());
+                }
             }
 
             // If we found a filename in this intermediate text, update our active tracker.
@@ -70,9 +205,17 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
             }
         }
 
+        let code_match = caps.get(2).map_or("", |m| m.as_str());
+
+        // --- Extract filename if it was written inside the code block ---
+        if let Some(inner_caps) = re_inner_file.captures(code_match) {
+            if let Some(m) = inner_caps.get(1) {
+                current_filepath = Some(m.as_str().to_string());
+            }
+        }
+
         chunks.push(ContentChunk::RustCode {
-            code: code_match.as_str(),
-            // Clone the persistent state into this chunk
+            code: code_match,
             filepath: current_filepath.clone(),
         });
 
@@ -609,82 +752,118 @@ fn render_msg_content(
 
                     ui.add_space(6.0);
 
+                    let mut actual_path = None;
+                    let mut autocorrected = false;
+                    let mut display_path = String::new();
+
+                    if let Some(path) = &filepath {
+                        display_path = path.clone();
+                        if let Some(root) = project_root {
+                            if let Some((resolved, corrected)) = resolve_filepath(root, path) {
+                                actual_path = Some(resolved);
+                                autocorrected = corrected;
+                            }
+                        }
+                    }
+
                     // --- HEADER: Path, Merge Tool, and Copy Button ---
                     ui.horizontal(|ui| {
                         // Left side: Filepath and Merge button
-                        if let Some(path) = filepath {
-                            if let Some(root) = project_root {
-                                let full_path = root.join(&path);
-                                ui.spacing_mut().item_spacing.x = 6.0;
+                        if let Some(path) = actual_path {
+                            ui.spacing_mut().item_spacing.x = 6.0;
 
-                                let (open_main, open_arrow) = SplitButton::new(format!("📄 {}", path))
-                                    .id_salt(format!("open_btn_{}_{}", msg.id, i)) // <--- ADD UNIQUE ID
-                                    .main_tooltip(t!("open_file_in_editor_tooltip"))
-                                    .arrow_tooltip(t!("right_button_tooltip"))
-                                    .show(ui);
+                            let mut btn_text = format!("📄 {}", display_path);
+                            let mut tooltip = "Open file in editor".to_string();
 
-                                if open_main {
-                                    let _ = op_tx.send(crate::common::FileOpMsg {
-                                        op: crate::common::FileOp::OpenEditor,
-                                        cancelled: false,
-                                        path: Some(full_path.clone()),
-                                        attachments: None,
-                                        left_content: None,
-                                        right_content: None,
-                                    });
+                            if autocorrected {
+                                btn_text.push_str(" ⚠️");
+                                let rel_path = path.strip_prefix(project_root.as_ref().unwrap()).unwrap_or(&path).display();
+                                tooltip = format!("File path autocorrected to:\n{}", rel_path);
+                            }
+
+                            let (open_main, open_arrow) = SplitButton::new(btn_text)
+                                .id_salt(format!("open_btn_{}_{}", msg.id, i)) 
+                                .main_tooltip(tooltip)
+                                .arrow_tooltip(t!("right_button_tooltip"))
+                                .show(ui);
+
+                            if open_main {
+                                let _ = op_tx.send(crate::common::FileOpMsg {
+                                    op: crate::common::FileOp::OpenEditor,
+                                    cancelled: false,
+                                    path: Some(path.clone()),
+                                    ..Default::default()
+                                });
+                            }
+                            if open_arrow {
+                                let _ = op_tx.send(crate::common::FileOpMsg {
+                                    op: crate::common::FileOp::OpenEditorRight,
+                                    cancelled: false,
+                                    path: Some(path.clone()),
+                                    ..Default::default()
+                                });
+                            }
+
+                            let (merge_main, merge_arrow) = SplitButton::new(t!("open_in_merge_tool_btn"))
+                                .id_salt(format!("merge_btn_{}_{}", msg.id, i))
+                                .main_tooltip(t!("open_in_merge_tool_tooltip"))
+                                .arrow_tooltip(t!("right_button_tooltip"))
+                                .show(ui);
+
+                            let trigger_merge = |right_pane: bool| {
+                                let original_content = std::fs::read_to_string(&path).unwrap_or_default();
+                                
+                                // 1. Strip leading `--- File: ...` metadata line
+                                static RE_STRIP_FILE: OnceLock<Regex> = OnceLock::new();
+                                let re_strip = RE_STRIP_FILE.get_or_init(|| {
+                                    Regex::new(r"(?im)^[ \t]*(?://|/\*|#)?[ \t]*---[ \t]*(?:File:)?[ \t]*[a-z0-9_/\.\-]+\.[a-z]+[ \t]*---(?: \*/)?\r?\n?").unwrap()
+                                });
+                                
+                                let stripped_owned = re_strip.replace(code_buffer.as_str(), "");
+                                let mut clean_snippet = stripped_owned.as_ref();
+                                
+                                // Fallback manual strip if the LLM just sent an empty "---" or similar malformed line
+                                let trimmed = clean_snippet.trim_start();
+                                if trimmed.starts_with("---") || trimmed.starts_with("// ---") || trimmed.starts_with("/* ---") {
+                                    if let Some(nl) = clean_snippet.find('\n') {
+                                        clean_snippet = &clean_snippet[nl + 1..];
+                                    } else {
+                                        clean_snippet = ""; // Single line snippet completely removed
+                                    }
                                 }
-                                if open_arrow {
-                                    let _ = op_tx.send(crate::common::FileOpMsg {
-                                        op: crate::common::FileOp::OpenEditorRight,
-                                        cancelled: false,
-                                        path: Some(full_path.clone()),
-                                        attachments: None,
-                                        left_content: None,
-                                        right_content: None,
-                                    });
+                                
+                                // 2. Try applying LLM Search/Replace Diffs
+                                let mut right_content = apply_llm_diffs(&original_content, clean_snippet);
+                                
+                                // 3. Try fallback to function splicing
+                                if right_content.is_none() {
+                                    right_content = try_splice_snippet(&original_content, clean_snippet);
                                 }
+                                
+                                // 4. Final fallback to the whole snippet body
+                                let final_right_content = right_content.unwrap_or_else(|| clean_snippet.to_string());
 
-                                let (merge_main, merge_arrow) = SplitButton::new(t!("open_in_merge_tool_btn"))
-                                    .id_salt(format!("merge_btn_{}_{}", msg.id, i))
-                                    .main_tooltip(t!("open_in_merge_tool_tooltip"))
-                                    .arrow_tooltip(t!("right_button_tooltip"))
-                                    .show(ui);
+                                let _ = op_tx.send(crate::common::FileOpMsg {
+                                    op: if right_pane { crate::common::FileOp::OpenMergeRight } else { crate::common::FileOp::OpenMerge },
+                                    path: Some(path.clone()),
+                                    left_content: Some(original_content),
+                                    right_content: Some(final_right_content),
+                                    ..Default::default()
+                                });
+                            };
 
-                                if merge_main {
-                                    let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                                    let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
+                            if merge_main { trigger_merge(false); }
+                            if merge_arrow { trigger_merge(true); }
 
-                                    let _ = op_tx.send(crate::common::FileOpMsg {
-                                        op: crate::common::FileOp::OpenMerge,
-                                        path: Some(full_path.clone()),
-                                        left_content: Some(original_content),
-                                        right_content: Some(right_content),
-                                        ..Default::default()
-                                    });
-                                }
-                                if merge_arrow {
-                                    let original_content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                                    let right_content = try_splice_snippet(&original_content, &code_buffer).unwrap_or_else(|| code_buffer.clone());
-
-                                    let _ = op_tx.send(crate::common::FileOpMsg {
-                                        op: crate::common::FileOp::OpenMergeRight,
-                                        path: Some(full_path.clone()),
-                                        left_content: Some(original_content),
-                                        right_content: Some(right_content),
-                                        ..Default::default()
-                                    });
-                                }
-                            } else {
-                                // NEW: Fallback button if there's no project root
-                                if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {                                    let _ = op_tx.send(crate::common::FileOpMsg {
-                                        op: crate::common::FileOp::OpenEditor,
-                                        cancelled: false,
-                                        path: Some(std::path::PathBuf::from(&path)),
-                                        attachments: None,
-                                        left_content: None,
-                                        right_content: None,
-                                    });
-                                }
+                        } else if let Some(path) = &filepath {
+                            // Fallback button if there's no project root but we have a filepath
+                            if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {                                    
+                                let _ = op_tx.send(crate::common::FileOpMsg {
+                                    op: crate::common::FileOp::OpenEditor,
+                                    cancelled: false,
+                                    path: Some(std::path::PathBuf::from(path)),
+                                    ..Default::default()
+                                });
                             }
                         } else {
                             ui.label(egui::RichText::new("🦀 Rust").weak());
