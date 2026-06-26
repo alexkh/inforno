@@ -83,6 +83,10 @@ pub struct DiffApp {
 impl DiffApp {
     pub fn new(mut left_code: String, mut right_code: String) -> Self {
         // --- NEW LINE SANITIZATION ---
+        // This prevents egui's selection ranges from desyncing by 1 byte per line!
+        left_code = left_code.replace('\r', "");
+        right_code = right_code.replace('\r', "");
+
         // Ensure both files end with a newline to prevent un-mergeable
         // EOF (End of File) diffs caused by missing '\n' characters.
         if !left_code.is_empty() && !left_code.ends_with('\n') {

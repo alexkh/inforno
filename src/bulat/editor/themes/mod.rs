@@ -83,10 +83,15 @@ impl ColorTheme {
         let style = ui.style_mut();
         style.visuals.widgets.noninteractive.bg_fill = self.bg();
         style.visuals.window_fill = self.bg();
-        style.visuals.selection.stroke.color = self.cursor();
+        // Tell egui to NOT override the text color during selection
+        style.visuals.selection.stroke.color = self.type_color(TokenType::Literal);
+
         style.visuals.selection.bg_fill = self.selection();
         style.visuals.extreme_bg_color = self.bg();
         style.override_font_id = Some(egui::FontId::monospace(fontsize));
+
+        // Explicitly assign cursor color to the actual blinking text cursor
+        style.visuals.text_cursor.stroke.color = self.cursor();
         style.visuals.text_cursor.stroke.width = fontsize * 0.1;
     }
 
