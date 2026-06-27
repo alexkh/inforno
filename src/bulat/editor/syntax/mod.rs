@@ -107,6 +107,21 @@ impl Syntax {
         }
     }
 
+    /// Native Rhai Syntax Highlighting
+    pub fn rhai() -> Self {
+        let mut s = Syntax::rust();
+        s.language = "Rhai";
+        s.keywords = BTreeSet::from([
+            "fn", "let", "if", "else", "while", "loop", "break", "continue", 
+            "return", "switch", "const", "mut", "for", "in", "import", "export", 
+            "as", "throw", "try", "catch"
+        ]);
+        s.types = BTreeSet::from([
+            "String", "Array", "Map", "bool", "char", "int", "float", "Dynamic"
+        ]);
+        s
+    }
+
     pub fn language(&self) -> &str { self.language }
     pub fn is_keyword(&self, word: &str) -> bool { self.keywords.contains(word) }
     pub fn is_type(&self, word: &str) -> bool { self.types.contains(word) }

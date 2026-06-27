@@ -667,6 +667,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
         msg_pool,
         agents,
         draft_note: String::new(),
+        draft_is_rhai: false,
     })
 
 }
@@ -959,6 +960,32 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
     mod_agent_preset(conn, 2, 1)?;
 */
     Ok(())
+}
+
+/// Exports a chat as an executable Notebook in .ron format
+pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &Presets) -> rusqlite::Result<String> {
+    let chat = fetch_chat(conn, chat_id, presets)?;
+    let mut cells = Vec::new();
+
+    // Export the linear timeline from the Omnis agent (index 0)
+    if let Some(agent) = chat.agents.first() {
+        for msg_id in &agent.msg_ids {
+            if let Some(msg) = chat.msg_pool.get(msg_id) {
+                cells.push(crate::common::NotebookCellExport {
+                    role: msg.msg_role.clone(),
+                    content: msg.content.clone(),
+                });
+            }
+        }
+    }
+
+    let export = crate::common::NotebookExportV1 {
+        version: "1.0".to_string(),
+        title: chat.title,
+        cells,
+    };
+
+    Ok(ron::ser::to_string_pretty(&export, ron::ser::PrettyConfig::default()).unwrap_or_default())
 }
 
 /// Exports a chat to a Markdown-formatted string.

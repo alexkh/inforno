@@ -38,7 +38,7 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
 
     for caps in re_diff.captures_iter(snippet) {
         diff_block_found = true;
-        
+
         let search_block = caps.get(1).map_or("", |m| m.as_str());
         let replace_block = caps.get(2).map_or("", |m| m.as_str());
 
@@ -51,7 +51,7 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
             current_text = new_text;
             continue;
         }
-        
+
         // 2. Try normalized match (ignoring \r and leading/trailing whitespace of the block)
         let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
         let orig_norm = current_text.replace("\r\n", "\n");
@@ -82,9 +82,9 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
             }
         }
     }
-    
-    // If we detected diff markers, we MUST return Some() so we don't fall back 
-    // to passing raw <<<< markers to the merge tool. If patching failed, returning 
+
+    // If we detected diff markers, we MUST return Some() so we don't fall back
+    // to passing raw <<<< markers to the merge tool. If patching failed, returning
     // the un-patched original simply shows 0 diffs in the merge tool instead of a broken file.
     if diff_block_found {
         Some(current_text)
@@ -101,7 +101,7 @@ fn resolve_filepath(project_root: &std::path::Path, requested_path: &str) -> Opt
     }
 
     let target_name = req_path.file_name()?;
-    
+
     let mut best_match = None;
     let mut best_score = -1;
 
@@ -153,7 +153,7 @@ fn resolve_filepath(project_root: &std::path::Path, requested_path: &str) -> Opt
     if let Some(matched) = best_match {
         return Some((matched, true));
     }
-    
+
     None
 }
 
@@ -228,6 +228,66 @@ fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
 
     chunks
 }
+
+// --- Helper: Detect Rhai ---
+fn is_likely_rhai(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() { return false; }
+
+    let engine = rhai::Engine::new();
+    // It must compile into a valid AST AND contain at least one code-like structural element
+    // This avoids identifying a single English word (like "Note") as code.
+    engine.compile(text).is_ok() && (
+        text.contains('=') || text.contains('(') || text.contains('{') ||
+        text.contains("let ") || text.contains("fn ") || text.contains("print")
+    )
+}
+
+// --- Helper: Run Rhai Script ---
+fn run_rhai(script: &str) -> String {
+    use rhai::Engine;
+    use std::sync::{Arc, Mutex};
+
+    let mut engine = Engine::new();
+    engine.set_max_operations(1_000_000); // 1 million max ops to prevent infinite loops
+
+    // Thread-safe buffer to capture stdout
+    let output = Arc::new(Mutex::new(String::new()));
+    let out_clone = output.clone();
+
+    engine.on_print(move |s| {
+        let mut out = out_clone.lock().unwrap();
+        out.push_str(s);
+        out.push('\n');
+    });
+
+    let out_clone2 = output.clone();
+    engine.on_debug(move |s, _src, _pos| {
+        let mut out = out_clone2.lock().unwrap();
+        out.push_str(&format!("[DEBUG] {}\n", s));
+    });
+
+    let result = engine.eval::<rhai::Dynamic>(script);
+    let mut final_out = output.lock().unwrap().clone();
+
+    match result {
+        Ok(val) => {
+            if !val.is_unit() {
+                final_out.push_str(&format!("=> {}", val));
+            }
+        }
+        Err(e) => {
+            final_out.push_str(&format!("Error: {}", e));
+        }
+    }
+
+    if final_out.is_empty() {
+        "Execution finished (no output)".to_string()
+    } else {
+        final_out
+    }
+}
+
 
 // --- Main Entry Point ---
 
@@ -378,6 +438,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     let mut content_updates = Vec::new();
     let mut db_updates = Vec::new();
+    let mut rhai_updates = Vec::new(); // NEW: Captures output string to update msg pool
     let mut new_draft = None;
     let mut draft_lost_focus = false;
 
@@ -432,8 +493,12 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 assistant_batch.clear();
                             }
 
+                            let msg_ui = msg_ui_map.entry(msg_id).or_insert(ChatMsgUi::default());
                             let mut note_content = msg.content.clone();
                             let num_lines = note_content.lines().count().max(1);
+
+                            // Dynamically check syntax on load, cache it in UI state
+                            let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| is_likely_rhai(&note_content));
 
                             egui::Frame::default()
                                 .outer_margin(Margin { top: 5, right: 10, bottom: 5, left: 10 })
@@ -444,29 +509,74 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new("📝 Note Cell").weak().small());
+
+                                        // NEW: Saved/Unsaved Indicators
+                                        if msg.is_unsaved {
+                                            ui.label(egui::RichText::new("✏ Unsaved").color(ui.visuals().warn_fg_color).small());
+                                        } else {
+                                            ui.label(egui::RichText::new("✔ Saved").color(egui::Color32::DARK_GREEN).small());
+                                        }
+
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if ui.button("🗐").on_hover_text("Copy note to clipboard").clicked() {
                                                 ui.ctx().copy_text(note_content.clone());
                                             }
+
+                                            // NEW: Execute Rhai Script!
+                                            if ui.button("▶ Run").on_hover_text("Execute as Rhai Script").clicked() {
+                                                let output = run_rhai(&note_content);
+                                                rhai_updates.push((msg_id, output));
+                                            }
                                         });
                                     });
+
+                                    let syntax = if is_rhai { Syntax::rhai() } else { Syntax::text() };
 
                                     let out = CodeEditor::default()
                                         .id_source(format!("note_{}", msg.id))
                                         .with_theme(ColorTheme::SV)
-                                        .with_syntax(Syntax::text())
+                                        .with_syntax(syntax)
                                         .with_numlines(false)
                                         .with_rows(num_lines)
                                         .vscroll(false)
                                         .desired_width(total_width - 40.0)
                                         .show(ui, &mut note_content);
 
-                                    if out.output.response.changed() {
-                                        content_updates.push((msg_id, note_content.clone()));
+                                    // --- NEW: Display the Volatile Output ---
+                                    if let Some(vol_out) = &msg.volatile_output {
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("Output:").weak().small());
+
+                                        // Embed another text area just for the output
+                                        let mut out_str = vol_out.clone();
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut out_str)
+                                                .font(egui::TextStyle::Monospace)
+                                                .interactive(false)
+                                                .frame(false)
+                                                .desired_width(total_width - 40.0)
+                                        );
                                     }
 
+                                    // Sticky Rhai Detection & Mark as unsaved while typing
+                                    if out.output.response.changed() {
+                                        let mut new_is_rhai = is_rhai;
+                                        
+                                        if !new_is_rhai && is_likely_rhai(&note_content) {
+                                            new_is_rhai = true; // Upgrade to Rhai
+                                        } else if new_is_rhai && note_content.trim().is_empty() {
+                                            new_is_rhai = false; // Downgrade to Text if emptied
+                                        }
+                                        
+                                        msg_ui.is_rhai = Some(new_is_rhai); // Cache immediately to UI
+
+                                        content_updates.push((msg_id, note_content.clone(), true));
+                                    }
+
+                                    // Commit to database and mark as saved on focus lost
                                     if out.output.response.lost_focus() {
                                         db_updates.push((msg_id, note_content.clone()));
+                                        content_updates.push((msg_id, note_content.clone(), false));
                                     }
                                 });
                         }
@@ -494,11 +604,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 .show(ui, |ui| {
                     let mut draft_note = chat.draft_note.clone();
                     let num_lines = draft_note.lines().count().max(1);
-                    
+
+                    let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::text() };
+
                     let out = CodeEditor::default()
                         .id_source(format!("draft_{}", chat_id))
                         .with_theme(ColorTheme::SV)
-                        .with_syntax(Syntax::text())
+                        .with_syntax(syntax)
                         .with_numlines(false)
                         .with_rows(num_lines)
                         .vscroll(false)
@@ -517,8 +629,15 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                     }
 
                     if out.output.response.changed() || draft_note != chat.draft_note {
-                        new_draft = Some(draft_note.clone());
+                        let mut new_is_rhai = chat.draft_is_rhai;
+                        if !new_is_rhai && is_likely_rhai(&draft_note) {
+                            new_is_rhai = true;
+                        } else if new_is_rhai && draft_note.trim().is_empty() {
+                            new_is_rhai = false;
+                        }
+                        new_draft = Some((draft_note.clone(), new_is_rhai));
                     }
+
                     if out.output.response.lost_focus() {
                         draft_lost_focus = true;
                     }
@@ -527,15 +646,22 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     }
 
     // Apply mutable updates outside of the chat borrow
-    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus {
+    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() {
         if let Some(chat) = state.open_chats.get_mut(&chat_id) {
-            for (id, content) in content_updates {
+            for (id, content, unsaved) in content_updates {
                 if let Some(m) = chat.msg_pool.get_mut(&id) {
                     m.content = content;
+                    m.is_unsaved = unsaved;
                 }
             }
-            if let Some(nd) = new_draft {
+            for (id, out_text) in rhai_updates {
+                if let Some(m) = chat.msg_pool.get_mut(&id) {
+                    m.volatile_output = Some(out_text);
+                }
+            }
+            if let Some((nd, is_rhai)) = new_draft {
                 chat.draft_note = nd;
+                chat.draft_is_rhai = is_rhai;
             }
             if draft_lost_focus {
                 let draft = chat.draft_note.trim();
@@ -934,7 +1060,7 @@ fn render_msg_content(
                             }
 
                             let (open_main, open_arrow) = SplitButton::new(btn_text)
-                                .id_salt(format!("open_btn_{}_{}", msg.id, i)) 
+                                .id_salt(format!("open_btn_{}_{}", msg.id, i))
                                 .main_tooltip(tooltip)
                                 .arrow_tooltip(t!("right_button_tooltip"))
                                 .show(ui);
@@ -964,16 +1090,16 @@ fn render_msg_content(
 
                             let trigger_merge = |right_pane: bool| {
                                 let original_content = std::fs::read_to_string(&path).unwrap_or_default();
-                                
+
                                 // 1. Strip leading `--- File: ...` metadata line
                                 static RE_STRIP_FILE: OnceLock<Regex> = OnceLock::new();
                                 let re_strip = RE_STRIP_FILE.get_or_init(|| {
                                     Regex::new(r"(?im)^[ \t]*(?://|/\*|#)?[ \t]*---[ \t]*(?:File:)?[ \t]*[a-z0-9_/\.\-]+\.[a-z]+[ \t]*---(?: \*/)?\r?\n?").unwrap()
                                 });
-                                
+
                                 let stripped_owned = re_strip.replace(code_buffer.as_str(), "");
                                 let mut clean_snippet = stripped_owned.as_ref();
-                                
+
                                 // Fallback manual strip if the LLM just sent an empty "---" or similar malformed line
                                 let trimmed = clean_snippet.trim_start();
                                 if trimmed.starts_with("---") || trimmed.starts_with("// ---") || trimmed.starts_with("/* ---") {
@@ -983,15 +1109,15 @@ fn render_msg_content(
                                         clean_snippet = ""; // Single line snippet completely removed
                                     }
                                 }
-                                
+
                                 // 2. Try applying LLM Search/Replace Diffs
                                 let mut right_content = apply_llm_diffs(&original_content, clean_snippet);
-                                
+
                                 // 3. Try fallback to function splicing
                                 if right_content.is_none() {
                                     right_content = try_splice_snippet(&original_content, clean_snippet);
                                 }
-                                
+
                                 // 4. Final fallback to the whole snippet body
                                 let final_right_content = right_content.unwrap_or_else(|| clean_snippet.to_string());
 
@@ -1009,7 +1135,7 @@ fn render_msg_content(
 
                         } else if let Some(path) = &filepath {
                             // Fallback button if there's no project root but we have a filepath
-                            if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {                                    
+                            if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
                                 let _ = op_tx.send(crate::common::FileOpMsg {
                                     op: crate::common::FileOp::OpenEditor,
                                     cancelled: false,

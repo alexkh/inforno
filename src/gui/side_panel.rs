@@ -170,6 +170,22 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                 ui.close();
                             }
 
+                            if ui.button(egui::RichText::new("Export Notebook")).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
+                                if let Ok(ron_data) = crate::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
+                                    state.pending_file_dialog_op = Some(crate::common::FileOp::ExportNotebook);
+                                    state.pending_export_content = Some(ron_data);
+
+                                    let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
+                                    let default_name = format!("{}.ron", safe_title);
+
+                                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                                        .default_file_name(&default_name)
+                                        .add_file_filter("Notebook (.ron)", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "ron")));
+                                    state.file_dialog.save_file();
+                                }
+                                ui.close();
+                            }
+
                             ui.separator();
 
                             if ui.button(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {

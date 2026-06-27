@@ -102,6 +102,21 @@ pub enum FileOp {
     OpenMerge,
     OpenMergeRight,
     ExportChat,
+    ExportNotebook,
+}
+
+// Notebook Export Schema
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct NotebookExportV1 {
+    pub version: String,
+    pub title: String,
+    pub cells: Vec<NotebookCellExport>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct NotebookCellExport {
+    pub role: MsgRole,
+    pub content: String,
 }
 
 #[derive(Default, Clone)]
@@ -233,6 +248,7 @@ impl fmt::Display for ChatRouter {
 #[derive(Default, Clone)]
 pub struct ChatMsgUi {
     pub show_raw: bool,
+    pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
 }
 
 // ChatMsg to be stored in the database
@@ -249,6 +265,12 @@ pub struct ChatMsg {
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    
+    // NEW: Transient fields for notebook cells (never saved to SQLite)
+    #[serde(skip)]
+    pub volatile_output: Option<String>,
+    #[serde(skip)]
+    pub is_unsaved: bool,
 }
 
 // convert inhouse ChatMsg to Ollama's ChatMessage:
@@ -333,6 +355,8 @@ pub struct Chat {
     pub agents: Vec<Agent>,
     #[serde(skip)]
     pub draft_note: String, // Buffer for the bottom notebook cell
+    #[serde(skip)]
+    pub draft_is_rhai: bool,
 }
 
 impl Default for Chat {
@@ -358,6 +382,7 @@ impl Default for Chat {
             msg_pool: HashMap::new(),
             agents: vec![omnis, agent1],
             draft_note: String::new(),
+            draft_is_rhai: false,
         }
     }
 }

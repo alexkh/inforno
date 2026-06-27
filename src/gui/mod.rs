@@ -527,7 +527,7 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
-                FileOp::ExportChat => {
+                FileOp::ExportChat | FileOp::ExportNotebook => {
                     // The actual file writing is handled immediately when the file
                     // is picked via state.file_dialog.take_picked().
                     // This arm simply satisfies Rust's exhaustive match requirement.
@@ -642,7 +642,7 @@ impl eframe::App for MyApp {
         if let Some(path) = state.file_dialog.take_picked() {
             if let Some(op) = state.pending_file_dialog_op.take() {
                 // If it's an export, write it directly and skip the channel
-                if matches!(op, crate::common::FileOp::ExportChat) {
+                if matches!(op, crate::common::FileOp::ExportChat | crate::common::FileOp::ExportNotebook) {
                     if let Some(content) = state.pending_export_content.take() {
                         let _ = std::fs::write(&path, content);
                     }
