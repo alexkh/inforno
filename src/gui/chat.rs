@@ -376,41 +376,193 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         return;
     }
 
-    let active_agent_ind = 0;
-    let mut assistant_batch: Vec<i64> = Vec::new();
+    let mut content_updates = Vec::new();
+    let mut db_updates = Vec::new();
+    let mut new_draft = None;
+    let mut draft_lost_focus = false;
 
-    if let Some(agent) = chat.agents.get(active_agent_ind) {
-        for &msg_id in &agent.msg_ids {
-            if let Some(msg) = msg_pool.get(&msg_id) {
-                match msg.msg_role {
-                    MsgRole::User | MsgRole::System => {
-                        if !assistant_batch.is_empty() {
+    {
+        // Fetch the specific chat being rendered
+        let Some(chat) = state.open_chats.get(&chat_id) else {
+            return; // Chat not loaded yet
+        };
+
+        let msg_pool = &chat.msg_pool;
+
+        if msg_pool.is_empty() {
+            egui::Frame::default()
+            .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
+            .outer_margin(Margin { top: 0, right: 5, bottom: 0, left: 5 })
+            .inner_margin(10.0)
+            .corner_radius(5.0)
+            .fill(ui.visuals().faint_bg_color)
+            .show(ui, |ui| {
+                ui.heading(t!("welcome_tour"));
+            });
+            return;
+        }
+
+        let active_agent_ind = 0;
+        let mut assistant_batch: Vec<i64> = Vec::new();
+
+        if let Some(agent) = chat.agents.get(active_agent_ind) {
+            for &msg_id in &agent.msg_ids {
+                if let Some(msg) = msg_pool.get(&msg_id) {
+                    match msg.msg_role {
+                        MsgRole::User | MsgRole::System => {
+                            if !assistant_batch.is_empty() {
+                                // Pass a clone of the cache pointer
+                                render_assistant_grid(ui, cache, msg_pool,
+                                    msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
+                                project_root, &op_tx);
+                                assistant_batch.clear();
+                            }
+
+                            let msg_ui = msg_ui_map.entry(msg_id)
+                                    .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
-                            render_assistant_grid(ui, cache, msg_pool,
-                                msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                            project_root, &op_tx);
-                            assistant_batch.clear();
+                            render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
+                                project_root, &op_tx);
                         }
+                        MsgRole::Developer => {
+                            if !assistant_batch.is_empty() {
+                                render_assistant_grid(ui, cache, msg_pool,
+                                    msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
+                                project_root, &op_tx);
+                                assistant_batch.clear();
+                            }
 
-                        let msg_ui = msg_ui_map.entry(msg_id)
-                                .or_insert(ChatMsgUi::default());
-                        // Pass a clone of the cache pointer
-                        render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                            project_root, &op_tx);
-                    }
-                    _ => {
-                        assistant_batch.push(msg_id);
+                            let mut note_content = msg.content.clone();
+                            let num_lines = note_content.lines().count().max(1);
+
+                            egui::Frame::default()
+                                .outer_margin(Margin { top: 5, right: 10, bottom: 5, left: 10 })
+                                .inner_margin(10.0)
+                                .fill(ui.visuals().extreme_bg_color)
+                                .corner_radius(5.0)
+                                .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("📝 Note Cell").weak().small());
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("🗐").on_hover_text("Copy note to clipboard").clicked() {
+                                                ui.ctx().copy_text(note_content.clone());
+                                            }
+                                        });
+                                    });
+
+                                    let out = CodeEditor::default()
+                                        .id_source(format!("note_{}", msg.id))
+                                        .with_theme(ColorTheme::SV)
+                                        .with_syntax(Syntax::text())
+                                        .with_numlines(false)
+                                        .with_rows(num_lines)
+                                        .vscroll(false)
+                                        .desired_width(total_width - 40.0)
+                                        .show(ui, &mut note_content);
+
+                                    if out.output.response.changed() {
+                                        content_updates.push((msg_id, note_content.clone()));
+                                    }
+
+                                    if out.output.response.lost_focus() {
+                                        db_updates.push((msg_id, note_content.clone()));
+                                    }
+                                });
+                        }
+                        _ => {
+                            assistant_batch.push(msg_id);
+                        }
                     }
                 }
             }
-        }
 
-        if !assistant_batch.is_empty() {
-            // Pass a clone of the cache pointer
-            render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
-                    &assistant_batch, total_width, math_cache.clone(),
-                    project_root, &op_tx);
+            if !assistant_batch.is_empty() {
+                // Pass a clone of the cache pointer
+                render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
+                        &assistant_batch, total_width, math_cache.clone(),
+                        project_root, &op_tx);
+            }
+
+            // --- NOTEBOOK APPENDER CELL ---
+            ui.add_space(10.0);
+            egui::Frame::default()
+                .outer_margin(Margin { top: 5, right: 10, bottom: 15, left: 10 })
+                .inner_margin(10.0)
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(5.0)
+                .show(ui, |ui| {
+                    let mut draft_note = chat.draft_note.clone();
+                    let num_lines = draft_note.lines().count().max(1);
+                    
+                    let out = CodeEditor::default()
+                        .id_source(format!("draft_{}", chat_id))
+                        .with_theme(ColorTheme::SV)
+                        .with_syntax(Syntax::text())
+                        .with_numlines(false)
+                        .with_rows(num_lines)
+                        .vscroll(false)
+                        .desired_width(total_width - 40.0)
+                        .show(ui, &mut draft_note);
+
+                    // Optional placeholder text if empty
+                    if draft_note.is_empty() && !out.output.response.has_focus() {
+                        ui.painter().text(
+                            out.output.response.rect.min + egui::vec2(2.0, 2.0),
+                            egui::Align2::LEFT_TOP,
+                            "Click to add a note or executable script...",
+                            egui::FontId::monospace(14.0),
+                            ui.visuals().text_color().linear_multiply(0.5)
+                        );
+                    }
+
+                    if out.output.response.changed() || draft_note != chat.draft_note {
+                        new_draft = Some(draft_note.clone());
+                    }
+                    if out.output.response.lost_focus() {
+                        draft_lost_focus = true;
+                    }
+                });
         }
+    }
+
+    // Apply mutable updates outside of the chat borrow
+    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus {
+        if let Some(chat) = state.open_chats.get_mut(&chat_id) {
+            for (id, content) in content_updates {
+                if let Some(m) = chat.msg_pool.get_mut(&id) {
+                    m.content = content;
+                }
+            }
+            if let Some(nd) = new_draft {
+                chat.draft_note = nd;
+            }
+            if draft_lost_focus {
+                let draft = chat.draft_note.trim();
+                if !draft.is_empty() {
+                    let mut new_msg = crate::common::ChatMsg {
+                        id: 0,
+                        msg_role: crate::common::MsgRole::Developer,
+                        content: chat.draft_note.clone(),
+                        ..Default::default()
+                    };
+
+                    if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut new_msg) {
+                        let new_id = new_msg.id;
+                        chat.msg_pool.insert(new_id, new_msg);
+                        for agent in chat.agents.iter_mut() {
+                            agent.msg_ids.push(new_id);
+                            let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                        }
+                    }
+                    chat.draft_note.clear();
+                }
+            }
+        }
+    }
+
+    for (id, content) in db_updates {
+        let _ = crate::db::mod_msg_content(&state.db_conn, id, &content);
     }
 }
 

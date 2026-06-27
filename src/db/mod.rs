@@ -666,6 +666,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
         title,
         msg_pool,
         agents,
+        draft_note: String::new(),
     })
 
 }

@@ -331,6 +331,8 @@ pub struct Chat {
     pub title: String,
     pub msg_pool: HashMap<i64, ChatMsg>,
     pub agents: Vec<Agent>,
+    #[serde(skip)]
+    pub draft_note: String, // Buffer for the bottom notebook cell
 }
 
 impl Default for Chat {
@@ -355,6 +357,7 @@ impl Default for Chat {
             title: "Unnamed Chat".to_string(),
             msg_pool: HashMap::new(),
             agents: vec![omnis, agent1],
+            draft_note: String::new(),
         }
     }
 }
@@ -367,10 +370,12 @@ impl Chat {
             agent.msg_ids
                 .iter()
                 .filter_map(|msg_id| {
-                    self.msg_pool
-                        .get(msg_id)
-                        .cloned()       // Clone the ChatMsg (From consumes input)
-                        .map(Into::into)// Convert ChatMsg -> Message
+                    let msg = self.msg_pool.get(msg_id)?;
+                    // Skip Developer (Note) messages
+                    if msg.msg_role == MsgRole::Developer {
+                        return None;
+                    }
+                    Some(msg.clone().into()) // Clone ChatMsg, Convert to openrouter
                 })
                 .collect()
         } else {
@@ -384,10 +389,12 @@ impl Chat {
             agent.msg_ids
                 .iter()
                 .filter_map(|msg_id| {
-                    self.msg_pool
-                        .get(msg_id)
-                        .cloned()        // Clone the ChatMsg
-                        .map(Into::into) // Convert ChatMsg -> ollama_rs ChatMessage
+                    let msg = self.msg_pool.get(msg_id)?;
+                    // NEW: Skip Developer (Note) messages
+                    if msg.msg_role == MsgRole::Developer {
+                        return None;
+                    }
+                    Some(msg.clone().into()) // Clone ChatMsg, Convert to ollama_rs
                 })
                 .collect()
         } else {
