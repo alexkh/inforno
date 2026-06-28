@@ -535,7 +535,7 @@ pub fn preset_combo_box(
     changed
 }
 
-fn submit_prompt(state: &mut State, ctx: &egui::Context) {
+pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     let active_chat_id = state.active_chat_id.unwrap_or(0);
 
     // Temporarily extract the active chat to satisfy the borrow checker

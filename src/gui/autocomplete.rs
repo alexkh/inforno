@@ -34,7 +34,7 @@ where
             highlight: false,
             multiple_words: false,
             set_properties: None,
-            popup_on_focus: false,
+            popup_on_focus: true, // Changed to true by default
             width: f32::INFINITY,
         }
     }
@@ -150,13 +150,22 @@ where
         let matcher = SkimMatcherV2::default().ignore_case();
 
         let match_results = {
-            let mut match_results = search
-                .into_iter()
-                .filter_map(|s| {
-                    let score = matcher.fuzzy_indices(s.as_ref(), completion_input);
-                    score.map(|(score, indices)| (s, score, indices))
-                })
-                .collect::<Vec<_>>();
+            let mut match_results = if completion_input.is_empty() {
+                // Fuzzy matchers usually return None for an empty query.
+                // To show results immediately on an empty field, we include all items with a default score.
+                search
+                    .into_iter()
+                    .map(|s| (s, 0, Vec::<usize>::new()))
+                    .collect::<Vec<_>>()
+            } else {
+                search
+                    .into_iter()
+                    .filter_map(|s| {
+                        let score = matcher.fuzzy_indices(s.as_ref(), completion_input);
+                        score.map(|(score, indices)| (s, score, indices))
+                    })
+                    .collect::<Vec<_>>()
+            };
             match_results.sort_by_key(|k| Reverse(k.1));
             match_results
         };

@@ -244,7 +244,7 @@ fn is_likely_rhai(text: &str) -> bool {
 }
 
 // --- Helper: Run Rhai Script ---
-fn run_rhai(script: &str) -> String {
+fn run_rhai(script: &str) -> (String, Option<String>) {
     use rhai::Engine;
     use std::sync::{Arc, Mutex};
 
@@ -267,6 +267,13 @@ fn run_rhai(script: &str) -> String {
         out.push_str(&format!("[DEBUG] {}\n", s));
     });
 
+    // NEW: Bridge for LLM Prompting
+    let prompt_request = Arc::new(Mutex::new(None));
+    let pr_clone = prompt_request.clone();
+    engine.register_fn("send_prompt", move |text: &str| {
+        *pr_clone.lock().unwrap() = Some(text.to_string());
+    });
+
     let result = engine.eval::<rhai::Dynamic>(script);
     let mut final_out = output.lock().unwrap().clone();
 
@@ -281,11 +288,14 @@ fn run_rhai(script: &str) -> String {
         }
     }
 
-    if final_out.is_empty() {
+    let final_str = if final_out.is_empty() {
         "Execution finished (no output)".to_string()
     } else {
         final_out
-    }
+    };
+
+    let requested = prompt_request.lock().unwrap().take();
+    (final_str, requested)
 }
 
 
@@ -441,6 +451,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let mut rhai_updates = Vec::new(); // NEW: Captures output string to update msg pool
     let mut new_draft = None;
     let mut draft_lost_focus = false;
+    let mut llm_prompt_request = None; // NEW: Captures requests sent via Rhai `send_prompt()`
 
     {
         // Fetch the specific chat being rendered
@@ -524,8 +535,11 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                                             // NEW: Execute Rhai Script!
                                             if ui.button("▶ Run").on_hover_text("Execute as Rhai Script").clicked() {
-                                                let output = run_rhai(&note_content);
+                                                let (output, prompt_req) = run_rhai(&note_content);
                                                 rhai_updates.push((msg_id, output));
+                                                if prompt_req.is_some() {
+                                                    llm_prompt_request = prompt_req;
+                                                }
                                             }
                                         });
                                     });
@@ -561,13 +575,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     // Sticky Rhai Detection & Mark as unsaved while typing
                                     if out.output.response.changed() {
                                         let mut new_is_rhai = is_rhai;
-                                        
+
                                         if !new_is_rhai && is_likely_rhai(&note_content) {
                                             new_is_rhai = true; // Upgrade to Rhai
                                         } else if new_is_rhai && note_content.trim().is_empty() {
                                             new_is_rhai = false; // Downgrade to Text if emptied
                                         }
-                                        
+
                                         msg_ui.is_rhai = Some(new_is_rhai); // Cache immediately to UI
 
                                         content_updates.push((msg_id, note_content.clone(), true));
@@ -646,7 +660,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     }
 
     // Apply mutable updates outside of the chat borrow
-    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() {
+    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() || llm_prompt_request.is_some() {
         if let Some(chat) = state.open_chats.get_mut(&chat_id) {
             for (id, content, unsaved) in content_updates {
                 if let Some(m) = chat.msg_pool.get_mut(&id) {
@@ -689,6 +703,14 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     for (id, content) in db_updates {
         let _ = crate::db::mod_msg_content(&state.db_conn, id, &content);
+    }
+
+    // NEW: Fire LLM Prompt if requested
+    if let Some(prompt_text) = llm_prompt_request {
+        // Hydrate the bottom panel buffer with the Rhai-generated text
+        state.bottom_panel_state.prompt_edited = prompt_text;
+        // Submit the prompt just as if the user clicked "Send"
+        crate::gui::bottom_panel::submit_prompt(state, ui.ctx());
     }
 }
 
