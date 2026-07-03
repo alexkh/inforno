@@ -267,6 +267,11 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
 
             row(&t!("temperature_label"), preset.options.temperature
                     .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Stream:", preset.options.stream
+                .map_or(t!("unset").to_string(), |s| {
+                if s { t!("yes").to_string() } else { t!("no").to_string() }
+            }));
         });
     }
 }
@@ -879,4 +884,40 @@ pub fn render_common_options(
                     .map(|t| t.to_string()).unwrap_or_default();
         }
     );
+
+    // --- Stream ---
+    ui.horizontal(|ui| {
+        ui.label("Stream:");
+
+        // Visualizing the original value
+        let orig_text = match original_options.stream {
+            Some(true) => t!("yes"),
+            Some(false) => t!("no"),
+            None => t!("unset"),
+        };
+        show_original_value(ui, orig_text.to_string());
+
+        // Manual Revert Button for Radio Group
+        if ui.button("⟲").on_hover_text(t!("revert_to_initial_tooltip"))
+                .clicked() {
+            substate.edited_preset.options.stream =
+                    original_options.stream;
+        }
+
+        ui.radio_value(
+            &mut substate.edited_preset.options.stream,
+            None,
+            t!("unset"),
+        );
+        ui.radio_value(
+            &mut substate.edited_preset.options.stream,
+            Some(true),
+            t!("yes"),
+        );
+        ui.radio_value(
+            &mut substate.edited_preset.options.stream,
+            Some(false),
+            t!("no"),
+        );
+    });
 }

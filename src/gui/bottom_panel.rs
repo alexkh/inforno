@@ -443,6 +443,21 @@ fn render_agent(
                     .unwrap_or_else(|| t!("unset").to_string())));
                 });
             }
+
+            if current.options.stream !=
+                   original.options.stream {
+                egui::Frame::new()
+                .stroke(egui::Stroke::new(1.0, text_color()))
+                .inner_margin(egui::Margin::symmetric(3, 0))
+                .corner_radius(3.0)
+                .show(ui, |ui| {
+                    ui.label(format!("{} {}", t!("stream_label"),
+                    current.options.stream
+                    .map_or(t!("unset").to_string(), |s| {
+                    if s { t!("yes").to_string() } else { t!("no").to_string()
+                    }})));
+                });
+            }
 /*
             // If we found changes, display the indicator
             if !changes.is_empty() {

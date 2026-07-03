@@ -33,6 +33,91 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
 }
 
 #[tracing::instrument(skip_all)]
+pub async fn do_ollama_chat_sync(
+    query: ChatQue,
+    tx: Sender<ChatStreamEvent>,
+    ctx: &egui::Context,
+    abort_flag: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ollama = Ollama::default();
+    let model_name = query.preset.model.clone();
+    let messages = query.chat.to_ollama_messages(query.agent_ind);
+
+    // 1. Prepare the ModelOptions (Seed & Temperature)
+    let mut options = ModelOptions::default();
+
+    if let Some(seed) = query.preset.options.seed {
+        // ollama_rs uses i32 for seeds
+        options = options.seed(seed as i32);
+    }
+
+    if let Some(temp) = query.preset.options.temperature {
+        // ollama_rs uses f32 for temperature
+        options = options.temperature(temp as f32);
+    }
+
+    options = options.top_k(0).top_p(1.0).num_predict(4096);
+
+    // 2. Create the Request and attach Options
+    let mut request = ChatMessageRequest::new(model_name, messages)
+        .options(options);
+
+    match query.preset.options.include_reasoning {
+        Some(true) => { request = request.think(true); }
+        Some(false) => { request = request.think(false); }
+        None => {}
+    }
+
+    // Wait for the ENTIRE response to generate
+    match ollama.send_chat_messages(request).await {
+        Ok(response) => {
+            if abort_flag.load(Ordering::Relaxed) {
+                return Ok(()); // User cancelled while waiting
+            }
+
+            // --- ADD THESE DEBUG LINES ---
+            println!("\n--- DEBUG SYNC RESPONSE ---");
+            println!("{:#?}", response);
+            println!("---------------------------\n");
+            // -----------------------------
+
+            let msg = response.message;
+
+            // 1. Send the reasoning block all at once (if present)
+            if let Some(thinking) = &msg.thinking {
+                if !thinking.is_empty() {
+                    let _ = tx.send(ChatStreamEvent::Reasoning(
+                        query.agent_ind,
+                        thinking.to_string(),
+                    ));
+                    ctx.request_repaint();
+                }
+            }
+
+            // 2. Send the actual answer all at once
+            if !msg.content.is_empty() {
+                let _ = tx.send(ChatStreamEvent::Content(
+                    query.agent_ind,
+                    msg.content
+                ));
+                ctx.request_repaint();
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(ChatStreamEvent::Error(
+                query.agent_ind,
+                format!("Ollama sync error: {:?}", e)
+            ));
+            ctx.request_repaint();
+        }
+    }
+
+    println!("Finished sync request from Ollama/Fox");
+    ctx.request_repaint();
+    Ok(())
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn do_ollama_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
@@ -56,7 +141,7 @@ pub async fn do_ollama_chat_stream(
         options = options.temperature(temp as f32);
     }
 
-    options = options.top_k(0).top_p(1.0);
+    options = options.top_k(0).top_p(1.0).num_predict(4096);
 
     // 2. Create the Request and attach Options
     let mut request = ChatMessageRequest::new(model_name, messages)
@@ -85,6 +170,13 @@ pub async fn do_ollama_chat_stream(
             println!("Agent {} stream aborted by user.", query.agent_ind);
             break;
         }
+        
+        // --- DEBUG ---
+        println!("\n--- DEBUG STREAM CHUNK ---");
+        println!("{:#?}", res);
+        println!("--------------------------\n");
+        // -----------------------------
+
         match res {
             Ok(response) => {
                 let msg = response.message;

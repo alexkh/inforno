@@ -470,6 +470,7 @@ pub struct ModelOptions {
     pub include_reasoning: Option<bool>,
     pub seed: Option<i32>, // we use i32 but do not allow negative values
     pub temperature: Option<f64>,
+	pub stream: Option<bool>,
 }
 
 // Preset is the essential data structure, because it will hide all
@@ -825,12 +826,24 @@ pub async fn run_chat_stream_router(
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Agent options: {:?}", &query.preset.options);
+    
+    // Default to streaming unless explicitly set to false
+    let use_streaming = query.preset.options.stream.unwrap_or(true);
+
     match query.preset.chat_router {
         ChatRouter::Openrouter => {
-            crate::openr::do_openr_chat_stream(query, tx, ctx, abort_flag).await
+            if use_streaming {
+                crate::openr::do_openr_chat_stream(query, tx, ctx, abort_flag).await
+            } else {
+                crate::openr::do_openr_chat_sync(query, tx, ctx, abort_flag).await
+            }
         }
         ChatRouter::Ollama => {
-            crate::ollama::do_ollama_chat_stream(query, tx, ctx, abort_flag).await
+            if use_streaming {
+                crate::ollama::do_ollama_chat_stream(query, tx, ctx, abort_flag).await
+            } else {
+                crate::ollama::do_ollama_chat_sync(query, tx, ctx, abort_flag).await
+            }
         }
     }
 }

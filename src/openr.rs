@@ -40,6 +40,97 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
 }
 
 #[tracing::instrument(skip_all)]
+pub async fn do_openr_chat_sync(
+    query: ChatQue,
+    tx: Sender<ChatStreamEvent>,
+    ctx: &egui::Context,
+    abort_flag: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("using key: {}", mask_key_secure(
+        query.preset.api_key.key.expose_secret()));
+
+    let client = OpenRouterClient::builder()
+        .api_key(query.preset.api_key.key.expose_secret())
+        .build()?;
+
+    // 1. Start the builder with mandatory fields
+    let mut request_builder = ChatCompletionRequest::builder();
+    request_builder
+        .model(query.preset.model)
+        .messages(query.chat.to_openrouter_messages(query.agent_ind));
+
+    // 2. Conditional: Apply Reasoning
+    match query.preset.options.include_reasoning {
+        Some(true) => {
+            request_builder.reasoning_effort(Effort::High);
+        }
+        Some(false) | None => {
+            // Leave default or disabled
+        }
+    }
+
+    // 3. Conditional: Apply Seed
+    if let Some(seed) = query.preset.options.seed {
+        request_builder.seed(seed as u32);
+    }
+
+    // 4. Conditional: Apply Temperature
+    if let Some(temp) = query.preset.options.temperature {
+        request_builder.temperature(temp);
+    }
+
+    // 5. Finalize build
+    let chat_request = request_builder.build()?;
+
+    // Wait for the ENTIRE response to generate synchronously
+    match client.send_chat_completion(&chat_request).await {
+        Ok(response) => {
+            // Check if the user aborted while we were waiting
+            if abort_flag.load(Ordering::Relaxed) {
+                println!("OpenRouter sync aborted by user.");
+                return Ok(()); 
+            }
+
+            // Extract content and send to UI
+            if let Some(choice) = response.choices.first() {
+                // 1. Send reasoning if present
+                if let Some(reasoning) = choice.reasoning() {
+                    if !reasoning.is_empty() {
+                        let _ = tx.send(ChatStreamEvent::Reasoning(
+                            query.agent_ind, 
+                            reasoning.to_string()
+                        ));
+                        ctx.request_repaint();
+                    }
+                }
+                
+                // 2. Send actual content
+                if let Some(content) = choice.content() {
+                    if !content.is_empty() {
+                        let _ = tx.send(ChatStreamEvent::Content(
+                            query.agent_ind, 
+                            content.to_string()
+                        ));
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(ChatStreamEvent::Error(
+                query.agent_ind, 
+                format!("OpenRouter sync error: {:?}", e)
+            ));
+            ctx.request_repaint();
+        }
+    }
+
+    println!("Finished sync request from OpenRouter");
+    ctx.request_repaint();
+    Ok(())
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn do_openr_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
