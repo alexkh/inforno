@@ -128,6 +128,82 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let is_active = self.state.active_tile_id == Some(tile_id);
+        let mut request_search_focus = false;
+
+        // Only intercept Ctrl+F if this pane is currently focused
+        if is_active && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            request_search_focus = true;
+        }
+
+        let render_search_bar = |ui: &mut egui::Ui| {
+            let state_id = egui::Id::new("tab_search").with(tile_id);
+            let search_edit_id = state_id.with("edit");
+            let mut search_state = ui.ctx().data_mut(|d| d.get_temp::<crate::bulat::editor::CodeEditorState>(state_id).unwrap_or_default());
+
+            let mut next = false;
+            let mut prev = false;
+            let mut changed = false;
+
+            // Must be Left-to-Right so elements aren't flipped visually by the parent's Right-to-Left
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut search_state.search_term)
+                        .id_source(search_edit_id)
+                        .desired_width(120.0)
+                        .hint_text("🔍 Search...")
+                );
+
+                if request_search_focus {
+                    response.request_focus();
+                }
+
+                changed = response.changed();
+
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    next = true;
+                    response.request_focus();
+                }
+
+                // Dynamically reveal controls ONLY when there is a search term
+                if !search_state.search_term.is_empty() {
+                    if search_state.match_count > 0 {
+                        ui.label(egui::RichText::new(format!(" {}/{} ", search_state.current_match + 1, search_state.match_count)).color(egui::Color32::GRAY));
+                    } else {
+                        ui.label(egui::RichText::new(" 0/0 ").color(egui::Color32::GRAY));
+                    }
+
+                    if ui.button("↑").clicked() { prev = true; }
+                    if ui.button("↓").clicked() { next = true; }
+
+                    if ui.button("✖").clicked() {
+                        search_state.search_term.clear();
+                        changed = true; // Force highlight clearing
+                    }
+                } else {
+                    ui.label(" "); // Empty space to keep layout stable
+                }
+                ui.add_space(8.0);
+            });
+
+            if changed {
+                search_state.current_match = 0;
+            } else if next {
+                search_state.current_match = search_state.current_match.saturating_add(1);
+            } else if prev {
+                search_state.current_match = search_state.current_match.checked_sub(1).unwrap_or(search_state.match_count.saturating_sub(1));
+            }
+
+            if search_state.match_count > 0 {
+                search_state.current_match %= search_state.match_count;
+            }
+
+            search_state.scroll_to_match = changed || next || prev;
+            search_state.match_count = 0; // Reset so editors can re-accumulate this frame
+
+            ui.ctx().data_mut(|d| d.insert_temp(state_id, search_state));
+        };
 
         // Define our highlight border. If active, use the theme's hyperlink/accent color.
         let frame = if is_active {
@@ -191,7 +267,6 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             ui.label(format!("Editing: {}", path.file_name().unwrap_or_default().to_string_lossy()));
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                // 2. Removed the Split buttons from here!
                                 // Now we only keep pane-specific actions like Save.
                                 if ui.button("💾 Save").clicked() {
                                     if let Err(e) = std::fs::write(&path, &*content) {
@@ -199,6 +274,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                         self.state.is_modal_open = true;
                                     }
                                 }
+
+                                render_search_bar(ui);
                             });
                         });
                         ui.separator();
@@ -210,6 +287,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                         let syntax = crate::bulat::editor::Syntax::get_or_load(ui.ctx(), ext);
 
                         crate::bulat::editor::CodeEditor::default()
+                            .with_search_state_id(egui::Id::new("tab_search").with(tile_id))
                             .id_source(format!("editor_code_{:?}", tile_id))
                             .with_theme(crate::bulat::editor::ColorTheme::SV)
                             .with_syntax(syntax)
@@ -233,11 +311,15 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                         }
                                     }
                                 }
+
+                                render_search_bar(ui);
                             });
                         });
                         ui.separator();
 
                         if let Some(app) = self.state.merge_apps.get_mut(&tile_id) {
+                            // Link the DiffApp to this tab's search bar state
+                            app.search_state_id = Some(egui::Id::new("tab_search").with(tile_id));
                             app.show(ui);
                         } else {
                             ui.vertical_centered(|ui| {

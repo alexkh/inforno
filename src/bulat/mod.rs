@@ -78,6 +78,7 @@ pub struct DiffApp {
     // NEW: List of diff blocks to render buttons
     diff_blocks: Vec<DiffBlock>,
     calculated_row_height: f32,
+    pub search_state_id: Option<egui::Id>,
 }
 
 impl DiffApp {
@@ -114,6 +115,7 @@ impl DiffApp {
             right_max_hscroll: 0.0,
             diff_blocks: Vec::new(),
             calculated_row_height: 14.0,
+            search_state_id: None,
         };
 
         // compute initial diffs
@@ -377,9 +379,15 @@ impl DiffApp {
 
                         let expected_left_offset = self.hscroll_ratio * self.left_max_hscroll;
 
-                        let left_out = CodeEditor::default()
+                        let mut left_editor = CodeEditor::default()
                             .id_source("left_editor")
-                            .with_rows(self.left_line_map.len()) // Grow to fit content
+                            .with_rows(self.left_line_map.len());
+                            
+                        if let Some(id) = self.search_state_id {
+                            left_editor = left_editor.with_search_state_id(id);
+                        }
+
+                        let left_out = left_editor
                             //.with_fontsize(14.0)
                             .with_row_height(row_height)
                             .with_theme(self.theme)
@@ -496,9 +504,15 @@ impl DiffApp {
 
                         let expected_right_offset = self.hscroll_ratio * self.right_max_hscroll;
 
-                        let right_out = CodeEditor::default()
+                        let mut right_editor = CodeEditor::default()
                             .id_source("right_editor")
-                            .with_rows(self.right_line_map.len())
+                            .with_rows(self.right_line_map.len());
+                            
+                        if let Some(id) = self.search_state_id {
+                            right_editor = right_editor.with_search_state_id(id);
+                        }
+
+                        let right_out = right_editor
                             //.with_fontsize(14.0)
                             .with_row_height(row_height)
                             .with_theme(self.theme)

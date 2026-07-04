@@ -87,11 +87,12 @@ pub use themes::ColorTheme;
 pub use completer::Completer;
 
 #[derive(Clone, Default)]
-struct CodeEditorState {
-    search_term: String,
-    search_active: bool,
-    current_match: usize,
-    scroll_to_match: bool,
+pub struct CodeEditorState {
+    pub search_term: String,
+    pub search_active: bool,
+    pub current_match: usize,
+    pub match_count: usize,
+    pub scroll_to_match: bool,
 }
 
 pub trait Editor: Hash {
@@ -133,6 +134,7 @@ pub struct CodeEditor {
     hscroll_offset: Option<f32>,
 	auto_shrink_v: bool,
     pub search_term: String,
+    pub search_state_id: Option<egui::Id>,
 }
 
 impl Hash for CodeEditor {
@@ -167,6 +169,7 @@ impl Default for CodeEditor {
             hscroll_offset: None,
 			auto_shrink_v: true,
             search_term: String::new(),
+            search_state_id: None,
         }
     }
 }
@@ -337,6 +340,13 @@ impl CodeEditor {
         }
     }
 
+    pub fn with_search_state_id(self, id: egui::Id) -> Self {
+        CodeEditor {
+            search_state_id: Some(id),
+            ..self
+        }
+    }
+
     fn numlines_show(&self, ui: &mut egui::Ui, text: &str) {
         let total = if text.ends_with('\n') || text.is_empty() {
             text.lines().count() + 1
@@ -433,22 +443,19 @@ impl CodeEditor {
     }
 
     /// Show Code Editor
-    pub fn show(&mut self, ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer) -> CodeEditorOutput {
+        pub fn show(&mut self, ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer) -> CodeEditorOutput {
         use egui::TextBuffer;
 
-        let state_id = egui::Id::new(&self.id).with("code_editor_state");
+        let state_id = self.search_state_id.unwrap_or_else(|| egui::Id::new(&self.id).with("code_editor_state"));
         let mut state = ui.ctx().data_mut(|d| d.get_temp::<CodeEditorState>(state_id).unwrap_or_default());
 
-        // Toggle Search (Using global input so both Diff panes open simultaneously)
+        // Global fallback toggle via shortcut
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
             state.search_active = true;
         }
         if state.search_active && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             state.search_active = false;
         }
-
-                let mut next_pressed = false;
-        let mut prev_pressed = false;
 
         let text_str = text.as_str();
         let mut match_char_indices = Vec::new();
@@ -465,49 +472,10 @@ impl CodeEditor {
                     start_byte = byte_idx + term_lower.len();
                 }
             }
-
-            egui::Frame::none().fill(self.theme.bg()).inner_margin(4.0).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🔍").color(self.theme.type_color(TokenType::Literal)));
-                    let response = ui.add(egui::TextEdit::singleline(&mut state.search_term).desired_width(150.0).hint_text("Search..."));
-
-                    if response.changed() {
-                        state.current_match = 0;
-                        state.scroll_to_match = true;
-                    }
-
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        next_pressed = true;
-                        response.request_focus();
-                    }
-
-                    if !match_char_indices.is_empty() {
-                        ui.label(egui::RichText::new(format!("{}/{}", state.current_match + 1, match_char_indices.len())).color(self.theme.type_color(TokenType::Comment(false))));
-                    } else if !state.search_term.is_empty() {
-                        ui.label(egui::RichText::new("0/0").color(self.theme.type_color(TokenType::Comment(false))));
-                    }
-
-                    if ui.button("↑").clicked() { prev_pressed = true; }
-                    if ui.button("↓").clicked() { next_pressed = true; }
-
-                    if ui.button("✖").clicked() {
-                        state.search_active = false;
-                        state.search_term.clear();
-                    }
-                });
-            });
         }
 
-        if !match_char_indices.is_empty() {
-            if next_pressed {
-                state.current_match = (state.current_match + 1) % match_char_indices.len();
-                state.scroll_to_match = true;
-            } else if prev_pressed {
-                state.current_match = state.current_match.checked_sub(1).unwrap_or(match_char_indices.len() - 1);
-                state.scroll_to_match = true;
-            }
-        }
-
+        // Sync max matches for the top bar (Crucial for Merge tool where both editors share the search state)
+        state.match_count = state.match_count.max(match_char_indices.len());
         self.search_term = state.search_term.clone();
 
         // 0. PRE-CALCULATE / CLONE VALUES
@@ -515,11 +483,7 @@ impl CodeEditor {
         let stick_to_bottom = self.stick_to_bottom;
         let id_source = self.id.clone();
         let row_height = self.row_height.unwrap_or(16.0);
-
-        let scroll_to_match = state.scroll_to_match;
-        let search_active = state.search_active;
-        let current_match = state.current_match;
-
+        
         let mut text_edit_output: Option<TextEditOutput> = None;
         let mut current_hscroll_offset = 0.0; // Variable to capture the offset
         let mut max_hscroll_offset = 0.0;
@@ -612,8 +576,15 @@ impl CodeEditor {
                                     .layouter(&mut layouter)
                                     .show(ui);
 
-                                                        if scroll_to_match && search_active {
-                            if let Some(&char_idx) = match_char_indices.get(current_match) {
+                                                                                if state.scroll_to_match && state.search_active {
+                            // Safe wrapping index prevents bounds panic if left/right files have different match counts
+                            let safe_idx = if !match_char_indices.is_empty() {
+                                state.current_match % match_char_indices.len()
+                            } else {
+                                0
+                            };
+                            
+                            if let Some(&char_idx) = match_char_indices.get(safe_idx) {
                                 let ccursor = egui::text::CCursor::new(char_idx);
                                 let cursor_rect = output.galley.pos_from_cursor(ccursor);
                                 let absolute_rect = cursor_rect.translate(output.galley_pos.to_vec2());
@@ -622,8 +593,8 @@ impl CodeEditor {
                         }
                             
                         text_edit_output = Some(output);
-                            });
                     });
+            });
 
                     current_hscroll_offset = h_scroll_output.state.offset.x;
                     max_hscroll_offset = (h_scroll_output.content_size.x -
@@ -653,7 +624,6 @@ impl CodeEditor {
             current_scroll_offset = 0.0;
         }
         
-        state.scroll_to_match = false;
         ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
 
         CodeEditorOutput {
