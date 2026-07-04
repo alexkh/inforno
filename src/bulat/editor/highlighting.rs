@@ -116,5 +116,68 @@ impl<T: Editor> egui::util::cache::ComputerMut<(&T, &str), LayoutJob> for Token 
 pub type HighlightCache = egui::util::cache::FrameCache<LayoutJob, Token>;
 
 pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> LayoutJob {
-    ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)).clone())
+    let mut job = ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)).clone());
+    let search_term = cache.search_term();
+    
+    if !search_term.is_empty() {
+        let term_lower = search_term.to_lowercase();
+        let text_lower = text.to_lowercase();
+        let mut match_ranges = Vec::new();
+        let mut start = 0;
+        
+        while let Some(idx) = text_lower[start..].find(&term_lower) {
+            let match_start = start + idx;
+            let match_end = match_start + term_lower.len();
+            match_ranges.push(match_start..match_end);
+            start = match_end;
+        }
+
+        if !match_ranges.is_empty() {
+            let mut new_sections = Vec::new();
+            let highlight_bg = egui::Color32::from_rgba_premultiplied(200, 200, 0, 150);
+
+            for section in job.sections {
+                let sec_start = section.byte_range.start;
+                let sec_end = section.byte_range.end;
+                let mut current_start = sec_start;
+
+                for range in &match_ranges {
+                    if range.end <= current_start { continue; }
+                    if range.start >= sec_end { break; }
+
+                    if current_start < range.start {
+                        let mut format = section.format.clone();
+                        new_sections.push(egui::text::LayoutSection {
+                            leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
+                            byte_range: current_start..range.start,
+                            format,
+                        });
+                        current_start = range.start;
+                    }
+
+                    let overlap_end = range.end.min(sec_end);
+                    let mut format = section.format.clone();
+                    format.background = highlight_bg;
+                    format.color = egui::Color32::BLACK; // Override text color to ensure readability against yellow
+                    new_sections.push(egui::text::LayoutSection {
+                        leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
+                        byte_range: current_start..overlap_end,
+                        format,
+                    });
+                    current_start = overlap_end;
+                }
+
+                if current_start < sec_end {
+                    new_sections.push(egui::text::LayoutSection {
+                        leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
+                        byte_range: current_start..sec_end,
+                        format: section.format.clone(),
+                    });
+                }
+            }
+            job.sections = new_sections;
+        }
+    }
+    
+    job
 }

@@ -39,7 +39,7 @@ pub enum RustToken {
 
     // 3. Strings
     // Standard double quoted strings
-    #[regex(r#""(?:[^"\\]|\\.)*""#)]
+    #[regex(r#"(?s)"(?:[^"\\]|\\.)*""#)]
     // Raw strings delegated to our custom Rust callback!
     #[regex(r#"r#*""#, lex_raw_string)]
     String,

@@ -14,9 +14,9 @@ pub enum CToken {
     #[regex(r"#[ \t]*[a-zA-Z_]+")]
     Preprocessor,
 
-    #[regex(r#"'(?:[^'\\]|\\.)'"#)]
+    #[regex(r#"(?s)'(?:[^'\\]|\\.)'"#)]
     Char,
-    #[regex(r#""(?:[^"\\]|\\.)*""#)]
+    #[regex(r#"(?s)"(?:[^"\\]|\\.)*""#)]
     String,
 
     #[token("auto")] #[token("break")] #[token("case")] #[token("class")] #[token("const")]
