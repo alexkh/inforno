@@ -99,6 +99,7 @@ pub trait Editor: Hash {
     fn append(&self, job: &mut LayoutJob, token: &Token);
     fn syntax(&self) -> &Syntax;
     fn search_term(&self) -> &str { "" }
+    fn active_search_match_byte_range(&self) -> Option<std::ops::Range<usize>> { None }
 }
 
 /// Output of the CodeEditor::show() method
@@ -135,6 +136,7 @@ pub struct CodeEditor {
 	auto_shrink_v: bool,
     pub search_term: String,
     pub search_state_id: Option<egui::Id>,
+    pub active_search_match_bytes: Option<std::ops::Range<usize>>,
 }
 
 impl Hash for CodeEditor {
@@ -144,6 +146,7 @@ impl Hash for CodeEditor {
         (self.fontsize as u32).hash(state);
         self.syntax.hash(state);
         self.search_term.hash(state);
+        self.active_search_match_bytes.hash(state);
     }
 }
 
@@ -170,6 +173,7 @@ impl Default for CodeEditor {
 			auto_shrink_v: true,
             search_term: String::new(),
             search_state_id: None,
+            active_search_match_bytes: None,
         }
     }
 }
@@ -457,26 +461,43 @@ impl CodeEditor {
             state.search_active = false;
         }
 
-        let text_str = text.as_str();
-        let mut match_char_indices = Vec::new();
-        
-        if state.search_active {
-            if !state.search_term.is_empty() {
-                let term_lower = state.search_term.to_lowercase();
-                let text_lower = text_str.to_lowercase();
-                let mut start_byte = 0;
-                while let Some(idx) = text_lower[start_byte..].find(&term_lower) {
-                    let byte_idx = start_byte + idx;
-                    let char_idx = text_str[..byte_idx].chars().count();
-                    match_char_indices.push(char_idx);
-                    start_byte = byte_idx + term_lower.len();
-                }
+                let text_str = text.as_str();
+        let mut match_byte_ranges = Vec::new();
+        let mut match_char_starts = Vec::new();
+
+        if !state.search_term.is_empty() {
+            let term_lower = state.search_term.to_lowercase();
+            let text_lower = text_str.to_lowercase();
+            let mut start_byte = 0;
+            while let Some(idx) = text_lower[start_byte..].find(&term_lower) {
+                let byte_start = start_byte + idx;
+                let byte_end = byte_start + term_lower.len();
+                match_byte_ranges.push(byte_start..byte_end);
+
+                let char_idx = text_str[..byte_start].chars().count();
+                match_char_starts.push(char_idx);
+
+                start_byte = byte_end;
             }
         }
 
-        // Sync max matches for the top bar (Crucial for Merge tool where both editors share the search state)
-        state.match_count = state.match_count.max(match_char_indices.len());
+        // Cumulatively aggregate matches (Crucial for DiffApp so Left + Right editors share the total count)
+        let start_match_idx = state.match_count;
+        state.match_count += match_byte_ranges.len();
         self.search_term = state.search_term.clone();
+
+        let mut active_byte_range = None;
+        let mut active_char_idx = None;
+
+        if !match_byte_ranges.is_empty() {
+            // Check if the current globally selected match falls inside THIS editor's chunk
+            if state.current_match >= start_match_idx && state.current_match < state.match_count {
+                let local_idx = state.current_match - start_match_idx;
+                active_byte_range = Some(match_byte_ranges[local_idx].clone());
+                active_char_idx = Some(match_char_starts[local_idx]);
+            }
+        }
+        self.active_search_match_bytes = active_byte_range;
 
         // 0. PRE-CALCULATE / CLONE VALUES
         let vscroll = self.vscroll;
@@ -576,21 +597,15 @@ impl CodeEditor {
                                     .layouter(&mut layouter)
                                     .show(ui);
 
-                                                                                if state.scroll_to_match && state.search_active {
-                            // Safe wrapping index prevents bounds panic if left/right files have different match counts
-                            let safe_idx = if !match_char_indices.is_empty() {
-                                state.current_match % match_char_indices.len()
-                            } else {
-                                0
-                            };
-                            
-                            if let Some(&char_idx) = match_char_indices.get(safe_idx) {
-                                let ccursor = egui::text::CCursor::new(char_idx);
-                                let cursor_rect = output.galley.pos_from_cursor(ccursor);
-                                let absolute_rect = cursor_rect.translate(output.galley_pos.to_vec2());
-                                ui.scroll_to_rect(absolute_rect, Some(egui::Align::Center));
-                            }
-                        }
+                                // Scroll ONLY if this specific editor contains the active match
+                                if state.scroll_to_match {
+                                    if let Some(char_idx) = active_char_idx {
+                                        let ccursor = egui::text::CCursor::new(char_idx);
+                                        let cursor_rect = output.galley.pos_from_cursor(ccursor);
+                                        let absolute_rect = cursor_rect.translate(output.galley_pos.to_vec2());
+                                        ui.scroll_to_rect(absolute_rect, Some(egui::Align::Center));
+                                    }
+                                }
                             
                         text_edit_output = Some(output);
                     });
@@ -648,6 +663,10 @@ impl Editor for CodeEditor {
 
     fn search_term(&self) -> &str {
         &self.search_term
+    }
+
+    fn active_search_match_byte_range(&self) -> Option<std::ops::Range<usize>> {
+        self.active_search_match_bytes.clone()
     }
 }
 

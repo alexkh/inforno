@@ -118,6 +118,7 @@ pub type HighlightCache = egui::util::cache::FrameCache<LayoutJob, Token>;
 pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> LayoutJob {
     let mut job = ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)).clone());
     let search_term = cache.search_term();
+    let active_match = cache.active_search_match_byte_range();
     
     if !search_term.is_empty() {
         let term_lower = search_term.to_lowercase();
@@ -134,7 +135,8 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
 
         if !match_ranges.is_empty() {
             let mut new_sections = Vec::new();
-            let highlight_bg = egui::Color32::from_rgba_premultiplied(200, 200, 0, 150);
+            let highlight_bg = egui::Color32::from_rgba_premultiplied(200, 200, 0, 150); // Yellow for background matches
+            let active_bg = egui::Color32::from_rgba_premultiplied(255, 128, 0, 200);   // Orange for the active match!
 
             for section in job.sections {
                 let sec_start = section.byte_range.start;
@@ -157,8 +159,11 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
 
                     let overlap_end = range.end.min(sec_end);
                     let mut format = section.format.clone();
-                    format.background = highlight_bg;
-                    format.color = egui::Color32::BLACK; // Override text color to ensure readability against yellow
+                    
+                    let is_active = active_match.as_ref().map_or(false, |active| active.start == range.start && active.end == range.end);
+                    format.background = if is_active { active_bg } else { highlight_bg };
+                    format.color = egui::Color32::BLACK; // Override text color to ensure readability
+                    
                     new_sections.push(egui::text::LayoutSection {
                         leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
                         byte_range: current_start..overlap_end,
