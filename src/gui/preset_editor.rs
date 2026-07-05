@@ -132,9 +132,18 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
             }
         });
 
-    // Update state based on local boolean
-    if !show_preset_editor {
-        state.show_preset_editor = show_preset_editor;
+    // Handle window close (either via 'X' or an internal action like 'Save and Exit')
+    if !show_preset_editor || !state.show_preset_editor {
+        state.show_preset_editor = false;
+        
+        // Reset the editor state, but PRESERVE the active downloading tracker
+        // so background downloads remain attached to the UI if reopened!
+        let preserved_downloading = state.preset_editor_state.ollama_downloading.clone();
+        
+        state.preset_editor_state = PresetEditorState {
+            ollama_downloading: preserved_downloading,
+            ..Default::default()
+        };
     }
 }
 
