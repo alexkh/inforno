@@ -174,7 +174,10 @@ where
             state.current_max = max_suggestions;
         }
 
-        if text_response.changed()
+        let is_text_changed = text_response.changed();
+        let scroll_to_selection = up_pressed || down_pressed || is_text_changed;
+
+        if is_text_changed
             || (state.selected_index.is_some()
                 && state.selected_index.unwrap() >= match_results.len())
         {
@@ -261,9 +264,18 @@ where
                             state.selected_index = Some(i);
                         }
 
-                        // Automatically scroll to the item when using Up/Down arrow keys
-                        if selected {
+                        // Only force scroll to the item if navigated via keyboard/typing!
+                        // This prevents the scrollbar from snapping back when you use the mouse wheel or drag it.
+                        if selected && scroll_to_selection {
                             response.scroll_to_me(Some(egui::Align::Center));
+                        }
+
+                        // Infinite Scroll: Detect if the user scrolled to the last item of the currently visible chunk
+                        if i == state.current_max - 1 {
+                            if ui.is_rect_visible(response.rect) {
+                                state.current_max += max_suggestions;
+                                ui.ctx().request_repaint(); // Immediately fetch the next chunk
+                            }
                         }
                     }
                 });
