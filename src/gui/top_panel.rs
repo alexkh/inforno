@@ -156,22 +156,30 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.separator(); // Visual spacer
 
-            ui.menu_button("📝 Edit", |ui| {
-                if ui.button("📂 Open File...").clicked() {
-                    ui.close(); // Fixed deprecation
-                    state.pending_file_dialog_op = Some(FileOp::OpenEditor);
+            let (edit_main, edit_arrow) = crate::gui::split_button::SplitButton::new("📝 Edit")
+                .id_salt("top_panel_edit_btn")
+                .main_tooltip("Open file in editor")
+                .arrow_tooltip(t!("right_button_tooltip"))
+                .transparent(true)
+                .show(ui);
 
-                    // Route directly to the project root if it's active
-                    if let Some(root) = &state.project_root {
-                        state.file_dialog = egui_file_dialog::FileDialog::new()
-                            .initial_directory(root.clone());
-                    } else {
-                        state.file_dialog = egui_file_dialog::FileDialog::new();
-                    }
+            if edit_main || edit_arrow {
+                ui.close();
+                state.pending_file_dialog_op = Some(if edit_arrow {
+                    FileOp::OpenEditorRight
+                } else {
+                    FileOp::OpenEditor
+                });
 
-                    state.file_dialog.pick_file();
+                if let Some(root) = &state.project_root {
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .initial_directory(root.clone());
+                } else {
+                    state.file_dialog = egui_file_dialog::FileDialog::new();
                 }
-            });
+
+                state.file_dialog.pick_file();
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(root) = &state.project_root {
