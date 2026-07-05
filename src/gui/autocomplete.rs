@@ -170,11 +170,16 @@ where
             match_results
         };
 
+        if state.current_max == 0 {
+            state.current_max = max_suggestions;
+        }
+
         if text_response.changed()
             || (state.selected_index.is_some()
                 && state.selected_index.unwrap() >= match_results.len())
         {
             state.selected_index = None;
+            state.current_max = max_suggestions;
         }
 
         state.update_index(
@@ -230,7 +235,7 @@ where
                 .max_height(250.0)
                 .show(ui, |ui| {
                     for (i, (output, _, match_indices)) in
-                        match_results.iter().take(max_suggestions).enumerate()
+                        match_results.iter().take(state.current_max).enumerate()
                     {
                         let mut selected = if let Some(x) = state.selected_index {
                             x == i
@@ -296,11 +301,13 @@ fn highlight_matches(text: &str, match_indices: &[usize], color: egui::Color32) 
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 struct AutoCompleteTextEditState {
     selected_index: Option<usize>,
     focused: bool,
     start: usize,
     end: usize,
+    current_max: usize,
 }
 
 impl AutoCompleteTextEditState {
@@ -315,26 +322,36 @@ impl AutoCompleteTextEditState {
         down_pressed: bool,
         up_pressed: bool,
         match_results_count: usize,
-        max_suggestions: usize,
+        step_size: usize,
     ) {
+        if self.current_max == 0 {
+            self.current_max = step_size;
+        }
+
         self.selected_index = match self.selected_index {
-            _ if match_results_count == 0 || max_suggestions == 0 => None,
+            _ if match_results_count == 0 || step_size == 0 => None,
             Some(index) if down_pressed => {
-                if index + 1 < match_results_count.min(max_suggestions) {
+                if index + 1 < match_results_count {
+                    // Expand the list when reaching the bottom of the currently visible chunk
+                    if index + 1 >= self.current_max {
+                        self.current_max += step_size;
+                    }
                     Some(index + 1)
                 } else {
-                    None
+                    // Stop entirely at the end of the matches, no looping!
+                    Some(index)
                 }
             }
             Some(index) if up_pressed => {
                 if index == 0 {
+                    // Hitting up at the very top clears selection and puts focus safely back on the text field
                     None
                 } else {
                     Some(index - 1)
                 }
             }
             None if down_pressed => Some(0),
-            None if up_pressed => Some(match_results_count.min(max_suggestions) - 1),
+            None if up_pressed => None, // Do not loop to the bottom!
             Some(index) => Some(index),
             None => None,
         }
