@@ -417,6 +417,7 @@ impl CodeEditor {
                 // It will mercilessly chop off the runaway line numbers at `exact_height`.
                 egui::ScrollArea::vertical()
                     .max_height(exact_height)
+                    .min_scrolled_height(0.0)
                     .vscroll(false) // Disable scrolling entirely
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
@@ -427,6 +428,7 @@ impl CodeEditor {
                                 .interactive(false)
                                 .frame(false)
                                 .desired_width(width)
+								.desired_rows(self.rows)
                                 .layouter(&mut layouter),
                         );
                     });
@@ -504,7 +506,7 @@ impl CodeEditor {
         let stick_to_bottom = self.stick_to_bottom;
         let id_source = self.id.clone();
         let row_height = self.row_height.unwrap_or(16.0);
-        
+
         let mut text_edit_output: Option<TextEditOutput> = None;
         let mut current_hscroll_offset = 0.0; // Variable to capture the offset
         let mut max_hscroll_offset = 0.0;
@@ -522,9 +524,10 @@ impl CodeEditor {
                         self.numlines_show(h, text.as_str());
                     }
 
-                    let mut h_scroll = egui::ScrollArea::horizontal()
-                        .id_salt(format!("{}_inner_scroll", self.id));
-
+                                        let mut h_scroll = egui::ScrollArea::horizontal()
+                        .id_salt(format!("{}_inner_scroll", self.id))
+                        .min_scrolled_height(0.0); // <-- CRUSH THE 200PX BLACK BOX HERE
+                    
                     if let Some(offset) = self.hscroll_offset {
                         h_scroll = h_scroll.horizontal_scroll_offset(offset);
                     }
@@ -606,7 +609,7 @@ impl CodeEditor {
                                         ui.scroll_to_rect(absolute_rect, Some(egui::Align::Center));
                                     }
                                 }
-                            
+
                         text_edit_output = Some(output);
                     });
             });
@@ -638,7 +641,7 @@ impl CodeEditor {
             code_editor(ui);
             current_scroll_offset = 0.0;
         }
-        
+
         ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
 
         CodeEditorOutput {

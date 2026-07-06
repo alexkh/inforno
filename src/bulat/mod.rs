@@ -44,12 +44,14 @@ fn main() -> Result<(), eframe::Error> {
 */
 
 // Stores info about a diff block to render the button
+#[derive(Clone)]
 struct DiffBlock {
     op: DiffOp,
     visual_line_idx: usize,
     height_in_lines: usize,
 }
 
+#[derive(Clone)]
 pub struct DiffApp {
     // The "True" content of the files
     pub left_code_real: String,
@@ -79,10 +81,12 @@ pub struct DiffApp {
     diff_blocks: Vec<DiffBlock>,
     calculated_row_height: f32,
     pub search_state_id: Option<egui::Id>,
+    pub embedded: bool,
 }
 
 impl DiffApp {
     pub fn new(mut left_code: String, mut right_code: String) -> Self {
+
         // --- NEW LINE SANITIZATION ---
         // This prevents egui's selection ranges from desyncing by 1 byte per line!
         left_code = left_code.replace('\r', "");
@@ -116,10 +120,12 @@ impl DiffApp {
             diff_blocks: Vec::new(),
             calculated_row_height: 14.0,
             search_state_id: None,
+            embedded: false,
         };
 
         // compute initial diffs
         app.recalculate_diff();
+
         app
     }
 
@@ -342,10 +348,11 @@ impl DiffApp {
         let mut next_hscroll_ratio = self.hscroll_ratio;
 
         // 1. Single Outer ScrollArea for everything
-        egui::ScrollArea::vertical()
+        // When embedded, we completely disable vertical scrolling. This naturally
+        // removes the scrollbar and forces the container to expand to its full content height.
+        egui::ScrollArea::new([false, !self.embedded])
             .id_salt("global_scroll")
             .show(ui, |ui| {
-
                 // Set our spacing FIRST so we know exactly what we are dealing with
                 ui.spacing_mut().item_spacing.x = 5.0;
 
@@ -382,7 +389,7 @@ impl DiffApp {
                         let mut left_editor = CodeEditor::default()
                             .id_source("left_editor")
                             .with_rows(self.left_line_map.len());
-                            
+
                         if let Some(id) = self.search_state_id {
                             left_editor = left_editor.with_search_state_id(id);
                         }
@@ -393,6 +400,7 @@ impl DiffApp {
                             .with_theme(self.theme)
                             .with_syntax(self.syntax.clone())
                             .vscroll(false) // IMPORTANT: No internal scroll
+                            .v_auto_shrink(self.embedded) // Let the inner editor shrink dynamically
                             .with_diff(self.left_diff_map.clone())
                             .with_line_numbers(self.left_line_map.clone())
                             // Optional but good practice: tell the editor its desired width
@@ -507,7 +515,7 @@ impl DiffApp {
                         let mut right_editor = CodeEditor::default()
                             .id_source("right_editor")
                             .with_rows(self.right_line_map.len());
-                            
+
                         if let Some(id) = self.search_state_id {
                             right_editor = right_editor.with_search_state_id(id);
                         }
@@ -518,6 +526,7 @@ impl DiffApp {
                             .with_theme(self.theme)
                             .with_syntax(self.syntax.clone())
                             .vscroll(false) // IMPORTANT: No internal scroll
+                            .v_auto_shrink(self.embedded) // Let the inner editor shrink dynamically
                             .with_diff(self.right_diff_map.clone())
                             .with_line_numbers(self.right_line_map.clone())
                             .desired_width(side_width)

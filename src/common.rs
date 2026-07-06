@@ -249,6 +249,10 @@ impl fmt::Display for ChatRouter {
 pub struct ChatMsgUi {
     pub show_raw: bool,
     pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
+    
+    // Inline Diff Tracking (Index of the chunk -> Diff App State)
+    pub inline_diffs: std::collections::HashMap<usize, crate::bulat::DiffApp>,
+    pub inline_diffs_saved: std::collections::HashMap<usize, bool>,
 }
 
 // ChatMsg to be stored in the database

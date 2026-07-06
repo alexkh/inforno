@@ -593,6 +593,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                         .with_numlines(false)
                                         .with_rows(num_lines)
                                         .vscroll(false)
+                                        .v_auto_shrink(true) // Uncap height to display full text
                                         .desired_width(total_width - 40.0)
                                         .show(ui, &mut note_content);
 
@@ -668,6 +669,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                         .with_numlines(false)
                         .with_rows(num_lines)
                         .vscroll(false)
+                        .v_auto_shrink(true) // Uncap height to display full text
                         .desired_width(total_width - 40.0)
                         .show(ui, &mut draft_note);
 
@@ -1009,7 +1011,7 @@ fn render_msg_content(
     ui: &mut egui::Ui,
     cache: &mut egui_commonmark::CommonMarkCache,
     msg: &ChatMsg,
-    msg_ui: &ChatMsgUi,
+    msg_ui: &mut ChatMsgUi,
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
@@ -1195,6 +1197,112 @@ fn render_msg_content(
 
                             if merge_resp.main_clicked { trigger_merge(false); }
                             if merge_resp.arrow_clicked { trigger_merge(true); }
+                            
+                            // --- NEW: INLINE DIFF DETECTOR ---
+                            // 1. Check if the LLM provided a formal <<<< ==== >>>> block
+                            if let Some((search_block, replace_block)) = extract_raw_diff_blocks(&code_buffer) {
+                                // 2. Read the live file to verify the exact SEARCH block exists right now
+                                let original_content = std::fs::read_to_string(&path).unwrap_or_default();
+                                
+                                // We check using exact matches or normalized whitespace matching.
+                                let mut found_exact_match = false;
+                                
+                                if !search_block.is_empty() && original_content.contains(&search_block) {
+                                    found_exact_match = true;
+                                } else {
+                                    let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                    let orig_norm = original_content.replace("\r\n", "\n");
+                                    if !search_norm.is_empty() && orig_norm.contains(&search_norm) {
+                                        found_exact_match = true;
+                                    }
+                                }
+
+                                if found_exact_match {
+                                    // 3. Mount or retrieve the DiffApp for this chunk!
+                                    // We avoid holding a lock on msg_ui by performing isolated operations
+                                    if !msg_ui.inline_diffs.contains_key(&i) {
+                                        let mut app = crate::bulat::DiffApp::new(search_block.clone(), replace_block.clone());
+                                        app.embedded = true; // Request full height!
+                                        msg_ui.inline_diffs.insert(i, app);
+                                    }
+                                    
+                                    let is_saved = *msg_ui.inline_diffs_saved.entry(i).or_insert(false);
+
+
+                                    // Display the "Inline Save" layout!
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add_space(10.0);
+                                        if is_saved {
+                                            ui.label(egui::RichText::new("✔ Merged").color(egui::Color32::GREEN));
+                                        } else {
+                                            let mut save_left = false;
+                                            let mut save_right = false;
+
+                                            if ui.button("⚡ Quick Merge").on_hover_text("Instantly apply the LLM's full replacement (Right side).").clicked() {
+                                                save_right = true;
+                                            }
+                                            if ui.button("💾 Save").on_hover_text("Save the manually merged code (Left side).").clicked() {
+                                                save_left = true;
+                                            }
+
+                                            if save_left || save_right {
+                                                // 4. PERFORM LIVE SAVE
+                                                let latest_disk_content = std::fs::read_to_string(&path).unwrap_or_default();
+                                                
+                                                let diff_app_ref = msg_ui.inline_diffs.get(&i).unwrap();
+                                                let mut current_replacement = if save_right {
+                                                    diff_app_ref.right_code_real.clone()
+                                                } else {
+                                                    diff_app_ref.left_code_real.clone()
+                                                };
+
+                                                // Remove the single trailing newline that DiffApp::new unconditionally appended.
+                                                // This prevents the "empty line insertion" bug during inline merges.
+                                                if current_replacement.ends_with('\n') {
+                                                    current_replacement.pop();
+                                                    if current_replacement.ends_with('\r') {
+                                                        current_replacement.pop();
+                                                    }
+                                                }
+
+                                                // We must find it again in case the file changed since we last rendered
+                                                let mut replaced_successfully = false;
+                                                let mut new_text = String::new();
+                                                
+                                                if let Some(idx) = latest_disk_content.find(&search_block) {
+                                                    new_text.push_str(&latest_disk_content[..idx]);
+                                                    new_text.push_str(&current_replacement);
+                                                    new_text.push_str(&latest_disk_content[idx + search_block.len()..]);
+                                                    replaced_successfully = true;
+                                                } else {
+                                                    // Try normalized fallback
+                                                    let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                                    let orig_norm = latest_disk_content.replace("\r\n", "\n");
+                                                    if let Some(idx) = orig_norm.find(&search_norm) {
+                                                        let replace_norm = current_replacement.replace("\r\n", "\n");
+                                                        new_text.push_str(&orig_norm[..idx]);
+                                                        new_text.push_str(&replace_norm);
+                                                        new_text.push_str(&orig_norm[idx + search_norm.len()..]);
+                                                        replaced_successfully = true;
+                                                    }
+                                                }
+
+                                                if replaced_successfully {
+                                                    if let Err(e) = std::fs::write(&path, new_text) {
+                                                        eprintln!("Failed to quick merge: {}", e);
+                                                    } else {
+                                                        msg_ui.inline_diffs_saved.insert(i, true);
+                                                    }
+                                                } else {
+                                                    eprintln!("Quick merge failed: Target block modified or no longer matches.");
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                }
+                            }
+                            // ------------------------------
 
                         } else if let Some(path) = &filepath {
                             // Fallback button if there's no project root but we have a filepath
@@ -1218,15 +1326,30 @@ fn render_msg_content(
                         });
                     });
 
-                    CodeEditor::default()
-                        .id_source(format!("code_block_{}_{}", msg.id, i))
-                        .with_theme(ColorTheme::SV)
-                        .with_syntax(Syntax::rust())
-                        .with_numlines(false)
-                        .with_rows(num_lines)
-                        // Disable internal scroll so the parent chat window handles scrolling natively
-                        .vscroll(false)
-                        .show(ui, &mut code_buffer);
+                    // If we successfully initialized an inline DiffApp for this block, show THAT instead of the raw text.
+                    if let Some(diff_app) = msg_ui.inline_diffs.get_mut(&i) {
+                        ui.push_id(format!("diff_app_wrapper_{}_{}", msg.id, i), |ui| {
+                            egui::Frame::default()
+                                .inner_margin(4.0)
+                                .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                                .show(ui, |ui| {
+                                    diff_app.show(ui);
+                                });
+                        });
+                    } else {
+
+                        // Otherwise, just show the normal LLM raw text
+                        CodeEditor::default()
+                            .id_source(format!("code_block_{}_{}", msg.id, i))
+                            .with_theme(ColorTheme::SV)
+                            .with_syntax(Syntax::rust())
+                            .with_numlines(false)
+                            .with_rows(num_lines)
+                            // Disable internal scroll so the parent chat window handles scrolling natively
+                            .vscroll(false)
+                            .v_auto_shrink(true) // Uncap height to display full snippet
+                            .show(ui, &mut code_buffer);
+                    }
 
                     ui.add_space(6.0);
                 }
@@ -1332,6 +1455,39 @@ fn find_function_spans(code: &str, fn_name: &str) -> Vec<(usize, usize)> {
         }
     }
     spans
+}
+
+/// Helper to extract raw SEARCH and REPLACE blocks without attempting to apply them to the file.
+fn extract_raw_diff_blocks(snippet: &str) -> Option<(String, String)> {
+    static RE_DIFF: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re_diff = RE_DIFF.get_or_init(|| {
+        regex::Regex::new(r"(?ms)^[ \t]*<{4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*={4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*>{4,}[ \t]*[^\n]*").unwrap()
+    });
+
+    fn clean_block(mut block: &str) -> &str {
+        while let Some(nl) = block.find('\n') {
+            if block[..nl].trim().is_empty() { block = &block[nl + 1..]; } else { break; }
+        }
+        let first_line_end = block.find('\n').unwrap_or(block.len());
+        let first_line = block[..first_line_end].trim();
+        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#")) && first_line.contains("---") {
+            let lower = first_line.to_lowercase();
+            let is_file_marker = lower.contains("file:") || lower.contains(".rs") || lower.contains(".md") || lower.contains(".toml") || lower.contains(".c") || lower.contains(".h") || first_line.chars().all(|c| c == '-' || c == ' ' || c == '/' || c == '*' || c == '#');
+            if is_file_marker {
+                let next_start = if first_line_end < block.len() { first_line_end + 1 } else { first_line_end };
+                block = &block[next_start..];
+            }
+        }
+        while block.ends_with('\n') || block.ends_with('\r') { block = &block[..block.len() - 1]; }
+        block
+    }
+
+    if let Some(caps) = re_diff.captures(snippet) {
+        let search_block = clean_block(caps.get(1).map_or("", |m| m.as_str()));
+        let replace_block = clean_block(caps.get(2).map_or("", |m| m.as_str()));
+        return Some((search_block.to_string(), replace_block.to_string()));
+    }
+    None
 }
 
 fn try_splice_snippet(original: &str, snippet: &str) -> Option<String> {

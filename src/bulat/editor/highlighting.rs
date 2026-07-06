@@ -119,13 +119,13 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
     let mut job = ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)).clone());
     let search_term = cache.search_term();
     let active_match = cache.active_search_match_byte_range();
-    
+
     if !search_term.is_empty() {
         let term_lower = search_term.to_lowercase();
         let text_lower = text.to_lowercase();
         let mut match_ranges = Vec::new();
         let mut start = 0;
-        
+
         while let Some(idx) = text_lower[start..].find(&term_lower) {
             let match_start = start + idx;
             let match_end = match_start + term_lower.len();
@@ -148,7 +148,7 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
                     if range.start >= sec_end { break; }
 
                     if current_start < range.start {
-                        let mut format = section.format.clone();
+                        let format = section.format.clone();
                         new_sections.push(egui::text::LayoutSection {
                             leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
                             byte_range: current_start..range.start,
@@ -159,11 +159,11 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
 
                     let overlap_end = range.end.min(sec_end);
                     let mut format = section.format.clone();
-                    
+
                     let is_active = active_match.as_ref().map_or(false, |active| active.start == range.start && active.end == range.end);
                     format.background = if is_active { active_bg } else { highlight_bg };
                     format.color = egui::Color32::BLACK; // Override text color to ensure readability
-                    
+
                     new_sections.push(egui::text::LayoutSection {
                         leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
                         byte_range: current_start..overlap_end,
@@ -183,6 +183,6 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
             job.sections = new_sections;
         }
     }
-    
+
     job
 }
