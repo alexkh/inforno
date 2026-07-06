@@ -58,14 +58,14 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                 // Base text width + extra allocated space for the double-wide arrow
                 let desired_width = text_width + button_padding.x * 2.0;
 
-                let (main_clicked, arrow_clicked) = SplitButton::new(&new_chat_text)
+                let btn_resp = SplitButton::new(&new_chat_text)
                     .id_salt("new_chat_btn")
                     .main_tooltip(&new_chat_tooltip)
                     .arrow_tooltip(t!("right_button_tooltip"))
                     .desired_width(desired_width)
                     .show(ui);
 
-                if main_clicked {
+                if btn_resp.main_clicked {
                     let temp_id = get_temp_id(state);
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
@@ -73,7 +73,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     crate::gui::panes::open_chat_in_tab(state, temp_id);
                 }
 
-                if arrow_clicked {
+                if btn_resp.arrow_clicked {
                     let temp_id = get_temp_id(state);
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
@@ -140,68 +140,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     // ONE layout. Right-to-Left.
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 
-                        // 1. The Wrench Menu (Rendered first, placed on far right)
-                        ui.menu_button("🔧", |ui| {
-                            ui.set_min_width(80.0);
-
-                            if ui.button(egui::RichText::new(t!("rename_chat_btn"))).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
-                                state.chat_to_rename = Some(db_chat.id);
-                                state.chat_rename_buffer = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim().to_string();
-                                ui.close();
-                            }
-
-                            ui.separator();
-
-                            if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
-                                if let Ok(markdown) = export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
-                                    // Trigger the native egui dialog for saving
-                                    state.pending_file_dialog_op = Some(crate::common::FileOp::ExportChat);
-                                    state.pending_export_content = Some(markdown);
-
-                                    // Create a safe default filename based on the chat's title
-                                    let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
-                                    let default_name = format!("{}.md", safe_title); // <--- Create the String
-
-                                    state.file_dialog = egui_file_dialog::FileDialog::new()
-                                        .default_file_name(&default_name) // <--- Pass it as a reference (&str)
-                                        .add_file_filter("Markdown", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "md")));
-                                    state.file_dialog.save_file();
-                                }
-                                ui.close();
-                            }
-
-                            if ui.button(egui::RichText::new("Export Notebook")).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
-                                if let Ok(ron_data) = crate::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
-                                    state.pending_file_dialog_op = Some(crate::common::FileOp::ExportNotebook);
-                                    state.pending_export_content = Some(ron_data);
-
-                                    let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
-                                    let default_name = format!("{}.ron", safe_title);
-
-                                    state.file_dialog = egui_file_dialog::FileDialog::new()
-                                        .default_file_name(&default_name)
-                                        .add_file_filter("Notebook (.ron)", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "ron")));
-                                    state.file_dialog.save_file();
-                                }
-                                ui.close();
-                            }
-
-                            ui.separator();
-
-                            if ui.button(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {
-                                if let Ok(_) = delete_chat(&state.db_conn, db_chat.id) {
-                                    if state.active_chat_id == Some(db_chat.id) {
-                                        state.open_chats.remove(&db_chat.id);
-                                        state.open_chats.insert(0, Chat::default());
-                                        state.active_chat_id = Some(0);
-                                    }
-                                    to_delete_chat_id = db_chat.id;
-                                }
-                                ui.close();
-                            }
-                        }).response.on_hover_text(t!("chat_options_tooltip"));
-
-                        // 2. The Pane Badges (Rendered second, placed to the left of the wrench)
+                        // 1. The Pane Badges
                         if let Some(locations) = state.chat_locations.get(&db_chat.id) {
                             for loc in locations.iter().rev() {
                                 ui.label(
@@ -212,25 +151,104 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             }
                         }
 
-                        // 3. The Unified Split Button
+                        // 2. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
                         let available_width = ui.available_width();
                         let display_title = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim();
-                        let (main_clicked, arrow_clicked) = SplitButton::new(display_title)
+                        let btn_resp = SplitButton::new(display_title)
                             .id_salt(db_chat.id)
                             .selected(is_selected)
                             .transparent(true) // Transparent for sidebar!
                             .main_tooltip(&db_chat.title)
                             .arrow_tooltip(t!("right_button_tooltip"))
+                            .left_tool("🔧") // <-- Enable the left tool
+                            .left_tooltip(t!("chat_options_tooltip"))
+                            .left_reveal_on_hover(true) // <-- Keep it invisible until the button is hovered
                             .desired_width(available_width)
                             .arrow_width(35.0)
                             .show(ui);
 
-                        if main_clicked {
+                        if btn_resp.main_clicked {
                             clicked_chat_id = Some(db_chat.id);
                         }
-                        if arrow_clicked {
+                        if btn_resp.arrow_clicked {
                             right_clicked_chat_id = Some(db_chat.id);
+                        }
+
+                        // 3. Wrench Menu Logic (Bound perfectly to the left tool region)
+                        if let Some(left_resp) = btn_resp.left_response {
+                            let popup_id = ui.make_persistent_id(format!("wrench_menu_{}", db_chat.id));
+                            if btn_resp.left_clicked {
+                                ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                            }
+                            
+                            egui::popup_below_widget(ui, popup_id, &left_resp, egui::PopupCloseBehavior::CloseOnClick, |ui: &mut egui::Ui| {
+                                ui.set_min_width(140.0); // Slightly wider to avoid squishing
+                                
+                                // Force top-down layout so buttons stretch horizontally
+                                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                                    
+                                    // Remove standard button background to mimic a flat menu item
+                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+                                    if ui.button(egui::RichText::new(t!("rename_chat_btn"))).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
+                                        state.chat_to_rename = Some(db_chat.id);
+                                        state.chat_rename_buffer = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim().to_string();
+                                        ui.close_menu();
+                                    }
+
+                                    ui.separator();
+
+                                    if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
+                                        if let Ok(markdown) = export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
+                                            // Trigger the native egui dialog for saving
+                                            state.pending_file_dialog_op = Some(crate::common::FileOp::ExportChat);
+                                            state.pending_export_content = Some(markdown);
+
+                                            // Create a safe default filename based on the chat's title
+                                            let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
+                                            let default_name = format!("{}.md", safe_title); // <--- Create the String
+
+                                            state.file_dialog = egui_file_dialog::FileDialog::new()
+                                                .default_file_name(&default_name) // <--- Pass it as a reference (&str)
+                                                .add_file_filter("Markdown", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "md")));
+                                            state.file_dialog.save_file();
+                                        }
+                                        ui.close_menu();
+                                    }
+
+                                    if ui.button(egui::RichText::new("Export Notebook")).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
+                                        if let Ok(ron_data) = crate::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
+                                            state.pending_file_dialog_op = Some(crate::common::FileOp::ExportNotebook);
+                                            state.pending_export_content = Some(ron_data);
+
+                                            let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
+                                            let default_name = format!("{}.ron", safe_title);
+
+                                            state.file_dialog = egui_file_dialog::FileDialog::new()
+                                                .default_file_name(&default_name)
+                                                .add_file_filter("Notebook (.ron)", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "ron")));
+                                            state.file_dialog.save_file();
+                                        }
+                                        ui.close_menu();
+                                    }
+
+                                    ui.separator();
+
+                                    if ui.button(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {
+                                        if let Ok(_) = delete_chat(&state.db_conn, db_chat.id) {
+                                            if state.active_chat_id == Some(db_chat.id) {
+                                                state.open_chats.remove(&db_chat.id);
+                                                state.open_chats.insert(0, Chat::default());
+                                                state.active_chat_id = Some(0);
+                                            }
+                                            to_delete_chat_id = db_chat.id;
+                                        }
+                                        ui.close_menu();
+                                    }
+                                });
+                            });
                         }
                     });
                 });

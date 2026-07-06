@@ -156,16 +156,16 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.separator(); // Visual spacer
 
-            let (edit_main, edit_arrow) = crate::gui::split_button::SplitButton::new("📝 Edit")
+            let edit_resp = crate::gui::split_button::SplitButton::new("📝 Edit")
                 .id_salt("top_panel_edit_btn")
                 .main_tooltip("Open file in editor")
                 .arrow_tooltip(t!("right_button_tooltip"))
                 .transparent(true)
                 .show(ui);
 
-            if edit_main || edit_arrow {
+            if edit_resp.main_clicked || edit_resp.arrow_clicked {
                 ui.close();
-                state.pending_file_dialog_op = Some(if edit_arrow {
+                state.pending_file_dialog_op = Some(if edit_resp.arrow_clicked {
                     FileOp::OpenEditorRight
                 } else {
                     FileOp::OpenEditor

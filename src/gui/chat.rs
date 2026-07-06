@@ -609,10 +609,10 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             }
 
             // --- NOTEBOOK APPENDER CELL ---
-            ui.add_space(10.0);
+            ui.add_space(1.0);
             egui::Frame::default()
-                .outer_margin(Margin { top: 5, right: 10, bottom: 15, left: 10 })
-                .inner_margin(10.0)
+                .outer_margin(Margin { top: 1, right: 1, bottom: 1, left: 1 })
+                .inner_margin(1.0)
                 .fill(ui.visuals().faint_bg_color)
                 .corner_radius(5.0)
                 .show(ui, |ui| {
@@ -1081,13 +1081,14 @@ fn render_msg_content(
                                 tooltip = format!("File path autocorrected to:\n{}", rel_path);
                             }
 
-                            let (open_main, open_arrow) = SplitButton::new(btn_text)
+
+                            let open_resp = SplitButton::new(btn_text)
                                 .id_salt(format!("open_btn_{}_{}", msg.id, i))
                                 .main_tooltip(tooltip)
                                 .arrow_tooltip(t!("right_button_tooltip"))
                                 .show(ui);
 
-                            if open_main {
+                            if open_resp.main_clicked {
                                 let _ = op_tx.send(crate::common::FileOpMsg {
                                     op: crate::common::FileOp::OpenEditor,
                                     cancelled: false,
@@ -1095,7 +1096,7 @@ fn render_msg_content(
                                     ..Default::default()
                                 });
                             }
-                            if open_arrow {
+                            if open_resp.arrow_clicked {
                                 let _ = op_tx.send(crate::common::FileOpMsg {
                                     op: crate::common::FileOp::OpenEditorRight,
                                     cancelled: false,
@@ -1104,7 +1105,7 @@ fn render_msg_content(
                                 });
                             }
 
-                            let (merge_main, merge_arrow) = SplitButton::new(t!("open_in_merge_tool_btn"))
+                            let merge_resp = SplitButton::new(t!("open_in_merge_tool_btn"))
                                 .id_salt(format!("merge_btn_{}_{}", msg.id, i))
                                 .main_tooltip(t!("open_in_merge_tool_tooltip"))
                                 .arrow_tooltip(t!("right_button_tooltip"))
@@ -1152,8 +1153,8 @@ fn render_msg_content(
                                 });
                             };
 
-                            if merge_main { trigger_merge(false); }
-                            if merge_arrow { trigger_merge(true); }
+                            if merge_resp.main_clicked { trigger_merge(false); }
+                            if merge_resp.arrow_clicked { trigger_merge(true); }
 
                         } else if let Some(path) = &filepath {
                             // Fallback button if there's no project root but we have a filepath

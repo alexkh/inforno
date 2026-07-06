@@ -346,16 +346,16 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                             // --- USE THE NEW HELPER HERE ---
                                             // We pass the chat title to act as the button text.
                                             // It returns true/false for which part was clicked.
-                                            let (open_current, open_right) = crate::gui::SplitButton::new(&res.chat_title)
+                                            let btn_resp = crate::gui::SplitButton::new(&res.chat_title)
                                                 .id_salt(res.chat_id)
                                                 .arrow_tooltip("Open in right pane")
                                                 .show(ui);
 
-                                            if open_current {
+                                            if btn_resp.main_clicked {
                                                 self.open_chat_requests.push((res.chat_id, false));
                                             }
 
-                                            if open_right {
+                                            if btn_resp.arrow_clicked {
                                                 self.open_chat_requests.push((res.chat_id, true));
                                             }
                                             // -------------------------------
