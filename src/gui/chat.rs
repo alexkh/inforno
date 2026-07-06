@@ -36,33 +36,73 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
     let mut current_text = original.to_string();
     let mut diff_block_found = false;
 
+    fn clean_block(mut block: &str) -> &str {
+        // Remove leading empty lines
+        while let Some(nl) = block.find('\n') {
+            if block[..nl].trim().is_empty() {
+                block = &block[nl + 1..];
+            } else {
+                break;
+            }
+        }
+
+        let first_line_end = block.find('\n').unwrap_or(block.len());
+        let first_line = block[..first_line_end].trim();
+
+        // Detect if the first line is a file path header or purely a dashed divider
+        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#")) 
+            && first_line.contains("---") {
+            let lower = first_line.to_lowercase();
+            let is_file_marker = lower.contains("file:") || lower.contains(".rs") || lower.contains(".md") || lower.contains(".toml") || lower.contains(".c") || lower.contains(".h") || first_line.chars().all(|c| c == '-' || c == ' ' || c == '/' || c == '*' || c == '#');
+            
+            if is_file_marker {
+                let next_start = if first_line_end < block.len() { first_line_end + 1 } else { first_line_end };
+                block = &block[next_start..];
+            }
+        }
+        
+        // Remove trailing empty lines
+        while block.ends_with('\n') || block.ends_with('\r') {
+            block = &block[..block.len() - 1];
+        }
+        block
+    };
+
     for caps in re_diff.captures_iter(snippet) {
         diff_block_found = true;
 
-        let search_block = caps.get(1).map_or("", |m| m.as_str());
-        let replace_block = caps.get(2).map_or("", |m| m.as_str());
+        let search_block = clean_block(caps.get(1).map_or("", |m| m.as_str()));
+        let replace_block = clean_block(caps.get(2).map_or("", |m| m.as_str()));
+
+        if search_block.trim().is_empty() && replace_block.trim().is_empty() {
+            continue;
+        }
 
         // 1. Try exact match
-        if let Some(idx) = current_text.find(search_block) {
-            let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
-            new_text.push_str(&current_text[..idx]);
-            new_text.push_str(replace_block);
-            new_text.push_str(&current_text[idx + search_block.len()..]);
-            current_text = new_text;
-            continue;
+        if !search_block.is_empty() {
+            if let Some(idx) = current_text.find(search_block) {
+                let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
+                new_text.push_str(&current_text[..idx]);
+                new_text.push_str(replace_block);
+                new_text.push_str(&current_text[idx + search_block.len()..]);
+                current_text = new_text;
+                continue;
+            }
         }
 
         // 2. Try normalized match (ignoring \r and leading/trailing whitespace of the block)
         let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
         let orig_norm = current_text.replace("\r\n", "\n");
-        if let Some(idx) = orig_norm.find(&search_norm) {
-            let replace_norm = replace_block.replace("\r\n", "\n");
-            let mut new_text = String::with_capacity(orig_norm.len() + replace_norm.len());
-            new_text.push_str(&orig_norm[..idx]);
-            new_text.push_str(&replace_norm);
-            new_text.push_str(&orig_norm[idx + search_norm.len()..]);
-            current_text = new_text;
-            continue;
+        if !search_norm.is_empty() {
+            if let Some(idx) = orig_norm.find(&search_norm) {
+                let replace_norm = replace_block.replace("\r\n", "\n");
+                let mut new_text = String::with_capacity(orig_norm.len() + replace_norm.len());
+                new_text.push_str(&orig_norm[..idx]);
+                new_text.push_str(&replace_norm);
+                new_text.push_str(&orig_norm[idx + search_norm.len()..]);
+                current_text = new_text;
+                continue;
+            }
         }
 
         // 3. Try highly tolerant fuzzy match (ignores all internal whitespace differences)
