@@ -1206,14 +1206,22 @@ fn render_msg_content(
                                 
                                 // We check using exact matches or normalized whitespace matching.
                                 let mut found_exact_match = false;
+                                let mut match_offset_lines = 0;
                                 
-                                if !search_block.is_empty() && original_content.contains(&search_block) {
-                                    found_exact_match = true;
-                                } else {
-                                    let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-                                    let orig_norm = original_content.replace("\r\n", "\n");
-                                    if !search_norm.is_empty() && orig_norm.contains(&search_norm) {
+                                if !search_block.is_empty() {
+                                    if let Some(idx) = original_content.find(&search_block) {
                                         found_exact_match = true;
+                                        // Count absolute newlines before the match index
+                                        match_offset_lines = original_content[..idx].chars().filter(|&c| c == '\n').count();
+                                    } else {
+                                        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                        let orig_norm = original_content.replace("\r\n", "\n");
+                                        if !search_norm.is_empty() {
+                                            if let Some(idx) = orig_norm.find(&search_norm) {
+                                                found_exact_match = true;
+                                                match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1221,7 +1229,8 @@ fn render_msg_content(
                                     // 3. Mount or retrieve the DiffApp for this chunk!
                                     // We avoid holding a lock on msg_ui by performing isolated operations
                                     if !msg_ui.inline_diffs.contains_key(&i) {
-                                        let mut app = crate::bulat::DiffApp::new(search_block.clone(), replace_block.clone());
+                                        let mut app = crate::bulat::DiffApp::new(search_block.clone(), replace_block.clone())
+                                            .with_line_offset(match_offset_lines);
                                         app.embedded = true; // Request full height!
                                         msg_ui.inline_diffs.insert(i, app);
                                     }

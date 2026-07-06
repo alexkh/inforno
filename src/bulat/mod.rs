@@ -82,6 +82,7 @@ pub struct DiffApp {
     calculated_row_height: f32,
     pub search_state_id: Option<egui::Id>,
     pub embedded: bool,
+    pub line_offset: usize,
 }
 
 impl DiffApp {
@@ -121,12 +122,19 @@ impl DiffApp {
             calculated_row_height: 14.0,
             search_state_id: None,
             embedded: false,
+            line_offset: 0,
         };
 
         // compute initial diffs
         app.recalculate_diff();
 
         app
+    }
+
+    pub fn with_line_offset(mut self, offset: usize) -> Self {
+        self.line_offset = offset;
+        self.recalculate_diff();
+        self
     }
 
     /// Uses the `similar` crate to compare text and populate the highlight maps
@@ -165,11 +173,11 @@ impl DiffApp {
                         self.left_view.push_str(left_lines[old_index + i]);
                         self.left_view.push('\n');
                         // Map visual line to real line (1-based)
-                        self.left_line_map.push(Some(old_index + i + 1));
+                        self.left_line_map.push(Some(self.line_offset + old_index + i + 1));
 
                         self.right_view.push_str(right_lines[new_index + i]);
                         self.right_view.push('\n');
-                        self.right_line_map.push(Some(new_index + i + 1));
+                        self.right_line_map.push(Some(self.line_offset + new_index + i + 1));
                     }
                     visual_line_idx += len;
                 }
@@ -185,7 +193,7 @@ impl DiffApp {
                         // Left Side (Real content)
                         self.left_view.push_str(left_lines[old_index + i]);
                         self.left_view.push('\n');
-                        self.left_line_map.push(Some(old_index + i + 1));
+                        self.left_line_map.push(Some(self.line_offset + old_index + i + 1));
                         self.left_diff_map.insert(visual_line_idx + i, color_diff_del);
 
                         // Right Side (Gap)
@@ -211,7 +219,7 @@ impl DiffApp {
                         // Right Side (Real Content)
                         self.right_view.push_str(right_lines[new_index + i]);
                         self.right_view.push('\n');
-                        self.right_line_map.push(Some(new_index + i + 1));
+                        self.right_line_map.push(Some(self.line_offset + new_index + i + 1));
                         self.right_diff_map.insert(visual_line_idx + i, color_diff_add);
                     }
                     visual_line_idx += new_len;
@@ -232,7 +240,7 @@ impl DiffApp {
                         if i < *old_len {
                             self.left_view.push_str(left_lines[old_index + i]);
                             self.left_view.push('\n');
-                            self.left_line_map.push(Some(old_index + i + 1));
+                            self.left_line_map.push(Some(self.line_offset + old_index + i + 1));
                             self.left_diff_map.insert(visual_line_idx + i, color_diff_change);
                         } else {
                             // Pad Left
@@ -245,7 +253,7 @@ impl DiffApp {
                         if i < *new_len {
                             self.right_view.push_str(right_lines[new_index + i]);
                             self.right_view.push('\n');
-                            self.right_line_map.push(Some(new_index + i + 1));
+                            self.right_line_map.push(Some(self.line_offset + new_index + i + 1));
                             self.right_diff_map.insert(visual_line_idx + i, color_diff_change);
                         } else {
                             // Pad Right
