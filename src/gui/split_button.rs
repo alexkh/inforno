@@ -126,7 +126,7 @@ impl SplitButton {
             let text_width = ui.painter().layout_no_wrap(
                 self.text.clone(), font_id.clone(), egui::Color32::TRANSPARENT
             ).size().x;
-            
+
             let mut total_w = text_width + button_padding.x * 2.0;
             if self.left_icon.is_some() {
                 total_w += left_w;
@@ -142,7 +142,7 @@ impl SplitButton {
         let active_left_w = if self.left_icon.is_some() && (is_hovered || !self.left_reveal_on_hover) { left_w } else { 0.0 };
 
         let main_rect = Rect::from_min_max(
-            egui::pos2(rect.min.x + active_left_w, rect.min.y), 
+            egui::pos2(rect.min.x + active_left_w, rect.min.y),
             egui::pos2(rect.max.x - active_arrow_w, rect.max.y)
         );
         let arrow_rect = Rect::from_min_max(egui::pos2(rect.max.x - active_arrow_w, rect.min.y), rect.max);
@@ -227,8 +227,13 @@ impl SplitButton {
             // 4. Draw Main Text (NEW: Centered vertically so it looks like a normal egui button)
             let text_color = if main_response.hovered() { hovered.text_color() } else if self.is_selected { active.text_color() } else { inactive.text_color() };
             let painter = ui.painter().with_clip_rect(main_rect);
+
+            // Keep the text stationary by always anchoring it to the absolute left edge
+            // plus the space reserved for the left tool, regardless of hover state.
+            let text_start_x = rect.min.x; // rect.min.x + button_padding.x + if self.left_icon.is_some() { left_w } else { 0.0 };
+
             painter.text(
-                egui::pos2(main_rect.min.x + button_padding.x, main_rect.center().y),
+                egui::pos2(text_start_x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 &self.text,
                 font_id,
