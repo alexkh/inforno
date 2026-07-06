@@ -360,6 +360,7 @@ impl DiffApp {
         // removes the scrollbar and forces the container to expand to its full content height.
         egui::ScrollArea::new([false, !self.embedded])
             .id_salt("global_scroll")
+            .min_scrolled_height(0.0)
             .show(ui, |ui| {
                 // Set our spacing FIRST so we know exactly what we are dealing with
                 ui.spacing_mut().item_spacing.x = 5.0;

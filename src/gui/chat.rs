@@ -50,17 +50,17 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
         let first_line = block[..first_line_end].trim();
 
         // Detect if the first line is a file path header or purely a dashed divider
-        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#")) 
+        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#"))
             && first_line.contains("---") {
             let lower = first_line.to_lowercase();
             let is_file_marker = lower.contains("file:") || lower.contains(".rs") || lower.contains(".md") || lower.contains(".toml") || lower.contains(".c") || lower.contains(".h") || first_line.chars().all(|c| c == '-' || c == ' ' || c == '/' || c == '*' || c == '#');
-            
+
             if is_file_marker {
                 let next_start = if first_line_end < block.len() { first_line_end + 1 } else { first_line_end };
                 block = &block[next_start..];
             }
         }
-        
+
         // Remove trailing empty lines
         while block.ends_with('\n') || block.ends_with('\r') {
             block = &block[..block.len() - 1];
@@ -1111,7 +1111,7 @@ fn render_msg_content(
                     // --- HEADER: Path, Merge Tool, and Copy Button ---
                     ui.horizontal(|ui| {
                         // Left side: Filepath and Merge button
-                        if let Some(path) = actual_path {
+                        if let Some(path) = &actual_path {
                             ui.spacing_mut().item_spacing.x = 6.0;
 
                             let mut btn_text = format!("📄 {}", display_path);
@@ -1119,7 +1119,7 @@ fn render_msg_content(
 
                             if autocorrected {
                                 btn_text.push_str(" ⚠️");
-                                let rel_path = path.strip_prefix(project_root.as_ref().unwrap()).unwrap_or(&path).display();
+                                let rel_path = path.strip_prefix(project_root.as_ref().unwrap()).unwrap_or(path.as_path()).display();
                                 tooltip = format!("File path autocorrected to:\n{}", rel_path);
                             }
 
@@ -1154,7 +1154,7 @@ fn render_msg_content(
                                 .show(ui);
 
                             let trigger_merge = |right_pane: bool| {
-                                let original_content = std::fs::read_to_string(&path).unwrap_or_default();
+                                let original_content = std::fs::read_to_string(path).unwrap_or_default();
 
                                 // 1. Strip leading `--- File: ...` metadata line
                                 static RE_STRIP_FILE: OnceLock<Regex> = OnceLock::new();
@@ -1197,49 +1197,67 @@ fn render_msg_content(
 
                             if merge_resp.main_clicked { trigger_merge(false); }
                             if merge_resp.arrow_clicked { trigger_merge(true); }
-                            
-                            // --- NEW: INLINE DIFF DETECTOR ---
-                            // 1. Check if the LLM provided a formal <<<< ==== >>>> block
-                            if let Some((search_block, replace_block)) = extract_raw_diff_blocks(&code_buffer) {
-                                // 2. Read the live file to verify the exact SEARCH block exists right now
-                                let original_content = std::fs::read_to_string(&path).unwrap_or_default();
-                                
-                                // We check using exact matches or normalized whitespace matching.
-                                let mut found_exact_match = false;
-                                let mut match_offset_lines = 0;
-                                
-                                if !search_block.is_empty() {
-                                    if let Some(idx) = original_content.find(&search_block) {
-                                        found_exact_match = true;
-                                        // Count absolute newlines before the match index
-                                        match_offset_lines = original_content[..idx].chars().filter(|&c| c == '\n').count();
-                                    } else {
-                                        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-                                        let orig_norm = original_content.replace("\r\n", "\n");
-                                        if !search_norm.is_empty() {
-                                            if let Some(idx) = orig_norm.find(&search_norm) {
-                                                found_exact_match = true;
-                                                match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
+
+                        } else if let Some(path) = &filepath {
+                            // Fallback button if there's no project root but we have a filepath
+                            if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
+                                let _ = op_tx.send(crate::common::FileOpMsg {
+                                    op: crate::common::FileOp::OpenEditor,
+                                    cancelled: false,
+                                    path: Some(std::path::PathBuf::from(path)),
+                                    ..Default::default()
+                                });
+                            }
+                        } else {
+                            ui.label(egui::RichText::new("🦀 Rust").weak());
+                        }
+
+                        // Right side: Copy Button AND Inline Diff Tools
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
+                                ui.ctx().copy_text(code.to_string());
+                            }
+
+                            if let Some(path) = &actual_path {
+                                // --- NEW: INLINE DIFF DETECTOR ---
+                                // 1. Check if the LLM provided a formal <<<< ==== >>>> block
+                                if let Some((search_block, replace_block)) = extract_raw_diff_blocks(&code_buffer) {
+                                    // 2. Read the live file to verify the exact SEARCH block exists right now
+                                    let original_content = std::fs::read_to_string(path).unwrap_or_default();
+
+                                    // We check using exact matches or normalized whitespace matching.
+                                    let mut found_exact_match = false;
+                                    let mut match_offset_lines = 0;
+
+                                    if !search_block.is_empty() {
+                                        if let Some(idx) = original_content.find(&search_block) {
+                                            found_exact_match = true;
+                                            // Count absolute newlines before the match index
+                                            match_offset_lines = original_content[..idx].chars().filter(|&c| c == '\n').count();
+                                        } else {
+                                            let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                            let orig_norm = original_content.replace("\r\n", "\n");
+                                            if !search_norm.is_empty() {
+                                                if let Some(idx) = orig_norm.find(&search_norm) {
+                                                    found_exact_match = true;
+                                                    match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
+                                                }
                                             }
                                         }
                                     }
-                                }
 
-                                if found_exact_match {
-                                    // 3. Mount or retrieve the DiffApp for this chunk!
-                                    // We avoid holding a lock on msg_ui by performing isolated operations
-                                    if !msg_ui.inline_diffs.contains_key(&i) {
-                                        let mut app = crate::bulat::DiffApp::new(search_block.clone(), replace_block.clone())
-                                            .with_line_offset(match_offset_lines);
-                                        app.embedded = true; // Request full height!
-                                        msg_ui.inline_diffs.insert(i, app);
-                                    }
-                                    
-                                    let is_saved = *msg_ui.inline_diffs_saved.entry(i).or_insert(false);
+                                    if found_exact_match {
+                                        // 3. Mount or retrieve the DiffApp for this chunk!
+                                        // We avoid holding a lock on msg_ui by performing isolated operations
+                                        if !msg_ui.inline_diffs.contains_key(&i) {
+                                            let mut app = crate::bulat::DiffApp::new(search_block.clone(), replace_block.clone())
+                                                .with_line_offset(match_offset_lines);
+                                            app.embedded = true; // Request full height!
+                                            msg_ui.inline_diffs.insert(i, app);
+                                        }
 
+                                        let is_saved = *msg_ui.inline_diffs_saved.entry(i).or_insert(false);
 
-                                    // Display the "Inline Save" layout!
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add_space(10.0);
                                         if is_saved {
                                             ui.label(egui::RichText::new("✔ Merged").color(egui::Color32::GREEN));
@@ -1247,17 +1265,17 @@ fn render_msg_content(
                                             let mut save_left = false;
                                             let mut save_right = false;
 
-                                            if ui.button("⚡ Quick Merge").on_hover_text("Instantly apply the LLM's full replacement (Right side).").clicked() {
-                                                save_right = true;
-                                            }
                                             if ui.button("💾 Save").on_hover_text("Save the manually merged code (Left side).").clicked() {
                                                 save_left = true;
+                                            }
+                                            if ui.button("⚡ Quick Merge").on_hover_text("Instantly apply the LLM's full replacement (Right side).").clicked() {
+                                                save_right = true;
                                             }
 
                                             if save_left || save_right {
                                                 // 4. PERFORM LIVE SAVE
-                                                let latest_disk_content = std::fs::read_to_string(&path).unwrap_or_default();
-                                                
+                                                let latest_disk_content = std::fs::read_to_string(path).unwrap_or_default();
+
                                                 let diff_app_ref = msg_ui.inline_diffs.get(&i).unwrap();
                                                 let mut current_replacement = if save_right {
                                                     diff_app_ref.right_code_real.clone()
@@ -1277,7 +1295,7 @@ fn render_msg_content(
                                                 // We must find it again in case the file changed since we last rendered
                                                 let mut replaced_successfully = false;
                                                 let mut new_text = String::new();
-                                                
+
                                                 if let Some(idx) = latest_disk_content.find(&search_block) {
                                                     new_text.push_str(&latest_disk_content[..idx]);
                                                     new_text.push_str(&current_replacement);
@@ -1297,7 +1315,7 @@ fn render_msg_content(
                                                 }
 
                                                 if replaced_successfully {
-                                                    if let Err(e) = std::fs::write(&path, new_text) {
+                                                    if let Err(e) = std::fs::write(path, new_text) {
                                                         eprintln!("Failed to quick merge: {}", e);
                                                     } else {
                                                         msg_ui.inline_diffs_saved.insert(i, true);
@@ -1307,30 +1325,8 @@ fn render_msg_content(
                                                 }
                                             }
                                         }
-                                    });
-
+                                    }
                                 }
-                            }
-                            // ------------------------------
-
-                        } else if let Some(path) = &filepath {
-                            // Fallback button if there's no project root but we have a filepath
-                            if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
-                                let _ = op_tx.send(crate::common::FileOpMsg {
-                                    op: crate::common::FileOp::OpenEditor,
-                                    cancelled: false,
-                                    path: Some(std::path::PathBuf::from(path)),
-                                    ..Default::default()
-                                });
-                            }
-                        } else {
-                            ui.label(egui::RichText::new("🦀 Rust").weak());
-                        }
-
-                        // Right side: Copy Button
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
-                                ui.ctx().copy_text(code.to_string());
                             }
                         });
                     });
@@ -1346,7 +1342,6 @@ fn render_msg_content(
                                 });
                         });
                     } else {
-
                         // Otherwise, just show the normal LLM raw text
                         CodeEditor::default()
                             .id_source(format!("code_block_{}_{}", msg.id, i))
@@ -1358,6 +1353,7 @@ fn render_msg_content(
                             .vscroll(false)
                             .v_auto_shrink(true) // Uncap height to display full snippet
                             .show(ui, &mut code_buffer);
+
                     }
 
                     ui.add_space(6.0);

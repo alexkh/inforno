@@ -428,7 +428,7 @@ impl CodeEditor {
                                 .interactive(false)
                                 .frame(false)
                                 .desired_width(width)
-								.desired_rows(self.rows)
+								.desired_rows(1)
                                 .layouter(&mut layouter),
                         );
                     });
@@ -527,7 +527,7 @@ impl CodeEditor {
                                         let mut h_scroll = egui::ScrollArea::horizontal()
                         .id_salt(format!("{}_inner_scroll", self.id))
                         .min_scrolled_height(0.0); // <-- CRUSH THE 200PX BLACK BOX HERE
-                    
+
                     if let Some(offset) = self.hscroll_offset {
                         h_scroll = h_scroll.horizontal_scroll_offset(offset);
                     }
