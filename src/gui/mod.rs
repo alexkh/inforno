@@ -112,6 +112,7 @@ pub struct State {
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
     search_query: String,
+    chat_widths: std::collections::HashMap<i64, f32>,
 }
 
 impl State {
@@ -356,6 +357,7 @@ impl State {
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
             search_query: String::new(),
+            chat_widths: std::collections::HashMap::new(),
         }
     }
 

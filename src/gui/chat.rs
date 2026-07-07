@@ -457,6 +457,34 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
 
 #[tracing::instrument(skip_all)]
 pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
+    // --- NEW: Width slider and shortcuts ---
+    let mut max_msg_width = *state.chat_widths.entry(chat_id).or_insert(800.0);
+
+    ui.input_mut(|i| {
+        if i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::OpenBracket)) {
+            max_msg_width -= 50.0;
+        }
+        if i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::CloseBracket)) {
+            max_msg_width += 50.0;
+        }
+    });
+
+    max_msg_width = max_msg_width.clamp(400.0, total_width.max(400.0));
+    state.chat_widths.insert(chat_id, max_msg_width);
+
+    // Render the tiny slider right at the top
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+            ui.add(
+                egui::Slider::new(&mut max_msg_width, 400.0..=(total_width.max(400.0)))
+                    .show_value(false)
+                    .step_by(20.0)
+                    .text("📐")
+            ).on_hover_text("Adjust message width (Ctrl+- / Ctrl+= to resize)");
+        });
+    });
+    ui.add_space(2.0);
+
     let msg_ui_map = &mut state.chat_msg_ui;
     let cache = &mut state.common_mark_cache;
 
@@ -526,7 +554,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 // Pass a clone of the cache pointer
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, &op_tx);
+                                project_root, &op_tx, max_msg_width);
                                 assistant_batch.clear();
                             }
 
@@ -534,13 +562,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
                             render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                                project_root, &op_tx);
+                                project_root, &op_tx, max_msg_width);
                         }
                         MsgRole::Developer => {
                             if !assistant_batch.is_empty() {
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, &op_tx);
+                                project_root, &op_tx, max_msg_width);
                                 assistant_batch.clear();
                             }
 
@@ -646,7 +674,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
-                        project_root, &op_tx);
+                        project_root, &op_tx, max_msg_width);
             }
 
             // --- NOTEBOOK APPENDER CELL ---
@@ -765,11 +793,12 @@ fn render_assistant_grid(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    max_msg_width: f32,
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
-    let item_max_width = 900.0;
+    let item_max_width = max_msg_width;
     let spacing = 10.0;
 
     let max_cols = (((effective_width + spacing) / (item_min_width + spacing)).floor() as usize).max(1);
@@ -819,10 +848,11 @@ fn render_user_msg(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    max_msg_width: f32,
 ) {
     let effective_width = total_width - 30.0;
-    let max_w = effective_width.clamp(400.0, 800.0);
+    let max_w = effective_width.clamp(400.0, max_msg_width);
 
     let scroll_area = egui::ScrollArea::horizontal();
 
@@ -830,7 +860,7 @@ fn render_user_msg(
         ui.set_max_width(max_w);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                let max_w = effective_width.clamp(400.0, 800.0);
+                let max_w = effective_width.clamp(400.0, max_msg_width);
                 ui.set_max_width(max_w);
 
                 egui::Frame::default()
