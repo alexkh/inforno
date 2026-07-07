@@ -457,7 +457,6 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
 
 #[tracing::instrument(skip_all)]
 pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
-    // --- NEW: Width slider and shortcuts ---
     let mut max_msg_width = *state.chat_widths.entry(chat_id).or_insert(800.0);
 
     ui.input_mut(|i| {
@@ -471,19 +470,6 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     max_msg_width = max_msg_width.clamp(400.0, total_width.max(400.0));
     state.chat_widths.insert(chat_id, max_msg_width);
-
-    // Render the tiny slider right at the top
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            ui.add(
-                egui::Slider::new(&mut max_msg_width, 400.0..=(total_width.max(400.0)))
-                    .show_value(false)
-                    .step_by(20.0)
-                    .text("📐")
-            ).on_hover_text("Adjust message width (Ctrl+- / Ctrl+= to resize)");
-        });
-    });
-    ui.add_space(2.0);
 
     let msg_ui_map = &mut state.chat_msg_ui;
     let cache = &mut state.common_mark_cache;
@@ -579,9 +565,19 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             // Dynamically check syntax on load, cache it in UI state
                             let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| is_likely_rhai(&note_content));
 
-                            egui::Frame::default()
-                                .outer_margin(Margin { top: 5, right: 10, bottom: 5, left: 10 })
-                                .inner_margin(10.0)
+                            // Enforce the max width limit for the Developer Note Cell
+                            let note_margin_offset = 40.0;
+                            let effective_width = (total_width - note_margin_offset).max(400.0);
+                            let max_w = effective_width.min(max_msg_width);
+
+                            ui.horizontal(|ui| {
+                                ui.set_max_width(max_w);
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(max_w);
+
+                                    egui::Frame::default()
+                                        .outer_margin(Margin { top: 5, right: 10, bottom: 5, left: 10 })
+                                        .inner_margin(10.0)
                                 .fill(ui.visuals().extreme_bg_color)
                                 .corner_radius(5.0)
                                 .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
@@ -622,7 +618,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                         .with_rows(num_lines)
                                         .vscroll(false)
                                         .v_auto_shrink(true) // Uncap height to display full text
-                                        .desired_width(total_width - 40.0)
+                                        .desired_width(max_w)
                                         .show(ui, &mut note_content);
 
                                     // --- NEW: Display the Volatile Output ---
@@ -637,7 +633,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 .font(egui::TextStyle::Monospace)
                                                 .interactive(false)
                                                 .frame(false)
-                                                .desired_width(total_width - 40.0)
+                                                .desired_width(max_w)
                                         );
                                     }
 
@@ -662,6 +658,9 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                         content_updates.push((msg_id, note_content.clone(), false));
                                     }
                                 });
+                                }); // End vertical wrapper
+                                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                            }); // End horizontal wrapper
                         }
                         _ => {
                             assistant_batch.push(msg_id);
@@ -679,27 +678,37 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
             // --- NOTEBOOK APPENDER CELL ---
             ui.add_space(1.0);
-            egui::Frame::default()
-                .outer_margin(Margin { top: 1, right: 1, bottom: 1, left: 1 })
-                .inner_margin(1.0)
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(5.0)
-                .show(ui, |ui| {
-                    let mut draft_note = chat.draft_note.clone();
-                    let num_lines = draft_note.lines().count().max(1);
 
-                    let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::text() };
+            let appender_offset = 40.0; // Adjust to account for the chat view's padding
+            let effective_width = (total_width - appender_offset).max(400.0);
+            let max_w = effective_width.min(max_msg_width);
 
-                    let out = CodeEditor::default()
-                        .id_source(format!("draft_{}", chat_id))
-                        .with_theme(ColorTheme::SV)
-                        .with_syntax(syntax)
-                        .with_numlines(false)
-                        .with_rows(num_lines)
-                        .vscroll(false)
-                        .v_auto_shrink(true) // Uncap height to display full text
-                        .desired_width(total_width - 40.0)
-                        .show(ui, &mut draft_note);
+            ui.horizontal(|ui| {
+                ui.set_max_width(max_w);
+                ui.vertical(|ui| {
+                    ui.set_max_width(max_w);
+
+                    egui::Frame::default()
+                        .outer_margin(Margin { top: 1, right: 1, bottom: 1, left: 1 })
+                        .inner_margin(1.0)
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(5.0)
+                        .show(ui, |ui| {
+                            let mut draft_note = chat.draft_note.clone();
+                            let num_lines = draft_note.lines().count().max(1);
+
+                            let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::text() };
+
+                            let out = CodeEditor::default()
+                                .id_source(format!("draft_{}", chat_id))
+                                .with_theme(ColorTheme::SV)
+                                .with_syntax(syntax)
+                                .with_numlines(false)
+                                .with_rows(num_lines)
+                                .vscroll(false)
+                                .v_auto_shrink(true) // Uncap height to display full text
+                                .desired_width(max_w - 50.0)
+                                .show(ui, &mut draft_note);
 
                     // Optional placeholder text if empty
                     if draft_note.is_empty() && !out.output.response.has_focus() {
@@ -726,6 +735,9 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                         draft_lost_focus = true;
                     }
                 });
+                }); // End vertical wrapper
+                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+            }); // End horizontal wrapper
         }
     }
 
@@ -775,13 +787,64 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let _ = crate::db::mod_msg_content(&state.db_conn, id, &content);
     }
 
-    // NEW: Fire LLM Prompt if requested
-    if let Some(prompt_text) = llm_prompt_request {
-        // Hydrate the bottom panel buffer with the Rhai-generated text
-        state.bottom_panel_state.prompt_edited = prompt_text;
-        // Submit the prompt just as if the user clicked "Send"
-        crate::gui::bottom_panel::submit_prompt(state, ui.ctx());
-    }
+    // --- NEW: Render Floating Minimalist Slider at the top of the viewport ---
+    let clip_rect = ui.clip_rect();
+    let mut slider_rect = clip_rect;
+    slider_rect.max.y = slider_rect.min.y + 12.0;
+
+    let mut ui_top = ui.child_ui(slider_rect, egui::Layout::top_down(egui::Align::Center), None);
+    ui_top.scope(|ui| {
+        // Determine if the mouse is inside the slider's bounding box
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let is_hovered = pointer_pos.map_or(false, |pos| slider_rect.contains(pos));
+
+        // Fetch the drag state of THIS specific slider from the previous frame
+        let state_id = ui.id().with("slider_drag_state");
+        let was_dragged_last_frame = ui.data(|d| d.get_temp::<bool>(state_id).unwrap_or(false));
+
+        let show_slider = is_hovered || was_dragged_last_frame;
+
+        let visuals = ui.visuals_mut();
+
+
+        // If the mouse is not nearby and we aren't dragging the handle, hide the grabber itself
+        if !show_slider {
+            // Hide the background rail completely
+            visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.hovered.bg_fill = egui::Color32::TRANSPARENT;
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.active.bg_fill = egui::Color32::TRANSPARENT;
+            visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+
+            visuals.widgets.inactive.fg_stroke = egui::Stroke::NONE;
+        }
+
+        let prev_width = max_msg_width;
+        let resp = ui.add_sized(
+            [ui.available_width(), 12.0],
+            egui::Slider::new(&mut max_msg_width, 400.0..=(total_width.max(400.0)))
+                .show_value(false)
+                .text("")
+        );
+
+        if show_slider {
+            resp.clone().on_hover_text(
+                    egui::RichText::new(t!("adjust_message_width_tooltip"))
+                    .strong()
+                    .heading()
+                );
+        }
+
+        // Save the exact drag state of this slider for the NEXT frame
+        ui.data_mut(|d| d.insert_temp(state_id, resp.dragged()));
+
+        // Instantly save state if the slider was dragged this frame
+        if prev_width != max_msg_width {
+            state.chat_widths.insert(chat_id, max_msg_width);
+            ui.ctx().request_repaint();
+        }
+    });
 }
 
 fn render_assistant_grid(
@@ -851,17 +914,24 @@ fn render_user_msg(
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
-    let effective_width = total_width - 30.0;
-    let max_w = effective_width.clamp(400.0, max_msg_width);
+    let left_offset = 127.0; // Matches the left outer margin of the user frame
+    let right_padding = 30.0;
+
+    // Subtract the 127px offset from both our total and maximum bounds
+    // to ensure the frame + margin combination respects the global max_msg_width limit
+    let effective_width = (total_width - right_padding - left_offset).max(400.0);
+    let adjusted_max = (max_msg_width - left_offset).max(400.0);
+
+    let max_w = effective_width.min(adjusted_max);
 
     let scroll_area = egui::ScrollArea::horizontal();
 
     scroll_area.show(ui, |ui| {
-        ui.set_max_width(max_w);
+        // The parent wrappers need room for both the content and the margin
+        ui.set_max_width(max_w + left_offset);
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                let max_w = effective_width.clamp(400.0, max_msg_width);
-                ui.set_max_width(max_w);
+                ui.set_max_width(max_w + left_offset);
 
                 egui::Frame::default()
                 .stroke(Stroke { width: 1.0, color: ui.visuals().strong_text_color() })
@@ -925,8 +995,8 @@ fn render_user_msg(
                                                                 Ok(egui::load::TexturePoll::Ready { texture }) => {
                                                                     // 3. Force a strict size so the layout CANNOT collapse to 0x0
                                                                     let size = texture.size;
-                                                                    let max_w = 300.0_f32;
-                                                                    let scale = if size.x > max_w { max_w / size.x } else { 1.0 };
+                                                                    let max_img_w = 300.0_f32;
+                                                                    let scale = if size.x > max_img_w { max_img_w / size.x } else { 1.0 };
 
                                                                     ui.add(egui::Image::new(source).fit_to_exact_size(size * scale));
                                                                 }
@@ -1517,7 +1587,14 @@ fn extract_raw_diff_blocks(snippet: &str) -> Option<(String, String)> {
         block
     }
 
-    if let Some(caps) = re_diff.captures(snippet) {
+    let mut matches = re_diff.captures_iter(snippet);
+    if let Some(caps) = matches.next() {
+        // --- NEW: Abort if there are multiple diff blocks in the same snippet!
+        // This prevents the embedded merge tool from rendering incorrectly.
+        if matches.next().is_some() {
+            return None;
+        }
+
         let search_block = clean_block(caps.get(1).map_or("", |m| m.as_str()));
         let replace_block = clean_block(caps.get(2).map_or("", |m| m.as_str()));
         return Some((search_block.to_string(), replace_block.to_string()));
