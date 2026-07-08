@@ -468,7 +468,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         }
     });
 
-    max_msg_width = max_msg_width.clamp(400.0, total_width.max(400.0));
+    // Only enforce the minimum bound so it doesn't break layout
+    max_msg_width = max_msg_width.max(400.0);
     state.chat_widths.insert(chat_id, max_msg_width);
 
     let msg_ui_map = &mut state.chat_msg_ui;
@@ -823,7 +824,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let prev_width = max_msg_width;
         let resp = ui.add_sized(
             [ui.available_width(), 12.0],
-            egui::Slider::new(&mut max_msg_width, 400.0..=(total_width.max(400.0)))
+            // Allow the slider to extend to the current window size OR the currently saved max
+            egui::Slider::new(&mut max_msg_width, 400.0..=(total_width.max(400.0).max(prev_width)))
                 .show_value(false)
                 .text("")
         );
