@@ -1,4 +1,5 @@
 use egui_tiles::{Behavior, TileId, UiResponse};
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -67,6 +68,17 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
     // FIX: Updated return type to egui::widget_text::WidgetText
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::widget_text::WidgetText {
+        // Helper to format tab names (e.g., turns ".../gui/mod.rs" into "gui/")
+        let format_path_name = |p: &std::path::Path| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if name == "mod.rs" {
+                if let Some(parent) = p.parent().and_then(|parent| parent.file_name()) {
+                    return format!("{}/", parent.to_string_lossy());
+                }
+            }
+            name.into_owned()
+        };
+
         match pane {
             Pane::Chat { chat_id } => {
                 if let Some(chat) = self.state.open_chats.get(chat_id) {
@@ -78,12 +90,10 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 }
             }
             Pane::Editor { path, content: _ } => {
-                let filename = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("📝 {} ✖", filename).into()
+                format!("📝 {} ✖", format_path_name(path)).into()
             }
             Pane::Merge { path } => {
-                let filename = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("🛠 {} ✖", filename).into()
+                format!("🛠 {} ✖", format_path_name(path)).into()
             }
             Pane::SearchResults { query, .. } => {
                 format!("🔍 Search: {} ✖", query).into()
@@ -96,8 +106,31 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         &mut self,
         tiles: &egui_tiles::Tiles<Pane>,
         tile_id: TileId,
-        button_response: egui::response::Response,
+        mut button_response: egui::response::Response,
     ) -> egui::response::Response {
+
+        // --- ADD RELATIVE PATH TOOLTIP ---
+        if let Some(egui_tiles::Tile::Pane(pane)) = tiles.get(tile_id) {
+            if let Pane::Editor { path, .. } | Pane::Merge { path } = pane {
+                let tooltip_text = if let Some(root) = &self.state.project_root {
+                    let c_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+
+                    c_path.strip_prefix(&c_root)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| path.display().to_string())
+                } else {
+                    path.display().to_string()
+                };
+
+                button_response = button_response.on_hover_text(
+                    egui::RichText::new(tooltip_text)
+                    .strong()
+                    .heading()
+                )
+            }
+        }
+
         if button_response.clicked() {
             // Check if the click was on the rightmost edge of the tab (the ✖ icon)
             if let Some(pointer_pos) = button_response.interact_pointer_pos() {
@@ -245,6 +278,21 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
             // SANDBOX ALL IDS TO PREVENT COLLISIONS BETWEEN DUPLICATE PANES
             ui.push_id(tile_id, |ui| {
+                // Clone the root to avoid holding a borrow over self.state during UI interactions
+                let proj_root = self.state.project_root.clone();
+
+                let relative_path = |p: &std::path::PathBuf| {
+                    if let Some(root) = &proj_root {
+                        let c_path = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                        let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                        c_path.strip_prefix(&c_root)
+                            .map(|stripped| stripped.display().to_string())
+                            .unwrap_or_else(|_| p.display().to_string())
+                    } else {
+                        p.display().to_string()
+                    }
+                };
+
                 match pane {
                     Pane::Chat { chat_id } => {
                         egui::ScrollArea::vertical()
@@ -264,7 +312,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     Pane::Editor { path, content } => {
                         ui.horizontal(|ui| {
                             ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
-                            ui.label(format!("Editing: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                            ui.label(format!("{}: {}", t!("editing"), relative_path(path)));
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 // Now we only keep pane-specific actions like Save.
@@ -300,7 +348,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     Pane::Merge { path } => {
                         ui.horizontal(|ui| {
                             ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
-                            ui.label(format!("Merging: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                            ui.label(format!("{}: {}", t!("merging"), relative_path(path)));
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("💾 Save").clicked() {

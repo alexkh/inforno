@@ -666,6 +666,7 @@ impl eframe::App for MyApp {
         if let Some(paths) = state.file_dialog.take_picked_multiple() {
             let tx_clone = state.op_tx.clone();
             let ctx_clone = ctx.clone();
+            let project_root_clone = state.project_root.clone();
 
             tokio::spawn(async move {
                 let mut attachments = Vec::new();
@@ -709,12 +710,39 @@ impl eframe::App for MyApp {
                         // Read single file: Check if it's an image!
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
+                        // 1. Try to get the relative path robustly
+                        let relative_name = if let Some(root) = &project_root_clone {
+                            let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                            let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                            
+                            c_path.strip_prefix(&c_root)
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|_| {
+                                    // Fallback 1: chop at "/src/" if strip_prefix still fails
+                                    let path_str = path.display().to_string();
+                                    if let Some(idx) = path_str.find("/src/") {
+                                        path_str[idx + 1..].to_string()
+                                    } else {
+                                        // Fallback 2: just the file name (avoid exposing full system path)
+                                        path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                                    }
+                                })
+                        } else {
+                            // If no project root, look for "/src/" or just use file name
+                            let path_str = path.display().to_string();
+                            if let Some(idx) = path_str.find("/src/") {
+                                path_str[idx + 1..].to_string()
+                            } else {
+                                path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                            }
+                        };
+
                         if let Some(mime) = get_image_mime(ext) {
                             // It's an image, read as binary and base64 encode
                             if let Ok(bytes) = std::fs::read(&path) {
                                 let base64_str = STANDARD.encode(&bytes);
                                 attachments.push(crate::common::Attachment {
-                                    filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                                    filename: relative_name.clone(),
                                     mime_type: mime,
                                     content: base64_str,
                                 });
@@ -723,7 +751,7 @@ impl eframe::App for MyApp {
                             // Read as standard text
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 attachments.push(crate::common::Attachment {
-                                    filename: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                                    filename: relative_name,
                                     mime_type: "text/plain".to_string(),
                                     content,
                                 });
