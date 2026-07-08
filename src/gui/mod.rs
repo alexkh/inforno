@@ -173,6 +173,11 @@ impl State {
                 });
             open_chats.insert(first_chat_info.id, chat);
             active_chat_id = Some(first_chat_info.id);
+        } else {
+            // FIX: Ensure a blank slate properly initializes the chat state
+            // so the bottom panel doesn't start locked out.
+            open_chats.insert(0, common::Chat::default());
+            active_chat_id = Some(0);
         }
 
         // --- 2. API Key Retrieval (Env or Keyring) ---
