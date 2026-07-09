@@ -78,6 +78,19 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
             continue;
         }
 
+        // --- 0. Prevent Double Application ---
+        let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
+        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+        let orig_norm = current_text.replace("\r\n", "\n");
+
+        if !replace_norm.is_empty() && orig_norm.contains(&replace_norm) {
+            // If the replacement is already in the text, and it's substantial or contains the search block
+            // (which is the classic cause of infinite duplication), we skip it!
+            if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
+                continue;
+            }
+        }
+
         // 1. Try exact match
         if !search_block.is_empty() {
             if let Some(idx) = current_text.find(search_block) {
@@ -1358,6 +1371,17 @@ fn render_msg_content(
                                             msg_ui.inline_diffs.insert(i, app);
                                         }
 
+                                        // --- NEW: Dynamic check to see if it's already applied on disk ---
+                                        let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
+                                        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                        let orig_norm = original_content.replace("\r\n", "\n");
+
+                                        if !replace_norm.is_empty() && orig_norm.contains(&replace_norm) {
+                                            if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
+                                                msg_ui.inline_diffs_saved.insert(i, true);
+                                            }
+                                        }
+
                                         let is_saved = *msg_ui.inline_diffs_saved.entry(i).or_insert(false);
 
                                         ui.add_space(10.0);
@@ -1391,6 +1415,18 @@ fn render_msg_content(
                                                     current_replacement.pop();
                                                     if current_replacement.ends_with('\r') {
                                                         current_replacement.pop();
+                                                    }
+                                                }
+
+                                                // --- PREVENT DOUBLE-APPLY ON FAST CLICKS ---
+                                                let replace_norm = current_replacement.replace("\r\n", "\n").trim().to_string();
+                                                let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                                let disk_norm = latest_disk_content.replace("\r\n", "\n");
+
+                                                if !replace_norm.is_empty() && disk_norm.contains(&replace_norm) {
+                                                    if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
+                                                        msg_ui.inline_diffs_saved.insert(i, true);
+                                                        return; // Exit the UI closure early, skipping the write!
                                                     }
                                                 }
 
