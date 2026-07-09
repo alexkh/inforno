@@ -1341,27 +1341,51 @@ fn render_msg_content(
                                     let original_content = std::fs::read_to_string(path).unwrap_or_default();
 
                                     // We check using exact matches or normalized whitespace matching.
-                                    let mut found_exact_match = false;
+                                    let mut found_search_match = false;
+                                    let mut found_replace_match = false;
                                     let mut match_offset_lines = 0;
+
+                                    let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
+                                    let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
+                                    let orig_norm = original_content.replace("\r\n", "\n");
 
                                     if !search_block.is_empty() {
                                         if let Some(idx) = original_content.find(&search_block) {
-                                            found_exact_match = true;
+                                            found_search_match = true;
                                             // Count absolute newlines before the match index
                                             match_offset_lines = original_content[..idx].chars().filter(|&c| c == '\n').count();
-                                        } else {
-                                            let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-                                            let orig_norm = original_content.replace("\r\n", "\n");
-                                            if !search_norm.is_empty() {
-                                                if let Some(idx) = orig_norm.find(&search_norm) {
-                                                    found_exact_match = true;
-                                                    match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
-                                                }
+                                        } else if !search_norm.is_empty() {
+                                            if let Some(idx) = orig_norm.find(&search_norm) {
+                                                found_search_match = true;
+                                                match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
                                             }
                                         }
                                     }
 
-                                    if found_exact_match {
+                                    if !replace_block.is_empty() {
+                                        if let Some(idx) = original_content.find(&replace_block) {
+                                            found_replace_match = true;
+                                            if !found_search_match {
+                                                match_offset_lines = original_content[..idx].chars().filter(|&c| c == '\n').count();
+                                            }
+                                        } else if !replace_norm.is_empty() {
+                                            if let Some(idx) = orig_norm.find(&replace_norm) {
+                                                found_replace_match = true;
+                                                if !found_search_match {
+                                                    match_offset_lines = orig_norm[..idx].chars().filter(|&c| c == '\n').count();
+                                                }
+                                            }
+                                        }
+
+                                        // Safety check: if we only found the replace block, ensure it's not a generic one-liner
+                                        if found_replace_match && !found_search_match {
+                                            if replace_norm.lines().count() <= 1 && replace_norm.len() <= 20 {
+                                                found_replace_match = false; // Too generic to confidently assume it's our applied snippet!
+                                            }
+                                        }
+                                    }
+
+                                    if found_search_match || found_replace_match {
                                         // 3. Mount or retrieve the DiffApp for this chunk!
                                         // We avoid holding a lock on msg_ui by performing isolated operations
                                         if !msg_ui.inline_diffs.contains_key(&i) {
@@ -1372,12 +1396,10 @@ fn render_msg_content(
                                         }
 
                                         // --- NEW: Dynamic check to see if it's already applied on disk ---
-                                        let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
-                                        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-                                        let orig_norm = original_content.replace("\r\n", "\n");
-
-                                        if !replace_norm.is_empty() && orig_norm.contains(&replace_norm) {
-                                            if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
+                                        if found_replace_match {
+                                            // If the search block is gone but replace block is there, it's definitely merged.
+                                            // Otherwise, apply the same overlap/length safeguards.
+                                            if !found_search_match || replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
                                                 msg_ui.inline_diffs_saved.insert(i, true);
                                             }
                                         }

@@ -140,21 +140,20 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     // ONE layout. Right-to-Left.
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 
-                        // 1. The Pane Badges
+                        // 1. Combine Pane Badges and Title
+                        let mut display_title = String::new();
                         if let Some(locations) = state.chat_locations.get(&db_chat.id) {
                             for loc in locations.iter().rev() {
-                                ui.label(
-                                    egui::RichText::new(loc)
-                                        .strong()
-                                        .background_color(ui.visuals().code_bg_color)
-                                ).on_hover_text(format!("Open in Pane {}", loc));
+                                display_title.push_str(&format!("[{}] ", loc));
                             }
                         }
+
+                        let raw_title = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim();
+                        display_title.push_str(raw_title);
 
                         // 2. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
                         let available_width = ui.available_width();
-                        let display_title = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim();
                         let btn_resp = SplitButton::new(display_title)
                             .id_salt(db_chat.id)
                             .selected(is_selected)
