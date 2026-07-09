@@ -23,6 +23,7 @@ pub struct SplitButton {
     left_tooltip: Option<String>,
     left_width: Option<f32>,
     left_reveal_on_hover: bool,
+    prefix: Option<String>,
 }
 
 impl SplitButton {
@@ -41,7 +42,17 @@ impl SplitButton {
             left_tooltip: None,
             left_width: None,
             left_reveal_on_hover: false,
+            prefix: None,
         }
+    }
+
+    /// Add a faint prefix (like a badge) before the main text
+    pub fn prefix(mut self, text: impl Into<String>) -> Self {
+        let s = text.into();
+        if !s.is_empty() {
+            self.prefix = Some(s);
+        }
+        self
     }
 
     /// Add a tool button to the left side of the split button
@@ -127,7 +138,13 @@ impl SplitButton {
                 self.text.clone(), font_id.clone(), egui::Color32::TRANSPARENT
             ).size().x;
 
-            let mut total_w = text_width + button_padding.x * 2.0;
+            let prefix_width = self.prefix.as_ref().map_or(0.0, |p| {
+                ui.painter().layout_no_wrap(
+                    p.clone(), font_id.clone(), egui::Color32::TRANSPARENT
+                ).size().x
+            });
+
+            let mut total_w = text_width + prefix_width + button_padding.x * 2.0;
             if self.left_icon.is_some() {
                 total_w += left_w;
             }
@@ -232,8 +249,22 @@ impl SplitButton {
             // plus the space reserved for the left tool, regardless of hover state.
             let text_start_x = rect.min.x; // rect.min.x + button_padding.x + if self.left_icon.is_some() { left_w } else { 0.0 };
 
+            let mut current_x = text_start_x;
+
+            if let Some(prefix) = &self.prefix {
+                let prefix_color = text_color.linear_multiply(0.4); // 40% opacity for a faint look
+                let prefix_rect = painter.text(
+                    egui::pos2(current_x, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    prefix,
+                    font_id.clone(),
+                    prefix_color
+                );
+                current_x += prefix_rect.size().x;
+            }
+
             painter.text(
-                egui::pos2(text_start_x, rect.center().y),
+                egui::pos2(current_x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 &self.text,
                 font_id,

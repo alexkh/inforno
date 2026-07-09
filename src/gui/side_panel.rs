@@ -140,21 +140,21 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     // ONE layout. Right-to-Left.
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 
-                        // 1. Combine Pane Badges and Title
-                        let mut display_title = String::new();
+                        // 1. Gather Pane Badges
+                        let mut prefixes = String::new();
                         if let Some(locations) = state.chat_locations.get(&db_chat.id) {
                             for loc in locations.iter().rev() {
-                                display_title.push_str(&format!("[{}] ", loc));
+                                prefixes.push_str(&format!("[{}] ", loc));
                             }
                         }
 
                         let raw_title = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim();
-                        display_title.push_str(raw_title);
 
                         // 2. The Unified Split Button
                         // We pass the full available width to our custom component, which handles the hover split automatically.
                         let available_width = ui.available_width();
-                        let btn_resp = SplitButton::new(display_title)
+                        let btn_resp = SplitButton::new(raw_title)
+                            .prefix(prefixes)
                             .id_salt(db_chat.id)
                             .selected(is_selected)
                             .transparent(true) // Transparent for sidebar!
