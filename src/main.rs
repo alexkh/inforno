@@ -32,6 +32,9 @@ struct Args {
     // Optional project directory to load a local Sandbox from
     #[arg(required = false)]
     project_dir: Option<String>,
+    #[arg(long)]
+    // Optional Realm to load
+    realm: Option<String>,
 }
 
 fn main() -> eframe::Result {
@@ -110,8 +113,53 @@ fn main() -> eframe::Result {
             let sandbox_string = args.sandbox;
             let mut sandbox: Option<PathBuf> = sandbox_string.map(PathBuf::from);
             let mut pending_project_init: Option<PathBuf> = None;
+            let mut active_realm_name: Option<String> = None;
 
-            if let Some(proj_str) = args.project_dir {
+            // Determine target realm (CLI arg takes priority over global config)
+            let mut target_realm = args.realm.clone();
+            let mut positional_path = args.project_dir.clone();
+            
+            // Allow positional argument to act as a realm name (e.g., `inforno inforno`)
+            if target_realm.is_none() {
+                if let Some(pos_arg) = &positional_path {
+                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                        let realm_dir = proj_dirs.config_dir().join("realms").join(pos_arg);
+                        if realm_dir.exists() && realm_dir.join("realm.toml").exists() {
+                            target_realm = Some(pos_arg.clone());
+                            positional_path = None; // Consume it so it's not treated as a project dir
+                        }
+                    }
+                }
+            }
+
+            if target_realm.is_none() && positional_path.is_none() {
+                // If nothing was passed, check the global config.toml for a default realm
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                    let global_config_path = proj_dirs.config_dir().join("config.toml");
+                    if let Ok(contents) = std::fs::read_to_string(global_config_path) {
+                        if let Ok(val) = toml::from_str::<toml::Value>(&contents) {
+                            if let Some(r) = val.get("default_realm").and_then(|v| v.as_str()) {
+                                target_realm = Some(r.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(realm_name) = target_realm {
+                // 1. Booting into a Realm Environment
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                    let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
+                    
+                    if realm_dir.exists() {
+                        sandbox = Some(realm_dir.join("info.rno"));
+                        active_realm_name = Some(realm_name);
+                    } else {
+                        eprintln!("Warning: Realm '{}' not found at {:?}", realm_name, realm_dir);
+                    }
+                }
+            } else if let Some(proj_str) = positional_path {
+                // 2. Standard single-project mode (Fallback)
                 let proj_path = PathBuf::from(proj_str);
                 if proj_path.is_dir() {
                     let db_path = proj_path.join(".inforno").join("info.rno");
@@ -131,6 +179,7 @@ fn main() -> eframe::Result {
                 rt: rt_handle,
                 sandbox,
                 pending_project_init: std::sync::Mutex::new(pending_project_init),
+                active_realm_name: std::sync::Mutex::new(active_realm_name),
                 app_language: std::sync::Mutex::new(app_language),
             })))
         }),

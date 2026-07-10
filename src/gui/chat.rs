@@ -146,9 +146,47 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
     }
 }
 
-fn resolve_filepath(project_root: &std::path::Path, requested_path: &str) -> Option<(std::path::PathBuf, bool)> {
-    let req_path = std::path::Path::new(requested_path);
-    let full_path = project_root.join(req_path);
+fn resolve_filepath(
+    realm: &Option<crate::common::ActiveRealm>,
+    project_root: &Option<std::path::PathBuf>, 
+    requested_path: &str
+) -> Option<(std::path::PathBuf, bool)> {
+    let mut target_root = None;
+    let mut relative_path_str = requested_path.trim();
+
+    // 1. Strict SSH-style Realm Prefix: exactly one dot, no slashes
+    // e.g., "inforno.stable:src/main.rs"
+    if let Some((namespace, path_after_colon)) = relative_path_str.split_once(':') {
+        let dot_count = namespace.chars().filter(|&c| c == '.').count();
+        
+        if dot_count == 1 && !namespace.contains('/') && !namespace.contains('\\') {
+            if let Some(active_realm) = realm {
+                if active_realm.config.paths.contains_key(namespace) {
+                    relative_path_str = path_after_colon.trim_start_matches('/');
+                    
+                    // Securely resolve to prevent traversal outside the realm path
+                    if let Some(safe_path) = active_realm.secure_resolve_path(
+                        namespace, 
+                        std::path::Path::new(relative_path_str)
+                    ) {
+                        if safe_path.exists() && safe_path.is_file() {
+                            return Some((safe_path, false)); 
+                        }
+                        target_root = active_realm.config.paths.get(namespace).cloned();
+                    } else {
+                        return None; // Reject traversal exploits!
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to standard project_root if no valid Realm prefix was matched
+    let root_to_search = target_root.or_else(|| project_root.clone())?;
+    
+    // 3. Standard Exact Match Check
+    let req_path = std::path::Path::new(relative_path_str);
+    let full_path = root_to_search.join(req_path);
     if full_path.exists() && full_path.is_file() {
         return Some((full_path, false));
     }
@@ -158,7 +196,7 @@ fn resolve_filepath(project_root: &std::path::Path, requested_path: &str) -> Opt
     let mut best_match = None;
     let mut best_score = -1;
 
-    let mut dirs_to_visit = vec![project_root.to_path_buf()];
+    let mut dirs_to_visit = vec![root_to_search.clone()];
     let req_components: Vec<_> = req_path.components().rev().collect();
 
     while let Some(dir) = dirs_to_visit.pop() {
@@ -489,6 +527,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let cache = &mut state.common_mark_cache;
 
     let project_root = &state.project_root;
+    let active_realm = &state.active_realm;
 	let op_tx = state.op_tx.clone();
 
     // We clone the Rc pointer here (very cheap)
@@ -554,7 +593,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 // Pass a clone of the cache pointer
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width);
                                 assistant_batch.clear();
                             }
 
@@ -562,13 +601,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
                             render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                                project_root, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width);
                         }
                         MsgRole::Developer => {
                             if !assistant_batch.is_empty() {
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width);
                                 assistant_batch.clear();
                             }
 
@@ -687,7 +726,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
-                        project_root, &op_tx, max_msg_width);
+                        project_root, active_realm, &op_tx, max_msg_width);
             }
 
             // --- NOTEBOOK APPENDER CELL ---
@@ -871,6 +910,7 @@ fn render_assistant_grid(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
+    active_realm: &Option<crate::common::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
@@ -903,7 +943,7 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, op_tx);
+                                    project_root, active_realm, op_tx);
                         }
                     );
                 }
@@ -926,6 +966,7 @@ fn render_user_msg(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
+    active_realm: &Option<crate::common::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
@@ -957,7 +998,7 @@ fn render_user_msg(
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
-                        project_root, op_tx);
+                        project_root, active_realm, op_tx);
 
                     // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
@@ -1058,7 +1099,8 @@ fn render_assistant_msg(
     item_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
+    active_realm: &Option<crate::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -1089,7 +1131,7 @@ fn render_assistant_msg(
 
             let content_width = (item_width - 25.0).max(100.0);
             render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-                project_root, op_tx);
+                project_root, active_realm, op_tx);
         });
     });
 }
@@ -1130,7 +1172,8 @@ fn render_msg_content(
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>, // <-- New
+    active_realm: &Option<crate::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -1215,11 +1258,9 @@ fn render_msg_content(
 
                     if let Some(path) = &filepath {
                         display_path = path.clone();
-                        if let Some(root) = project_root {
-                            if let Some((resolved, corrected)) = resolve_filepath(root, path) {
-                                actual_path = Some(resolved);
-                                autocorrected = corrected;
-                            }
+                        if let Some((resolved, corrected)) = resolve_filepath(active_realm, project_root, path) {
+                            actual_path = Some(resolved);
+                            autocorrected = corrected;
                         }
                     }
 
@@ -1234,8 +1275,12 @@ fn render_msg_content(
 
                             if autocorrected {
                                 btn_text.push_str(" ⚠️");
-                                let rel_path = path.strip_prefix(project_root.as_ref().unwrap()).unwrap_or(path.as_path()).display();
-                                tooltip = format!("File path autocorrected to:\n{}", rel_path);
+                                let rel_path_str = if let Some(root) = project_root {
+                                    path.strip_prefix(root).unwrap_or(path).display().to_string()
+                                } else {
+                                    path.display().to_string()
+                                };
+                                tooltip = format!("File path autocorrected to:\n{}", rel_path_str);
                             }
 
 

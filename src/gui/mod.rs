@@ -43,6 +43,7 @@ pub struct MyAppPermanent {
     pub rt: Handle,
     pub sandbox: Option<PathBuf>,
     pub pending_project_init: Mutex<Option<PathBuf>>,
+    pub active_realm_name: Mutex<Option<String>>,
     pub app_language: Mutex<String>,
 }
 
@@ -108,6 +109,8 @@ pub struct State {
     project_dir_to_init: Option<PathBuf>,
     copy_presets_checked: bool,
     project_root: Option<PathBuf>,
+    pub active_realm: Option<crate::common::ActiveRealm>,
+    pub active_workspace_name: Option<String>,
     merge_apps: std::collections::HashMap<egui_tiles::TileId, crate::bulat::DiffApp>,
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
@@ -147,7 +150,35 @@ impl State {
         };
 
         let mut project_root = None;
-        if let Some(parent) = sandbox.parent() {
+        let mut active_realm = None;
+        let mut active_workspace_name = None;
+        
+        let realm_name_lock = permanent.active_realm_name.lock().unwrap().clone();
+
+        if let Some(realm_name) = realm_name_lock {
+            // We are in a Realm! Load config and access rights.
+            if let Some(realm_dir) = sandbox.parent() {
+                if let Some(realm) = crate::common::ActiveRealm::load(realm_name, realm_dir.to_path_buf()) {
+                    // 1. Check for an explicitly defined default workspace in realm.toml
+                    let explicit_default = realm.config.default_workspace.as_ref()
+                        .and_then(|nick| realm.config.paths.get(nick).map(|p| (nick.clone(), p.clone())));
+                    
+                    // 2. Fallback to alphabetical if none is set or if the named default is missing
+                    let selected = explicit_default.or_else(|| {
+                        realm.config.paths.iter()
+                            .min_by_key(|(k, _)| *k)
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                    });
+
+                    if let Some((nickname, path)) = selected {
+                        project_root = Some(path);
+                        active_workspace_name = Some(nickname);
+                    }
+                    active_realm = Some(realm);
+                }
+            }
+        } else if let Some(parent) = sandbox.parent() {
+            // Traditional Single-Project Sandbox
             if parent.file_name().and_then(|n| n.to_str()) == Some(".inforno") {
                 if let Some(root) = parent.parent() {
                     project_root = Some(root.to_path_buf());
@@ -358,6 +389,8 @@ impl State {
             project_dir_to_init: pending_init,
             copy_presets_checked: true,
             project_root,
+            active_realm,
+            active_workspace_name,
             merge_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
@@ -672,6 +705,9 @@ impl eframe::App for MyApp {
             let tx_clone = state.op_tx.clone();
             let ctx_clone = ctx.clone();
             let project_root_clone = state.project_root.clone();
+            
+            // Extract JUST the paths we need so we don't capture `state` into the async thread
+            let realm_paths_clone = state.active_realm.as_ref().map(|r| r.config.paths.clone());
 
             tokio::spawn(async move {
                 let mut attachments = Vec::new();
@@ -716,31 +752,52 @@ impl eframe::App for MyApp {
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
                         // 1. Try to get the relative path robustly
-                        let relative_name = if let Some(root) = &project_root_clone {
+                        let mut relative_name = path.display().to_string();
+                        let mut mapped_to_realm = false;
+
+                        // Check if the file belongs to an active Realm first
+                        if let Some(realm_paths) = &realm_paths_clone {
                             let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                            let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
                             
-                            c_path.strip_prefix(&c_root)
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|_| {
-                                    // Fallback 1: chop at "/src/" if strip_prefix still fails
-                                    let path_str = path.display().to_string();
-                                    if let Some(idx) = path_str.find("/src/") {
-                                        path_str[idx + 1..].to_string()
-                                    } else {
-                                        // Fallback 2: just the file name (avoid exposing full system path)
-                                        path.file_name().unwrap_or_default().to_string_lossy().into_owned()
-                                    }
-                                })
-                        } else {
-                            // If no project root, look for "/src/" or just use file name
-                            let path_str = path.display().to_string();
-                            if let Some(idx) = path_str.find("/src/") {
-                                path_str[idx + 1..].to_string()
-                            } else {
-                                path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                            for (namespace, root_path) in realm_paths {
+                                let c_root = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.clone());
+                                if let Ok(stripped) = c_path.strip_prefix(&c_root) {
+                                    // Format as "namespace:path/to/file"
+                                    relative_name = format!("{}:{}", namespace, stripped.display());
+                                    mapped_to_realm = true;
+                                    break;
+                                }
                             }
-                        };
+                        }
+
+                        // Fallback to standard project root if not in a realm
+                        if !mapped_to_realm {
+                            if let Some(root) = &project_root_clone {
+                                let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                                let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+                                
+                                relative_name = c_path.strip_prefix(&c_root)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|_| {
+                                        // Fallback 1: chop at "/src/" if strip_prefix still fails
+                                        let path_str = path.display().to_string();
+                                        if let Some(idx) = path_str.find("/src/") {
+                                            path_str[idx + 1..].to_string()
+                                        } else {
+                                            // Fallback 2: just the file name (avoid exposing full system path)
+                                            path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                                        }
+                                    });
+                            } else {
+                                // If no project root, look for "/src/" or just use file name
+                                let path_str = path.display().to_string();
+                                if let Some(idx) = path_str.find("/src/") {
+                                    relative_name = path_str[idx + 1..].to_string();
+                                } else {
+                                    relative_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                                }
+                            }
+                        }
 
                         if let Some(mime) = get_image_mime(ext) {
                             // It's an image, read as binary and base64 encode

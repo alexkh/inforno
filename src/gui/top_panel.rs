@@ -182,7 +182,16 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(root) = &state.project_root {
+                if let Some(realm) = &state.active_realm {
+                    let ws_name = state.active_workspace_name.as_deref().unwrap_or("Unknown");
+                    ui.label(egui::RichText::new(format!("🌌 Realm: {} | 📁 {}", realm.name, ws_name))
+                        .color(ui.visuals().warn_fg_color)
+                        .strong()
+                    ).on_hover_text(format!(
+                        "Active Workspace Path:\n{}",
+                        state.project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                    ));
+                } else if let Some(root) = &state.project_root {
                     // 1. Get the absolute path (fallback to the original root if it fails)
                     let abs_path = std::path::absolute(root).unwrap_or_else(|_| root.clone());
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, LazyLock};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
@@ -249,7 +249,7 @@ impl fmt::Display for ChatRouter {
 pub struct ChatMsgUi {
     pub show_raw: bool,
     pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
-    
+
     // Inline Diff Tracking (Index of the chunk -> Diff App State)
     pub inline_diffs: std::collections::HashMap<usize, crate::bulat::DiffApp>,
     pub inline_diffs_saved: std::collections::HashMap<usize, bool>,
@@ -269,7 +269,7 @@ pub struct ChatMsg {
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
-    
+
     // NEW: Transient fields for notebook cells (never saved to SQLite)
     #[serde(skip)]
     pub volatile_output: Option<String>,
@@ -830,7 +830,7 @@ pub async fn run_chat_stream_router(
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Agent options: {:?}", &query.preset.options);
-    
+
     // Default to streaming unless explicitly set to false
     let use_streaming = query.preset.options.stream.unwrap_or(true);
 
@@ -857,4 +857,72 @@ pub struct SearchResult {
     pub chat_id: i64,
     pub chat_title: String,
     pub snippet: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct RealmConfig {
+    pub default_workspace: Option<String>,
+    #[serde(default)]
+    pub paths: HashMap<String, PathBuf>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct ActorsConfig {
+    pub actors: HashMap<String, Vec<String>>,
+}
+
+pub struct ActiveRealm {
+    pub name: String,
+    pub base_dir: PathBuf,
+    pub config: RealmConfig,
+    pub actors: ActorsConfig,
+}
+
+impl ActiveRealm {
+    pub fn load(name: String, base_dir: PathBuf) -> Option<Self> {
+        let config_path = base_dir.join("realm.toml");
+        let actors_path = base_dir.join("actors.toml");
+
+        let config = if let Ok(contents) = std::fs::read_to_string(&config_path) {
+            toml::from_str(&contents).unwrap_or_default()
+        } else {
+            RealmConfig::default()
+        };
+
+        let actors = if let Ok(contents) = std::fs::read_to_string(&actors_path) {
+            toml::from_str(&contents).unwrap_or_default()
+        } else {
+            ActorsConfig::default()
+        };
+
+        Some(Self {
+            name,
+            base_dir,
+            config,
+            actors,
+        })
+    }
+
+    /// Securely resolves a path to ensure it cannot escape the realm boundaries.
+    /// It automatically resolves symlinks and blocks traversing outside the allowed path.
+    pub fn secure_resolve_path(&self, nickname: &str, relative_path: &Path) -> Option<PathBuf> {
+        // 1. Find the root path for this nickname
+        let root_path = self.config.paths.get(nickname)?;
+
+        // 2. Canonicalize the root path (fails if it doesn't exist)
+        let canonical_root = std::fs::canonicalize(root_path).ok()?;
+
+        // 3. Construct the requested path
+        let requested_full = canonical_root.join(relative_path);
+
+        // 4. Canonicalize the requested path (resolves all symlinks/traversals)
+        let canonical_requested = std::fs::canonicalize(&requested_full).ok()?;
+
+        // 5. Ensure the resulting canonical path strictly starts with the canonical root
+        if canonical_requested.starts_with(&canonical_root) {
+            Some(canonical_requested)
+        } else {
+            None // Security breach attempt! (e.g. symlink pointing outside)
+        }
+    }
 }
