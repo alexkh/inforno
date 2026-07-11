@@ -124,7 +124,7 @@ fn main() -> eframe::Result {
                 if let Some(pos_arg) = &positional_path {
                     if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                         let realm_dir = proj_dirs.config_dir().join("realms").join(pos_arg);
-                        if realm_dir.exists() && realm_dir.join("realm.toml").exists() {
+                        if realm_dir.exists() && realm_dir.join("realm.yml").exists() {
                             target_realm = Some(pos_arg.clone());
                             positional_path = None; // Consume it so it's not treated as a project dir
                         }
@@ -133,11 +133,11 @@ fn main() -> eframe::Result {
             }
 
             if target_realm.is_none() && positional_path.is_none() {
-                // If nothing was passed, check the global config.toml for a default realm
+                // If nothing was passed, check the global config.yml for a default realm
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
-                    let global_config_path = proj_dirs.config_dir().join("config.toml");
+                    let global_config_path = proj_dirs.config_dir().join("config.yml");
                     if let Ok(contents) = std::fs::read_to_string(global_config_path) {
-                        if let Ok(val) = toml::from_str::<toml::Value>(&contents) {
+                        if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&contents) {
                             if let Some(r) = val.get("default_realm").and_then(|v| v.as_str()) {
                                 target_realm = Some(r.to_string());
                             }

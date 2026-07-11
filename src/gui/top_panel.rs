@@ -184,13 +184,28 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(realm) = &state.active_realm {
                     let ws_name = state.active_workspace_name.as_deref().unwrap_or("Unknown");
-                    ui.label(egui::RichText::new(format!("🌌 Realm: {} | 📁 {}", realm.name, ws_name))
+                    let combo_label = egui::RichText::new(format!("🏰 {} | 📁 {}", realm.name, ws_name))
                         .color(ui.visuals().warn_fg_color)
-                        .strong()
-                    ).on_hover_text(format!(
-                        "Active Workspace Path:\n{}",
-                        state.project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
-                    ));
+                        .strong();
+
+                    egui::ComboBox::from_id_salt("workspace_combo")
+                        .selected_text(combo_label)
+                                                .show_ui(ui, |ui| {
+                            // Iterate through the compiled VFS mounts
+                            for mount in &realm.mounts {
+                                let is_selected = state.active_workspace_name.as_deref() == Some(mount.virtual_path.as_str());
+                                if ui.selectable_label(is_selected, &mount.virtual_path).clicked() {
+                                    state.active_workspace_name = Some(mount.virtual_path.clone());
+                                    state.project_root = Some(mount.host_path.clone());
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(format!(
+                            "Realm: {}\nActive Workspace Path:\n{}\n\nClick to switch workspace.",
+                            realm.name,
+                            state.project_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                        ));
                 } else if let Some(root) = &state.project_root {
                     // 1. Get the absolute path (fallback to the original root if it fails)
                     let abs_path = std::path::absolute(root).unwrap_or_else(|_| root.clone());

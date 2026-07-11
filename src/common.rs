@@ -17,6 +17,9 @@ use crate::db::{CURRENT_SANDBOX_VERSION, mk_agent};
 //use crate::ollama::{do_ollama_chat_que};
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::images::Image;
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
 
@@ -756,73 +759,6 @@ pub fn mask_key_secure(key: &str) -> String {
     format!("{}..{}", start, end)
 }
 
-/*
-// do chat completion request
-pub async fn do_chat_que(cq: ChatQue) -> Result<ChatResp, String> {
-    let model = cq.preset.model.clone();
-    match cq.preset.chat_router {
-        ChatRouter::Ollama => {
-            let response = do_ollama_chat_que(cq)
-                .await;
-
-            match response {
-                Ok(res) => {
-                    println!("{:?}", res);
-                    return Ok(ChatResp {
-                        chat_msg: ChatMsg {
-                            msg_role: MsgRole::Assistant,
-                            content: res.message.content.clone(),
-                            name: None,
-                            model: Some(model),
-                            reasoning: res.message.thinking.clone(),
-                            ..Default::default()
-                        }
-                    });
-                },
-                Err(_err) => {
-                    return Err(format!(
-                    "Error accessing Ollama. Is it running? \
-                    Try typing in terminal: ollama serve \n\
-                    If Ollama is running, check if it has the model '{}' \
-                    installed: ollama list\n\
-                    to install it: ollama pull {}", model, model).to_string());
-                }
-            }
-        },
-        ChatRouter::Openrouter => {
-            let response = do_openr_chat_que(cq)
-                .await;
-
-            match response {
-                Ok(res) => {
-                    match &res.choices[0].content() {
-                        Some(str_output) => {
-                            println!("{:#?}", res);
-                            return Ok(ChatResp {
-                                chat_msg: ChatMsg {
-                                    msg_role: MsgRole::Assistant,
-                                    content: str_output.to_string(),
-                                    name: None,
-                                    model: Some(res.model),
-                                    //reasoning :
-                                    ..Default::default()
-                                }
-                            });
-                        }
-                        None => {
-                            return Err(format!("Empty reply from openrouter").to_string());
-                        }
-                    }
-                },
-                Err(err) => {
-                    return Err(format!("Error accessing openrouter: {}", err).to_string());
-                }
-            }
-        }
-    }
-}
-*/
-
 pub async fn run_chat_stream_router(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
@@ -858,12 +794,26 @@ pub struct SearchResult {
     pub chat_title: String,
     pub snippet: String,
 }
+// --------------------------------------------------------
+// 1. RAW YAML CONFIGURATION
+// --------------------------------------------------------
 
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RealmMountConfig {
+    pub host: PathBuf,
+    #[serde(default)]
+    pub templates: Vec<String>,
+    #[serde(default)]
+    pub ignore: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
     pub default_workspace: Option<String>,
     #[serde(default)]
-    pub paths: HashMap<String, PathBuf>,
+    pub ignore_templates: IndexMap<String, Vec<String>>,
+    #[serde(default)]
+    pub mounts: IndexMap<String, RealmMountConfig>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
@@ -871,58 +821,91 @@ pub struct ActorsConfig {
     pub actors: HashMap<String, Vec<String>>,
 }
 
+// --------------------------------------------------------
+// 2. COMPILED RUNTIME STATE
+// --------------------------------------------------------
+
+#[derive(Clone)]
+pub struct CompiledMount {
+    pub virtual_path: String,
+    pub host_path: PathBuf,
+    pub ignore_set: GlobSet,
+}
+
 pub struct ActiveRealm {
     pub name: String,
-    pub base_dir: PathBuf,
-    pub config: RealmConfig,
-    pub actors: ActorsConfig,
+    pub default_workspace: Option<String>,
+    // Sorted by virtual_path length descending for Longest-Prefix Match
+    pub mounts: Vec<CompiledMount>,
 }
 
 impl ActiveRealm {
-    pub fn load(name: String, base_dir: PathBuf) -> Option<Self> {
-        let config_path = base_dir.join("realm.toml");
-        let actors_path = base_dir.join("actors.toml");
+    /// Compiles the raw YAML config into an optimized routing table
+    pub fn from_config(name: String, config: RealmConfig) -> Result<Self, String> {
+        let mut mounts = Vec::new();
 
-        let config = if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            toml::from_str(&contents).unwrap_or_default()
-        } else {
-            RealmConfig::default()
-        };
+        for (v_path, mount_cfg) in config.mounts {
+            let mut builder = GlobSetBuilder::new();
 
-        let actors = if let Ok(contents) = std::fs::read_to_string(&actors_path) {
-            toml::from_str(&contents).unwrap_or_default()
-        } else {
-            ActorsConfig::default()
-        };
+            // 1. Inject globs from the named templates
+            for tpl_name in &mount_cfg.templates {
+                if let Some(tpl_globs) = config.ignore_templates.get(tpl_name) {
+                    for g in tpl_globs {
+                        builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+                    }
+                } else {
+                    return Err(format!("Template '{}' not found for mount '{}'", tpl_name, v_path));
+                }
+            }
 
-        Some(Self {
+            // 2. Inject ad-hoc globs for this specific mount
+            for g in &mount_cfg.ignore {
+                builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+            }
+
+            let ignore_set = builder.build().map_err(|e| e.to_string())?;
+
+            mounts.push(CompiledMount {
+                virtual_path: v_path,
+                host_path: mount_cfg.host,
+                ignore_set,
+            });
+        }
+
+        // CRITICAL: Sort descending by length so /inforno/dev/doc is checked before /inforno/dev
+        mounts.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
+
+        Ok(Self {
             name,
-            base_dir,
-            config,
-            actors,
+            default_workspace: config.default_workspace,
+            mounts,
         })
     }
 
-    /// Securely resolves a path to ensure it cannot escape the realm boundaries.
-    /// It automatically resolves symlinks and blocks traversing outside the allowed path.
-    pub fn secure_resolve_path(&self, nickname: &str, relative_path: &Path) -> Option<PathBuf> {
-        // 1. Find the root path for this nickname
-        let root_path = self.config.paths.get(nickname)?;
+    /// Safely translates a virtual LLM path to a real host path, enforcing ignores
+    pub fn secure_resolve_path(&self, virtual_path: &Path) -> Option<PathBuf> {
+        let path_str = virtual_path.to_str()?;
 
-        // 2. Canonicalize the root path (fails if it doesn't exist)
-        let canonical_root = std::fs::canonicalize(root_path).ok()?;
+        for mount in &self.mounts {
+            if path_str.starts_with(&mount.virtual_path) {
+                // Strip the virtual prefix to get the relative local path
+                let relative = path_str
+                    .strip_prefix(&mount.virtual_path)
+                    .unwrap_or("")
+                    .trim_start_matches('/'); // Handle trailing slashes cleanly
 
-        // 3. Construct the requested path
-        let requested_full = canonical_root.join(relative_path);
+                let host_target = mount.host_path.join(relative);
 
-        // 4. Canonicalize the requested path (resolves all symlinks/traversals)
-        let canonical_requested = std::fs::canonicalize(&requested_full).ok()?;
+                // Security / Policy check: Is this file ignored?
+                if mount.ignore_set.is_match(&host_target) {
+                    return None; // Hidden by template or ignore rules
+                }
 
-        // 5. Ensure the resulting canonical path strictly starts with the canonical root
-        if canonical_requested.starts_with(&canonical_root) {
-            Some(canonical_requested)
-        } else {
-            None // Security breach attempt! (e.g. symlink pointing outside)
+                return Some(host_target);
+            }
         }
+
+        // Path didn't match any mount points (e.g., LLM tried to access /etc/passwd)
+        None
     }
 }

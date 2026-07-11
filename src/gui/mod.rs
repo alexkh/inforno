@@ -111,6 +111,8 @@ pub struct State {
     project_root: Option<PathBuf>,
     pub active_realm: Option<crate::common::ActiveRealm>,
     pub active_workspace_name: Option<String>,
+    pub workspace_search_buffer: String,
+    pub show_workspace_selector: bool,
     merge_apps: std::collections::HashMap<egui_tiles::TileId, crate::bulat::DiffApp>,
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
@@ -152,29 +154,37 @@ impl State {
         let mut project_root = None;
         let mut active_realm = None;
         let mut active_workspace_name = None;
-        
+
         let realm_name_lock = permanent.active_realm_name.lock().unwrap().clone();
 
         if let Some(realm_name) = realm_name_lock {
             // We are in a Realm! Load config and access rights.
             if let Some(realm_dir) = sandbox.parent() {
-                if let Some(realm) = crate::common::ActiveRealm::load(realm_name, realm_dir.to_path_buf()) {
-                    // 1. Check for an explicitly defined default workspace in realm.toml
-                    let explicit_default = realm.config.default_workspace.as_ref()
-                        .and_then(|nick| realm.config.paths.get(nick).map(|p| (nick.clone(), p.clone())));
-                    
-                    // 2. Fallback to alphabetical if none is set or if the named default is missing
-                    let selected = explicit_default.or_else(|| {
-                        realm.config.paths.iter()
-                            .min_by_key(|(k, _)| *k)
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                    });
+                let yaml_path = realm_dir.join("realm.yml");
+                if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
+                    if let Ok(raw_config) = serde_yaml::from_str::<crate::common::RealmConfig>(&config_str) {
 
-                    if let Some((nickname, path)) = selected {
-                        project_root = Some(path);
-                        active_workspace_name = Some(nickname);
+                        // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
+                        if let Ok(realm) = crate::common::ActiveRealm::from_config(realm_name, raw_config) {
+                            // Resolve the default workspace (Fallback to the longest mount point)
+                            let explicit_default = realm.default_workspace.clone().and_then(|def| {
+                                realm.mounts.iter()
+                                    .find(|m| m.virtual_path == def)
+                                    .map(|m| (m.virtual_path.clone(), m.host_path.clone()))
+                            });
+
+                            let selected = explicit_default.or_else(|| {
+                                realm.mounts.first()
+                                    .map(|m| (m.virtual_path.clone(), m.host_path.clone()))
+                            });
+
+                            if let Some((name, path)) = selected {
+                                project_root = Some(path);
+                                active_workspace_name = Some(name);
+                            }
+                            active_realm = Some(realm);
+                        }
                     }
-                    active_realm = Some(realm);
                 }
             }
         } else if let Some(parent) = sandbox.parent() {
@@ -391,6 +401,8 @@ impl State {
             project_root,
             active_realm,
             active_workspace_name,
+            workspace_search_buffer: String::new(),
+            show_workspace_selector: false,
             merge_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
@@ -705,9 +717,10 @@ impl eframe::App for MyApp {
             let tx_clone = state.op_tx.clone();
             let ctx_clone = ctx.clone();
             let project_root_clone = state.project_root.clone();
-            
-            // Extract JUST the paths we need so we don't capture `state` into the async thread
-            let realm_paths_clone = state.active_realm.as_ref().map(|r| r.config.paths.clone());
+
+
+            // Extract JUST the mounts we need so we don't capture `state` into the async thread
+            let realm_mounts_clone = state.active_realm.as_ref().map(|r| r.mounts.clone());
 
             tokio::spawn(async move {
                 let mut attachments = Vec::new();
@@ -756,14 +769,16 @@ impl eframe::App for MyApp {
                         let mut mapped_to_realm = false;
 
                         // Check if the file belongs to an active Realm first
-                        if let Some(realm_paths) = &realm_paths_clone {
+                        if let Some(realm_mounts) = &realm_mounts_clone {
                             let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                            
-                            for (namespace, root_path) in realm_paths {
-                                let c_root = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.clone());
+
+                            // Since mounts are sorted longest-first, the first match is our deepest nested point
+                            for mount in realm_mounts {
+                                let c_root = std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
                                 if let Ok(stripped) = c_path.strip_prefix(&c_root) {
-                                    // Format as "namespace:path/to/file"
-                                    relative_name = format!("{}:{}", namespace, stripped.display());
+                                    // Format as "/virtual_path/path/to/file"
+                                    let v_path_clean = mount.virtual_path.trim_end_matches('/');
+                                    relative_name = format!("{}/{}", v_path_clean, stripped.display());
                                     mapped_to_realm = true;
                                     break;
                                 }
@@ -775,7 +790,7 @@ impl eframe::App for MyApp {
                             if let Some(root) = &project_root_clone {
                                 let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                                 let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-                                
+
                                 relative_name = c_path.strip_prefix(&c_root)
                                     .map(|p| p.display().to_string())
                                     .unwrap_or_else(|_| {

@@ -154,34 +154,32 @@ fn resolve_filepath(
     let mut target_root = None;
     let mut relative_path_str = requested_path.trim();
 
-    // 1. Strict SSH-style Realm Prefix: exactly one dot, no slashes
-    // e.g., "inforno.stable:src/main.rs"
-    if let Some((namespace, path_after_colon)) = relative_path_str.split_once(':') {
-        let dot_count = namespace.chars().filter(|&c| c == '.').count();
+    // 1. Attempt VFS Translation if we are in a Realm
+    if let Some(active_realm) = realm {
+        let req_path = std::path::Path::new(relative_path_str);
         
-        if dot_count == 1 && !namespace.contains('/') && !namespace.contains('\\') {
-            if let Some(active_realm) = realm {
-                if active_realm.config.paths.contains_key(namespace) {
-                    relative_path_str = path_after_colon.trim_start_matches('/');
-                    
-                    // Securely resolve to prevent traversal outside the realm path
-                    if let Some(safe_path) = active_realm.secure_resolve_path(
-                        namespace, 
-                        std::path::Path::new(relative_path_str)
-                    ) {
-                        if safe_path.exists() && safe_path.is_file() {
-                            return Some((safe_path, false)); 
-                        }
-                        target_root = active_realm.config.paths.get(namespace).cloned();
-                    } else {
-                        return None; // Reject traversal exploits!
-                    }
+        if let Some(secure_host_path) = active_realm.secure_resolve_path(req_path) {
+            // Perfect match found and permitted by the ignore list
+            if secure_host_path.exists() && secure_host_path.is_file() {
+                return Some((secure_host_path, false)); 
+            }
+            
+            // If the exact match fails (e.g., a typo in the file name), prepare for the fuzzy fallback.
+            // We need to extract the specific mount root this path belonged to.
+            for mount in &active_realm.mounts {
+                if relative_path_str.starts_with(&mount.virtual_path) {
+                    target_root = Some(mount.host_path.clone());
+                    relative_path_str = relative_path_str
+                        .strip_prefix(&mount.virtual_path)
+                        .unwrap_or(relative_path_str)
+                        .trim_start_matches('/');
+                    break;
                 }
             }
         }
     }
 
-    // 2. Fallback to standard project_root if no valid Realm prefix was matched
+    // 2. Fallback to standard project_root if no valid Realm VFS match was found
     let root_to_search = target_root.or_else(|| project_root.clone())?;
     
     // 3. Standard Exact Match Check
