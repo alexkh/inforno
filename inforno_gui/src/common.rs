@@ -20,6 +20,7 @@ use ollama_rs::generation::images::Image;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+pub use inforno_core::*;
 
 pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
 
@@ -793,119 +794,4 @@ pub struct SearchResult {
     pub chat_id: i64,
     pub chat_title: String,
     pub snippet: String,
-}
-// --------------------------------------------------------
-// 1. RAW YAML CONFIGURATION
-// --------------------------------------------------------
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RealmMountConfig {
-    pub host: PathBuf,
-    #[serde(default)]
-    pub templates: Vec<String>,
-    #[serde(default)]
-    pub ignore: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RealmConfig {
-    pub default_workspace: Option<String>,
-    #[serde(default)]
-    pub ignore_templates: IndexMap<String, Vec<String>>,
-    #[serde(default)]
-    pub mounts: IndexMap<String, RealmMountConfig>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
-pub struct ActorsConfig {
-    pub actors: HashMap<String, Vec<String>>,
-}
-
-// --------------------------------------------------------
-// 2. COMPILED RUNTIME STATE
-// --------------------------------------------------------
-
-#[derive(Clone)]
-pub struct CompiledMount {
-    pub virtual_path: String,
-    pub host_path: PathBuf,
-    pub ignore_set: GlobSet,
-}
-
-pub struct ActiveRealm {
-    pub name: String,
-    pub default_workspace: Option<String>,
-    // Sorted by virtual_path length descending for Longest-Prefix Match
-    pub mounts: Vec<CompiledMount>,
-}
-
-impl ActiveRealm {
-    /// Compiles the raw YAML config into an optimized routing table
-    pub fn from_config(name: String, config: RealmConfig) -> Result<Self, String> {
-        let mut mounts = Vec::new();
-
-        for (v_path, mount_cfg) in config.mounts {
-            let mut builder = GlobSetBuilder::new();
-
-            // 1. Inject globs from the named templates
-            for tpl_name in &mount_cfg.templates {
-                if let Some(tpl_globs) = config.ignore_templates.get(tpl_name) {
-                    for g in tpl_globs {
-                        builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
-                    }
-                } else {
-                    return Err(format!("Template '{}' not found for mount '{}'", tpl_name, v_path));
-                }
-            }
-
-            // 2. Inject ad-hoc globs for this specific mount
-            for g in &mount_cfg.ignore {
-                builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
-            }
-
-            let ignore_set = builder.build().map_err(|e| e.to_string())?;
-
-            mounts.push(CompiledMount {
-                virtual_path: v_path,
-                host_path: mount_cfg.host,
-                ignore_set,
-            });
-        }
-
-        // CRITICAL: Sort descending by length so /inforno/dev/doc is checked before /inforno/dev
-        mounts.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
-
-        Ok(Self {
-            name,
-            default_workspace: config.default_workspace,
-            mounts,
-        })
-    }
-
-    /// Safely translates a virtual LLM path to a real host path, enforcing ignores
-    pub fn secure_resolve_path(&self, virtual_path: &Path) -> Option<PathBuf> {
-        let path_str = virtual_path.to_str()?;
-
-        for mount in &self.mounts {
-            if path_str.starts_with(&mount.virtual_path) {
-                // Strip the virtual prefix to get the relative local path
-                let relative = path_str
-                    .strip_prefix(&mount.virtual_path)
-                    .unwrap_or("")
-                    .trim_start_matches('/'); // Handle trailing slashes cleanly
-
-                let host_target = mount.host_path.join(relative);
-
-                // Security / Policy check: Is this file ignored?
-                if mount.ignore_set.is_match(&host_target) {
-                    return None; // Hidden by template or ignore rules
-                }
-
-                return Some(host_target);
-            }
-        }
-
-        // Path didn't match any mount points (e.g., LLM tried to access /etc/passwd)
-        None
-    }
 }

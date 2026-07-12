@@ -85,9 +85,9 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                         };
 
                         ui.menu_button(attach_text, |ui| {
-                            if ui.button("Attach 'src/' (.rs)").clicked() {
+                            if ui.button("Attach Workspace / 'src/' (.rs)").clicked() {
                                 if let Some(root) = &state.project_root {
-                                    let src_path = root.join("src");
+                                    let src_dirs = get_workspace_src_dirs(root);
 
                                     // Recursive helper to read .rs files into Attachments
                                     fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path) {
@@ -111,19 +111,22 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                                         }
                                     }
 
-                                    read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
+                                    for src_path in src_dirs {
+                                        read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
+                                    }
                                 }
                                 ui.close();
                             }
 
                             // Generate and insert TOC
-                            if ui.button("Attach TOC of 'src/' (.rs)").clicked() {
+                            if ui.button("Attach TOC of Workspace / 'src/' (.rs)").clicked() {
                                 if let Some(root) = &state.project_root {
-                                    let src_path = root.join("src");
+                                    let src_dirs = get_workspace_src_dirs(root);
                                     let mut toc = String::new();
 
-                                    // Generate the markdown TOC
-                                    generate_rust_toc(&src_path, root, &mut toc);
+                                    for src_path in src_dirs {
+                                        generate_rust_toc(&src_path, root, &mut toc);
+                                    }
 
                                     if !toc.is_empty() {
                                         // Instead of inserting into the prompt, we create an Attachment!
@@ -782,6 +785,47 @@ fn vertical_splitter(ui: &mut egui::Ui, width: &mut f32) {
         // Clamp to prevent it from disappearing
         *width = width.max(50.0);
     }
+}
+
+/// Evaluates a project directory to see if it contains a Cargo Workspace. 
+/// Returns a list of active `src/` directories across all discovered crates.
+fn get_workspace_src_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    let cargo_toml_path = root.join("Cargo.toml");
+
+    if let Ok(content) = std::fs::read_to_string(&cargo_toml_path) {
+        if let Ok(parsed) = toml::from_str::<toml::Value>(&content) {
+            // Safely navigate the TOML AST: workspace -> members -> array
+            if let Some(members) = parsed.get("workspace").and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
+                for item in members {
+                    if let Some(clean) = item.as_str() {
+                        // Handle common rust workspace globs like "crates/*"
+                        if clean.ends_with("/*") {
+                            let base_dir = root.join(clean.trim_end_matches("/*"));
+                            if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.is_dir() && path.join("Cargo.toml").exists() {
+                                        dirs.push(path.join("src"));
+                                    }
+                                }
+                            }
+                        } else {
+                            dirs.push(root.join(clean).join("src"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to standard root/src if no workspace members found
+    if dirs.is_empty() {
+        dirs.push(root.join("src"));
+    }
+
+    // Only return directories that actually exist in the filesystem
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
 }
 
 /// Parses Rust source code and extracts high-level declarations
