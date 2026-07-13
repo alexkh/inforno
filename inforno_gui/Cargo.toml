@@ -6,6 +6,7 @@ default-run = "inforno"
 
 [dependencies]
 inforno_core = { path = "../inforno_core" }
+bulat = { path = "../bulat" }
 # only used in v04_async binary:
 reqwest = { version = "0.13.4", features = ["json"] }
 rand = "0.10.1"

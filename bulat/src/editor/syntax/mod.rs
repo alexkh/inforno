@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 
 // native parser is a compiled-in .rs file, as opposed to dynamic parser which
 // is a .rhai file
-pub type NativeParser = fn(&str) -> Vec<crate::bulat::editor::Token>;
+pub type NativeParser = fn(&str) -> Vec<crate::editor::Token>;
 
 #[derive(Clone, Debug)]
 pub struct DynamicRule {
@@ -160,7 +160,7 @@ impl Syntax {
             std::env::var("HOME").unwrap_or_default()
         ).join(".config/bulat/scripts/syntax/v1/my_c_syntax.rhai");
 
-        let loaded_syntax = match crate::bulat::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
+        let loaded_syntax = match crate::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
             Ok(syn) => {
                 println!("✅ Lazy-loaded Rhai syntax plugin for '.{}' into egui memory!", ext);
                 syn

@@ -6,7 +6,7 @@ use rust_i18n::t;
 
 use crate::{common::{Agent, Attachment, PresetSelection, Presets, router_color, text_color}, db::mod_agent_preset, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
 
-use crate::bulat::editor::{Token, Syntax, TokenType};
+use bulat::editor::{Token, Syntax, TokenType};
 
 pub struct BottomPanelState {
     pub col1_width: f32,
@@ -787,7 +787,7 @@ fn vertical_splitter(ui: &mut egui::Ui, width: &mut f32) {
     }
 }
 
-/// Evaluates a project directory to see if it contains a Cargo Workspace. 
+/// Evaluates a project directory to see if it contains a Cargo Workspace.
 /// Returns a list of active `src/` directories across all discovered crates.
 fn get_workspace_src_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();

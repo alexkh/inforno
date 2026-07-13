@@ -171,7 +171,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         let render_search_bar = |ui: &mut egui::Ui| {
             let state_id = egui::Id::new("tab_search").with(tile_id);
             let search_edit_id = state_id.with("edit");
-            let mut search_state = ui.ctx().data_mut(|d| d.get_temp::<crate::bulat::editor::CodeEditorState>(state_id).unwrap_or_default());
+            let mut search_state = ui.ctx().data_mut(|d| d.get_temp::<bulat::editor::CodeEditorState>(state_id).unwrap_or_default());
 
             let mut next = false;
             let mut prev = false;
@@ -332,12 +332,12 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
                         // The editor handles its own caching and loading now!
-                        let syntax = crate::bulat::editor::Syntax::get_or_load(ui.ctx(), ext);
+                        let syntax = bulat::editor::Syntax::get_or_load(ui.ctx(), ext);
 
-                        crate::bulat::editor::CodeEditor::default()
+                        bulat::editor::CodeEditor::default()
                             .with_search_state_id(egui::Id::new("tab_search").with(tile_id))
                             .id_source(format!("editor_code_{:?}", tile_id))
-                            .with_theme(crate::bulat::editor::ColorTheme::SV)
+                            .with_theme(bulat::editor::ColorTheme::SV)
                             .with_syntax(syntax)
                             .vscroll(true)
                             .v_auto_shrink(false)
@@ -723,13 +723,13 @@ pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: PathBuf, c
 
 pub fn open_merge_in_tab(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_tab(state, Pane::Merge { path });
-    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+    state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
     state.active_chat_id = None;
 }
 
 pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_right_pane(state, Pane::Merge { path });
-    state.merge_apps.insert(new_tile_id, crate::bulat::DiffApp::new(left, right));
+    state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
     state.active_chat_id = None;
 }
 

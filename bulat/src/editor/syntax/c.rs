@@ -1,6 +1,6 @@
 use logos::Logos;
-use crate::bulat::editor::Token;
-use crate::bulat::editor::syntax::{Syntax, TokenType};
+use crate::editor::Token;
+use crate::editor::syntax::{Syntax, TokenType};
 use std::collections::BTreeSet;
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]

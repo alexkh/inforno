@@ -1,8 +1,8 @@
 use logos::{Logos, Lexer};
 use super::Syntax;
 use std::collections::BTreeSet;
-use crate::bulat::editor::Token;
-use crate::bulat::editor::syntax::TokenType;
+use crate::editor::Token;
+use crate::editor::syntax::TokenType;
 
 // Custom callback for Rust Raw Strings
 fn lex_raw_string(lex: &mut Lexer<RustToken>) -> bool {

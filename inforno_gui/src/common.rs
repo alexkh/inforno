@@ -255,7 +255,7 @@ pub struct ChatMsgUi {
     pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
 
     // Inline Diff Tracking (Index of the chunk -> Diff App State)
-    pub inline_diffs: std::collections::HashMap<usize, crate::bulat::DiffApp>,
+    pub inline_diffs: std::collections::HashMap<usize, bulat::DiffApp>,
     pub inline_diffs_saved: std::collections::HashMap<usize, bool>,
 }
 

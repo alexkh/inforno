@@ -4,7 +4,7 @@ use super::syntax::{TokenType, rust::RustToken};
 use super::Syntax;
 use logos::Logos;
 
-use crate::bulat::editor::syntax::DynamicRule;
+use crate::editor::syntax::DynamicRule;
 
 #[derive(Default, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Token {

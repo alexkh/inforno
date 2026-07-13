@@ -1,0 +1,19 @@
+[package]
+name = "bulat"
+version = "0.1.0"
+edition = "2024"
+default-run = "bulat"
+
+[dependencies]
+# GUI
+egui = "0.33.3"
+eframe = { version = "0.33.3", features = ["persistence"] }
+
+# Logic
+logos = "0.16.1"
+similar = "2.7.0"
+regex = "1.12.4"
+serde = { version = "1.0.228", features = ["derive"] }
+
+# Scripting (if the Rhai loader lives inside bulat)
+rhai = { version = "1.25.1", features = ["sync"] }

@@ -17,7 +17,6 @@ mod openr;
 mod ollama;
 mod gui;
 mod db;
-mod bulat;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

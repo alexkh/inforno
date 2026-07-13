@@ -59,7 +59,7 @@ pub struct ChatStreamingState {
  }
 
  pub struct ActiveMerge {
-    pub app: crate::bulat::DiffApp,
+    pub app: bulat::DiffApp,
     pub path: PathBuf,
 }
 
@@ -113,7 +113,7 @@ pub struct State {
     pub active_workspace_name: Option<String>,
     pub workspace_search_buffer: String,
     pub show_workspace_selector: bool,
-    merge_apps: std::collections::HashMap<egui_tiles::TileId, crate::bulat::DiffApp>,
+    merge_apps: std::collections::HashMap<egui_tiles::TileId, bulat::DiffApp>,
     file_dialog: egui_file_dialog::FileDialog,
     pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
     search_query: String,
