@@ -5,44 +5,6 @@ use similar::{Algorithm, TextDiff, DiffOp};
 pub mod editor;
 use editor::{CodeEditor, ColorTheme, Syntax};
 
-/*
-fn main() -> Result<(), eframe::Error> {
-    // 1. Parse CLI Arguments
-    let args: Vec<String> = std::env::args().collect();
-
-    // 2. Read Files
-    // Default dummy text if no files provided (for testing/development ease)
-    let (left_content, right_content) = if args.len() == 3 {
-        (
-            fs::read_to_string(&args[1]).expect("Could not read left file"),
-            fs::read_to_string(&args[2]).expect("Could not read right file"),
-        )
-    } else {
-        (
-            "fn main() {\n    println!(\"Hello World\");\n}\n".to_string(),
-            "fn main() {\n    println!(\"Hello Rust\");\n    let x = 5;\n}\n".to_string(),
-        )
-    };
-
-    let options = NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_drag_and_drop(true),
-        ..Default::default()
-    };
-
-    // 3. Launch App with loaded content
-    eframe::run_native(
-        "Bulat",
-        options,
-        Box::new(|cc| {
-            // Setup default fonts/styles here if needed
-            Ok(Box::new(DiffApp::new(cc, left_content, right_content)))
-        }),
-    )
-}
-*/
-
 // Stores info about a diff block to render the button
 #[derive(Clone)]
 struct DiffBlock {
