@@ -4,10 +4,19 @@ version = "0.1.0"
 edition = "2024"
 default-run = "bulat"
 
+[[bin]]
+name = "bulat"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:egui", "dep:eframe"]
+
 [dependencies]
-# GUI
-egui = "0.33.3"
-eframe = { version = "0.33.3", features = ["persistence"] }
+# GUI (Optional)
+egui = { version = "0.33.3", optional = true }
+eframe = { version = "0.33.3", optional = true, features = ["persistence"] }
 
 # Logic
 logos = "0.16.1"

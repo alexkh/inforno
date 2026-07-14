@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 inforno_core = { path = "../inforno_core" }
+bulat = { path = "../bulat", default-features = false }
 dotenv = "0.15.0"
 reqwest = { version = "0.13.4", features = ["json"] }
 rhai = { version = "1.25.1", features = ["sync"] }

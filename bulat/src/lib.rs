@@ -1,11 +1,23 @@
-use eframe::egui;
-use egui::{Color32, Pos2, Rect, Vec2};
-use std::collections::BTreeMap;
-use similar::{Algorithm, TextDiff, DiffOp};
+pub mod engine;
+
+#[cfg(feature = "gui")]
 pub mod editor;
+
+#[cfg(feature = "gui")]
+use eframe::egui;
+#[cfg(feature = "gui")]
+use egui::{Color32, Pos2, Rect, Vec2};
+#[cfg(feature = "gui")]
+use std::collections::BTreeMap;
+#[cfg(feature = "gui")]
+use similar::DiffOp;
+#[cfg(feature = "gui")]
 use editor::{CodeEditor, ColorTheme, Syntax};
+#[cfg(feature = "gui")]
+use engine::BulatEngine;
 
 // Stores info about a diff block to render the button
+#[cfg(feature = "gui")]
 #[derive(Clone)]
 struct DiffBlock {
     op: DiffOp,
@@ -13,6 +25,7 @@ struct DiffBlock {
     height_in_lines: usize,
 }
 
+#[cfg(feature = "gui")]
 #[derive(Clone)]
 pub struct DiffApp {
     // The "True" content of the files
@@ -47,6 +60,7 @@ pub struct DiffApp {
     pub line_offset: usize,
 }
 
+#[cfg(feature = "gui")]
 impl DiffApp {
     pub fn new(mut left_code: String, mut right_code: String) -> Self {
 
@@ -115,10 +129,8 @@ impl DiffApp {
         let color_diff_change = Color32::from_rgba_premultiplied(0, 0, 40, 255);   // Bluish
         let color_gap = Color32::from_rgb(25, 25, 25); // Dark Grey for the "Void" gaps
 
-        //let diff = TextDiff::from_lines(&self.left_code_real, &self.right_code_real)
-        let diff = TextDiff::configure()
-            .algorithm(Algorithm::Patience)
-            .diff_lines(&self.left_code_real, &self.right_code_real);
+        // DELEGATE TO ENGINE:
+        let ops = BulatEngine::compute_diffs(&self.left_code_real, &self.right_code_real);
 
         // Track current visual line index
         let mut visual_line_idx = 0;
@@ -127,7 +139,7 @@ impl DiffApp {
         let left_lines: Vec<&str> = self.left_code_real.lines().collect();
         let right_lines: Vec<&str> = self.right_code_real.lines().collect();
 
-        for op in diff.ops() {
+        for op in ops.iter() {
             match op {
                 DiffOp::Equal { old_index, new_index, len } => {
                     // Just append the content
@@ -233,80 +245,16 @@ impl DiffApp {
     // --- MERGE LOGIC ---
 
     fn apply_merge(&mut self, op: DiffOp) {
-        // Step 1: Split both real files into individual lines
-        let left_lines: Vec<&str> = self.left_code_real.lines().collect();
-        let right_lines: Vec<&str> = self.right_code_real.lines().collect();
-
-        // Convert the left lines into owned strings so we can mutate the list
-        let mut new_left: Vec<String> = left_lines.iter().map(|s| s.to_string()).collect();
-
-        // Step 2: Apply the specific Diff Operation
-        match op {
-            DiffOp::Equal { .. } => return, // Nothing to do for matching lines
-
-            DiffOp::Delete { old_index, old_len, .. } => {
-                // DELETE: Remove `old_len` lines starting at `old_index` from the Left file
-                new_left.drain(old_index..old_index + old_len);
-            }
-
-            DiffOp::Insert { old_index, new_index, new_len } => {
-                // INSERT: Grab the new lines from the Right file
-                let text_to_insert: Vec<String> = right_lines[new_index..new_index + new_len]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-
-                // Splice them into the Left file exactly at the `old_index` insertion point
-                // (Using `old_index..old_index` means we delete 0 lines and just insert)
-                new_left.splice(old_index..old_index, text_to_insert);
-            }
-
-            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
-                // REPLACE: Grab the replacement lines from the Right file
-                let text_to_insert: Vec<String> = right_lines[new_index..new_index + new_len]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-
-                // Delete the old lines and insert the new ones in their place
-                new_left.splice(old_index..old_index + old_len, text_to_insert);
-            }
-        }
-
-        // Step 3: Rebuild the Left string
-        // Note: `join` does not add a trailing newline at the very end of the file.
-        self.left_code_real = new_left.join("\n");
-
-        // Standard code editor behavior: ensure the file ends with a trailing newline
-        if !self.left_code_real.ends_with('\n') && !self.left_code_real.is_empty() {
-            self.left_code_real.push('\n');
-        }
-
-        // Step 4: Recalculate the diff!
-        // This generates fresh, accurate buttons and indices for the next user action.
+        // DELEGATE TO PURE ENGINE:
+        self.left_code_real = BulatEngine::apply_merge(&self.left_code_real, &self.right_code_real, &op);
+        
+        // Recalculate the diff!
         self.recalculate_diff();
     }
 
     // Extracts the real code from a padded view by removing gap lines
     fn extract_real_code(view: &str) -> String {
-        let mut real = String::new();
-        let lines: Vec<&str> = view.split('\n').collect();
-
-        let mut is_first = true;
-        for line in lines {
-            // If the line is exactly our invisible gap marker, ignore it
-            if line == "\u{200B}" {
-                continue;
-            }
-
-            if !is_first {
-                real.push('\n');
-            }
-            // Strip the marker in case the user manually typed text INTO a gap line
-            real.push_str(&line.replace('\u{200B}', ""));
-            is_first = false;
-        }
-        real
+        BulatEngine::extract_real_code(view)
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
