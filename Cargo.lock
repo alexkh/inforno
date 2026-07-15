@@ -3533,11 +3533,29 @@ dependencies = [
 name = "inforno_core"
 version = "0.1.0"
 dependencies = [
+ "bulat",
+ "chrono",
+ "directories",
+ "futures-util",
  "globset",
  "indexmap",
+ "ollama-rs",
+ "openrouter-rs",
+ "regex",
+ "reqwest 0.13.4",
+ "rhai",
+ "ron 0.12.2",
+ "rusqlite",
+ "secrecy",
  "serde",
+ "serde_json",
  "serde_yaml",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

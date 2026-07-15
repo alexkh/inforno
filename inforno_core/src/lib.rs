@@ -1,8 +1,15 @@
+pub mod common;
+pub mod db;
+pub mod ollama;
+pub mod openr;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmMountConfig {
@@ -13,7 +20,7 @@ pub struct RealmMountConfig {
     pub ignore: Vec<String>,
     pub description: Option<String>,
     // E.g., "project", "workspace", "docs", "static"
-    pub kind: Option<String>, 
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -38,7 +45,7 @@ pub struct CompiledMount {
 pub struct ActiveRealm {
     pub name: String,
     pub default_workspace: Option<String>,
-    pub mounts: Vec<CompiledMount>, 
+    pub mounts: Vec<CompiledMount>,
 }
 
 impl ActiveRealm {

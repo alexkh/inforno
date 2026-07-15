@@ -1,7 +1,9 @@
 use egui::{Color32, RichText};
 use rust_i18n::t;
 
-use crate::{common::{FileOp, FileOpMsg, err_color}, db::reset_sandbox_db, gui::State, mybtn};
+use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_sandbox_db};
+use crate::state::{State, err_color};
+use crate::mybtn;
 
 pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
     egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -156,7 +158,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
             ui.separator(); // Visual spacer
 
-            let edit_resp = crate::gui::split_button::SplitButton::new("📝 Edit")
+            let edit_resp = crate::split_button::SplitButton::new("📝 Edit")
                 .id_salt("top_panel_edit_btn")
                 .main_tooltip("Open file in editor")
                 .arrow_tooltip(t!("right_button_tooltip"))
@@ -204,7 +206,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                         d.get_temp_mut_or_insert_with(cache_id, || {
                                             let mut parsed = vec![".".to_string()];
                                             let cargo_path = mount.host_path.join("Cargo.toml");
-                                            
+
                                             if let Ok(content) = std::fs::read_to_string(&cargo_path) {
                                                 if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
                                                     if let Some(arr) = toml_val.get("workspace").and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
@@ -254,7 +256,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                                 if ui.selectable_label(is_selected, format!("📁 {}", member)).clicked() {
                                                     // Save selection state
                                                     ctx.data_mut(|d| d.insert_temp(egui::Id::new("sub_project"), member.clone()));
-                                                    
+
                                                     // Update actual project root so IDE/chat targets the new path!
                                                     if member == "." {
                                                         state.project_root = Some(mount.host_path.clone());
@@ -294,7 +296,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                 .show_ui(ui, |ui| {
                                     for mount in &realm.mounts {
                                         let is_selected = active_mount.map_or(false, |m| m.virtual_path == mount.virtual_path);
-                                        
+
                                         let icon = match mount.kind.to_lowercase().as_str() {
                                             "workspace" => "🗄",
                                             "docs" => "📚",
@@ -308,7 +310,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                             color: ui.visuals().text_color(),
                                             ..Default::default()
                                         });
-                                        
+
                                         if let Some(desc) = &mount.description {
                                             item_job.append(desc, 0.0, egui::text::TextFormat {
                                                 color: ui.visuals().weak_text_color(),
@@ -320,7 +322,7 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                                         if ui.selectable_label(is_selected, item_job).clicked() {
                                             state.active_workspace_name = Some(mount.virtual_path.clone());
                                             state.project_root = Some(mount.host_path.clone());
-                                            
+
                                             // Reset the sub-project cache state when mount changes
                                             ctx.data_mut(|d| d.insert_temp(egui::Id::new("sub_project"), String::from(".")));
                                         }

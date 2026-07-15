@@ -1,21 +1,22 @@
 use egui::{Margin, RichText, Stroke};
 use egui_commonmark::CommonMarkViewer;
 use rust_i18n::t;
-use crate::common::Attachment;
-use crate::gui::math_render::compile_math_to_svg_embedded;
+use inforno_core::common::Attachment;
+use crate::math_render::compile_math_to_svg_embedded;
 use regex::Regex;
 use std::sync::OnceLock;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use bulat::editor::{CodeEditor, Syntax, ColorTheme};
-use crate::gui::SplitButton;
+use crate::split_button::SplitButton;
 
-use crate::{
+use inforno_core::{
     common::{
-        ChatMsg, ChatMsgUi, MsgRole,
+        ChatMsg, MsgRole,
     },
-    gui::{State},
 };
+
+use crate::state::{State, ChatMsgUi};
 
 // --- Markdown Chunker ---
 
@@ -147,7 +148,7 @@ fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
 }
 
 fn resolve_filepath(
-    realm: &Option<crate::common::ActiveRealm>,
+    realm: &Option<inforno_core::common::ActiveRealm>,
     project_root: &Option<std::path::PathBuf>,
     requested_path: &str
 ) -> Option<(std::path::PathBuf, bool)> {
@@ -406,7 +407,7 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         );
 
         // 2. Create the behavior bridge WITH the new action queue
-        let mut behavior = crate::gui::panes::PaneBehavior {
+        let mut behavior = crate::panes::PaneBehavior {
             state,
             split_requests: Vec::new(),
             close_requests: Vec::new(),
@@ -454,10 +455,10 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
             if let Some(root_id) = tree.root {
                 // Determine whether to split horizontally or vertically
                 let new_root = match direction {
-                    crate::gui::panes::SplitAction::Right => {
+                    crate::panes::SplitAction::Right => {
                         tree.tiles.insert_horizontal_tile(vec![root_id, new_tabs])
                     }
-                    crate::gui::panes::SplitAction::Down => {
+                    crate::panes::SplitAction::Down => {
                         tree.tiles.insert_vertical_tile(vec![root_id, new_tabs])
                     }
                 };
@@ -488,15 +489,15 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         for (chat_id, open_right) in open_chat_requests {
             // Guarantee the target chat is loaded into application memory
             if !state.open_chats.contains_key(&chat_id) {
-                let loaded_chat = crate::db::fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
+                let loaded_chat = inforno_core::db::fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
                 state.open_chats.insert(chat_id, loaded_chat);
             }
 
             // Route the UI appropriately
             if open_right {
-                crate::gui::panes::open_chat_in_right_pane(state, chat_id);
+                crate::panes::open_chat_in_right_pane(state, chat_id);
             } else {
-                crate::gui::panes::open_chat_in_tab(state, chat_id);
+                crate::panes::open_chat_in_tab(state, chat_id);
             }
         }
     });
@@ -813,19 +814,19 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             if draft_lost_focus {
                 let draft = chat.draft_note.trim();
                 if !draft.is_empty() {
-                    let mut new_msg = crate::common::ChatMsg {
+                    let mut new_msg = inforno_core::common::ChatMsg {
                         id: 0,
-                        msg_role: crate::common::MsgRole::Developer,
+                        msg_role: inforno_core::common::MsgRole::Developer,
                         content: chat.draft_note.clone(),
                         ..Default::default()
                     };
 
-                    if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut new_msg) {
+                    if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut new_msg) {
                         let new_id = new_msg.id;
                         chat.msg_pool.insert(new_id, new_msg);
                         for agent in chat.agents.iter_mut() {
                             agent.msg_ids.push(new_id);
-                            let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                            let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
                         }
                     }
                     chat.draft_note.clear();
@@ -835,7 +836,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     }
 
     for (id, content) in db_updates {
-        let _ = crate::db::mod_msg_content(&state.db_conn, id, &content);
+        let _ = inforno_core::db::mod_msg_content(&state.db_conn, id, &content);
     }
 
     // --- NEW: Render Floating Minimalist Slider at the top of the viewport ---
@@ -908,8 +909,8 @@ fn render_assistant_grid(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<crate::common::ActiveRealm>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
     let effective_width = total_width - 38.0;
@@ -964,8 +965,8 @@ fn render_user_msg(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<crate::common::ActiveRealm>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
     let left_offset = 127.0; // Matches the left outer margin of the user frame
@@ -1097,8 +1098,8 @@ fn render_assistant_msg(
     item_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<crate::common::ActiveRealm>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -1170,8 +1171,8 @@ fn render_msg_content(
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<crate::common::ActiveRealm>,
-    op_tx: &std::sync::mpsc::Sender<crate::common::FileOpMsg>,
+    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -1289,16 +1290,16 @@ fn render_msg_content(
                                 .show(ui);
 
                             if open_resp.main_clicked {
-                                let _ = op_tx.send(crate::common::FileOpMsg {
-                                    op: crate::common::FileOp::OpenEditor,
+                                let _ = op_tx.send(inforno_core::common::FileOpMsg {
+                                    op: inforno_core::common::FileOp::OpenEditor,
                                     cancelled: false,
                                     path: Some(path.clone()),
                                     ..Default::default()
                                 });
                             }
                             if open_resp.arrow_clicked {
-                                let _ = op_tx.send(crate::common::FileOpMsg {
-                                    op: crate::common::FileOp::OpenEditorRight,
+                                let _ = op_tx.send(inforno_core::common::FileOpMsg {
+                                    op: inforno_core::common::FileOp::OpenEditorRight,
                                     cancelled: false,
                                     path: Some(path.clone()),
                                     ..Default::default()
@@ -1344,8 +1345,8 @@ fn render_msg_content(
                                 // 4. Final fallback to the whole snippet body
                                 let final_right_content = right_content.unwrap_or_else(|| clean_snippet.to_string());
 
-                                let _ = op_tx.send(crate::common::FileOpMsg {
-                                    op: if right_pane { crate::common::FileOp::OpenMergeRight } else { crate::common::FileOp::OpenMerge },
+                                let _ = op_tx.send(inforno_core::common::FileOpMsg {
+                                    op: if right_pane { inforno_core::common::FileOp::OpenMergeRight } else { inforno_core::common::FileOp::OpenMerge },
                                     path: Some(path.clone()),
                                     left_content: Some(original_content),
                                     right_content: Some(final_right_content),
@@ -1359,8 +1360,8 @@ fn render_msg_content(
                         } else if let Some(path) = &filepath {
                             // Fallback button if there's no project root but we have a filepath
                             if ui.button(format!("📝 {}", path)).on_hover_text("Open file in editor").clicked() {
-                                let _ = op_tx.send(crate::common::FileOpMsg {
-                                    op: crate::common::FileOp::OpenEditor,
+                                let _ = op_tx.send(inforno_core::common::FileOpMsg {
+                                    op: inforno_core::common::FileOp::OpenEditor,
                                     cancelled: false,
                                     path: Some(std::path::PathBuf::from(path)),
                                     ..Default::default()

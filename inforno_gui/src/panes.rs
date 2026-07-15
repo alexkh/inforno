@@ -3,7 +3,7 @@ use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::gui::SplitButton;
+use crate::split_button::SplitButton;
 
 /// This enum represents the data we save to the .ron file.
 /// It is lightweight and only contains the instructions on WHAT to render.
@@ -12,7 +12,7 @@ pub enum Pane {
     Chat { chat_id: i64 },
     Editor { path: PathBuf, content: String },
     Merge { path: PathBuf },
-    SearchResults { query: String, results: Vec<crate::common::SearchResult> },
+    SearchResults { query: String, results: Vec<inforno_core::common::SearchResult> },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -23,7 +23,7 @@ pub enum SplitAction {
 
 /// This is the bridge between egui_tiles and your application state.
 pub struct PaneBehavior<'a> {
-    pub state: &'a mut crate::gui::State,
+    pub state: &'a mut crate::state::State,
     // A queue to hold our split requests until the UI is done drawing
     pub split_requests: Vec<(Pane, SplitAction)>,
     // A queue to hold tabs that need to be closed
@@ -300,7 +300,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             .stick_to_bottom(true)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                crate::gui::chat::render_chat_messages(
+                                crate::chat::render_chat_messages(
                                     ui,
                                     self.state,
                                     *chat_id,
@@ -394,7 +394,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                             // --- USE THE NEW HELPER HERE ---
                                             // We pass the chat title to act as the button text.
                                             // It returns true/false for which part was clicked.
-                                            let btn_resp = crate::gui::SplitButton::new(&res.chat_title)
+                                            let btn_resp = SplitButton::new(&res.chat_title)
                                                 .id_salt(res.chat_id)
                                                 .arrow_tooltip("Open in right pane")
                                                 .show(ui);
@@ -497,7 +497,7 @@ pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>) -> (
 // --- UNIFIED SPAWNER HELPERS ---
 
 /// Core engine logic to spawn a pane into the currently active tab container.
-fn spawn_in_tab(state: &mut crate::gui::State, new_pane: Pane) -> egui_tiles::TileId {
+fn spawn_in_tab(state: &mut crate::state::State, new_pane: Pane) -> egui_tiles::TileId {
     let prev_active_id = state.active_tile_id;
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
 
@@ -568,7 +568,7 @@ fn spawn_in_tab(state: &mut crate::gui::State, new_pane: Pane) -> egui_tiles::Ti
 }
 
 /// Core engine logic to spawn a pane into the column to the right (or create one).
-fn spawn_in_right_pane(state: &mut crate::gui::State, new_pane: Pane) -> egui_tiles::TileId {
+fn spawn_in_right_pane(state: &mut crate::state::State, new_pane: Pane) -> egui_tiles::TileId {
     let active_id = match state.active_tile_id {
         Some(id) => id,
         None => {
@@ -683,7 +683,7 @@ fn spawn_in_right_pane(state: &mut crate::gui::State, new_pane: Pane) -> egui_ti
 
 // --- PUBLIC API WRAPPERS ---
 
-pub fn open_chat_in_tab(state: &mut crate::gui::State, chat_id: i64) {
+pub fn open_chat_in_tab(state: &mut crate::state::State, chat_id: i64) {
     // If already open, just focus it
     let mut found_tile_id = None;
     for (tile_id, tile) in state.pane_tree.tiles.iter() {
@@ -706,34 +706,34 @@ pub fn open_chat_in_tab(state: &mut crate::gui::State, chat_id: i64) {
     state.active_chat_id = Some(chat_id); // Connect the bottom panel
 }
 
-pub fn open_chat_in_right_pane(state: &mut crate::gui::State, chat_id: i64) {
+pub fn open_chat_in_right_pane(state: &mut crate::state::State, chat_id: i64) {
     spawn_in_right_pane(state, Pane::Chat { chat_id });
     state.active_chat_id = Some(chat_id);
 }
 
-pub fn open_editor_in_tab(state: &mut crate::gui::State, path: PathBuf, content: String) {
+pub fn open_editor_in_tab(state: &mut crate::state::State, path: PathBuf, content: String) {
     spawn_in_tab(state, Pane::Editor { path, content });
     state.active_chat_id = None; // Disconnect the bottom panel
 }
 
-pub fn open_editor_in_right_pane(state: &mut crate::gui::State, path: PathBuf, content: String) {
+pub fn open_editor_in_right_pane(state: &mut crate::state::State, path: PathBuf, content: String) {
     spawn_in_right_pane(state, Pane::Editor { path, content });
     state.active_chat_id = None;
 }
 
-pub fn open_merge_in_tab(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+pub fn open_merge_in_tab(state: &mut crate::state::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_tab(state, Pane::Merge { path });
     state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
     state.active_chat_id = None;
 }
 
-pub fn open_merge_in_right_pane(state: &mut crate::gui::State, path: PathBuf, left: String, right: String) {
+pub fn open_merge_in_right_pane(state: &mut crate::state::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_right_pane(state, Pane::Merge { path });
     state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
     state.active_chat_id = None;
 }
 
-pub fn open_search_results_in_tab(state: &mut crate::gui::State, query: String, results: Vec<crate::common::SearchResult>) {
+pub fn open_search_results_in_tab(state: &mut crate::state::State, query: String, results: Vec<inforno_core::common::SearchResult>) {
     spawn_in_tab(state, Pane::SearchResults { query, results });
     state.active_chat_id = None;
 }

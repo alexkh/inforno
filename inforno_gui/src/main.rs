@@ -8,15 +8,23 @@ use clap::Parser;
 use egui::ViewportBuilder;
 use tokio::runtime::Runtime;
 
-use crate::gui::MyAppPermanent;
+use crate::state::MyAppPermanent;
 
 rust_i18n::i18n!("locales");
 
-mod common;
-mod openr;
-mod ollama;
-mod gui;
-mod db;
+// The flattened UI modules
+mod agent_config;
+mod autocomplete;
+mod bottom_panel;
+mod chat;
+mod key_manager;
+mod math_render;
+mod panes;
+mod preset_editor;
+mod side_panel;
+mod split_button;
+mod state;
+mod top_panel;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -117,7 +125,7 @@ fn main() -> eframe::Result {
             // Determine target realm (CLI arg takes priority over global config)
             let mut target_realm = args.realm.clone();
             let mut positional_path = args.project_dir.clone();
-            
+
             // Allow positional argument to act as a realm name (e.g., `inforno inforno`)
             if target_realm.is_none() {
                 if let Some(pos_arg) = &positional_path {
@@ -149,7 +157,7 @@ fn main() -> eframe::Result {
                 // 1. Booting into a Realm Environment
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                     let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
-                    
+
                     if realm_dir.exists() {
                         sandbox = Some(realm_dir.join("info.rno"));
                         active_realm_name = Some(realm_name);
@@ -174,7 +182,7 @@ fn main() -> eframe::Result {
 
             configure_fonts(&cc.egui_ctx);
 
-            Ok(Box::new(gui::MyApp::new(cc, MyAppPermanent {
+            Ok(Box::new(state::MyApp::new(cc, MyAppPermanent {
                 rt: rt_handle,
                 sandbox,
                 pending_project_init: std::sync::Mutex::new(pending_project_init),

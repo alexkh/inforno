@@ -4,8 +4,8 @@ use rust_i18n::t;
 use secrecy::ExposeSecret;
 use secrecy::zeroize::Zeroize;
 
-use crate::common::{ApiKey, KEYRING_INFO};
-use super::State;
+use inforno_core::common::{ApiKey, KEYRING_INFO};
+use crate::state::State;
 
 pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
     egui::Window::new(t!("api_key_manager"))

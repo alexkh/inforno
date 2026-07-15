@@ -4,7 +4,8 @@ use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use crate::{common::{Agent, Attachment, PresetSelection, Presets, router_color, text_color}, db::mod_agent_preset, gui::{State, agent_config::AgentConfigState, reload_db_chats}};
+use inforno_core::{common::{Agent, Attachment, PresetSelection, Presets}, db::mod_agent_preset};
+use crate::{agent_config::AgentConfigState, state::{State, reload_db_chats, router_color, text_color}};
 
 use bulat::editor::{Token, Syntax, TokenType};
 
@@ -131,7 +132,7 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                                     if !toc.is_empty() {
                                         // Instead of inserting into the prompt, we create an Attachment!
                                         state.bottom_panel_state.pending_attachments.push(
-                                            crate::common::Attachment {
+                                            inforno_core::common::Attachment {
                                                 filename: "project_toc.md".to_string(),
                                                 mime_type: "text/markdown".to_string(),
                                                 content: toc,
@@ -307,7 +308,7 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context) {
     // Safely get or create the active chat
     let active_chat_id = state.active_chat_id.unwrap_or(0);
     if !state.open_chats.contains_key(&active_chat_id) {
-        state.open_chats.insert(active_chat_id, crate::common::Chat::default());
+        state.open_chats.insert(active_chat_id, inforno_core::common::Chat::default());
     }
 
     egui::ScrollArea::vertical().id_salt("agent_scroll").show(ui, |ui| {
@@ -582,7 +583,7 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
             .take(40)
             .collect::<String>();
 
-        match crate::db::mk_chat(&state.db_conn, &mut chat) {
+        match inforno_core::db::mk_chat(&state.db_conn, &mut chat) {
             Ok(()) => reload_db_chats(&state.db_conn, &mut state.db_chats),
             Err(e) => {
                 eprintln!("CRITICAL DB ERROR (create chat): {}", e);
@@ -596,7 +597,7 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
     if old_chat_id <= 0 && old_chat_id != new_active_id {
         for (_tile_id, tile) in state.pane_tree.tiles.iter_mut() {
-            if let egui_tiles::Tile::Pane(crate::gui::panes::Pane::Chat { chat_id }) = tile {
+            if let egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id }) = tile {
                 if *chat_id == old_chat_id {
                     *chat_id = new_active_id;
                 }
@@ -607,18 +608,18 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     if state.bottom_panel_state.show_system_prompt {
         let sys_content = state.bottom_panel_state.system_prompt_edited.trim();
         if !sys_content.is_empty() {
-            let mut sys_msg = crate::common::ChatMsg {
+            let mut sys_msg = inforno_core::common::ChatMsg {
                 id: 0,
-                msg_role: crate::common::MsgRole::System,
+                msg_role: inforno_core::common::MsgRole::System,
                 content: state.bottom_panel_state.system_prompt_edited.clone(),
                 ..Default::default()
             };
 
-            if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut sys_msg) {
+            if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut sys_msg) {
                 chat.msg_pool.insert(sys_msg.id, sys_msg.clone());
                 for agent in chat.agents.iter_mut() {
                     agent.msg_ids.push(sys_msg.id);
-                    let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                    let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
                 }
                 state.bottom_panel_state.show_system_prompt = false;
             }
@@ -633,15 +634,15 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
     state.bottom_panel_state.pending_attachments.clear();
 
-    let mut usr_msg = crate::common::ChatMsg {
+    let mut usr_msg = inforno_core::common::ChatMsg {
         id: 0,
-        msg_role: crate::common::MsgRole::User,
+        msg_role: inforno_core::common::MsgRole::User,
         content: prompt_text.clone(),
         details: details_json,
         ..Default::default()
     };
 
-    if let Err(e) = crate::db::mk_msg(&state.db_conn, &mut usr_msg) {
+    if let Err(e) = inforno_core::db::mk_msg(&state.db_conn, &mut usr_msg) {
         eprintln!("CRITICAL DB ERROR (save msg): {}", e);
         state.open_chats.insert(new_active_id, chat);
         state.active_chat_id = Some(new_active_id);
@@ -667,7 +668,7 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
     for (_index, agent) in chat.agents.iter_mut().enumerate() {
         agent.msg_ids.push(usr_msg_id);
-        let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+        let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
     }
 
     let shared_chat = std::sync::Arc::new(chat.clone());
@@ -680,19 +681,19 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         if chat.agents[index].preset.is_none() {
             let preset_id = chat.agents[index].preset_selection.id;
             chat.agents[index].preset = state.presets.get(preset_id).cloned();
-            let _ = crate::db::update_agent_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
+            let _ = inforno_core::db::update_agent_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
         }
 
         let Some(mut preset) = chat.agents[index].preset.clone() else {
             continue;
         };
 
-        if preset.chat_router == crate::common::ChatRouter::Openrouter {
+        if preset.chat_router == inforno_core::common::ChatRouter::Openrouter {
             preset.api_key = state.openrouter_api_key.clone();
         }
 
         let tx = tx_base.clone();
-        let que = crate::common::ChatQue {
+        let que = inforno_core::common::ChatQue {
             preset,
             chat: shared_chat.clone(),
             agent_ind: index,
@@ -702,16 +703,16 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
             let agent = &chat.agents[index];
             if let Some(override_p) = &agent.preset {
                 // Explicitly annotate Option<Preset> here to satisfy E0282
-                let override_preset: Option<crate::common::Preset> = Some(override_p.clone());
+                let override_preset: Option<inforno_core::common::Preset> = Some(override_p.clone());
                 (override_preset, agent.preset_selection.id)
             } else {
                 (state.presets.get(agent.preset_selection.id).cloned(), agent.preset_selection.id)
             }
         };
 
-        let mut assistant_msg = crate::common::ChatMsg {
+        let mut assistant_msg = inforno_core::common::ChatMsg {
             id: 0,
-            msg_role: crate::common::MsgRole::Assistant,
+            msg_role: inforno_core::common::MsgRole::Assistant,
             content: String::new(),
             reasoning: None,
             preset: effective_preset,
@@ -720,17 +721,17 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
             ..Default::default()
         };
 
-        if let Ok(()) = crate::db::mk_msg(&state.db_conn, &mut assistant_msg) {
+        if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut assistant_msg) {
             state.chat_streaming_state.msg_ids[index] = assistant_msg.id;
 
             if let Some(omnis) = chat.agents.get_mut(0) {
                 omnis.msg_ids.push(assistant_msg.id);
-                let _ = crate::db::mod_agent_msgs(&state.db_conn, omnis.id, &omnis.msg_ids);
+                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, omnis.id, &omnis.msg_ids);
             }
 
             if let Some(agent) = chat.agents.get_mut(index) {
                 agent.msg_ids.push(assistant_msg.id);
-                let _ = crate::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
             }
 
             chat.msg_pool.insert(assistant_msg.id, assistant_msg);
@@ -738,13 +739,15 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
         state.chat_streaming_state.bitmask |= 1 << index as u128;
         let ctx_clone = ctx.clone();
+        // Bundle the egui repaint trigger into a pure function
+        let wakeup: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || ctx_clone.request_repaint());
         let thread_abort = abort_flag.clone();
 
         rt_handle.spawn(async move {
-            if let Err(e) = crate::common::run_chat_stream_router(que, tx.clone(), &ctx_clone, thread_abort).await {
-                let _ = tx.send(crate::common::ChatStreamEvent::Error(index, format!("Error: {}", e)));
+            if let Err(e) = inforno_core::common::run_chat_stream_router(que, tx.clone(), wakeup, thread_abort).await {
+                let _ = tx.send(inforno_core::common::ChatStreamEvent::Error(index, format!("Error: {}", e)));
             }
-            let _ = tx.send(crate::common::ChatStreamEvent::Finished(index));
+            let _ = tx.send(inforno_core::common::ChatStreamEvent::Finished(index));
         });
     }
 

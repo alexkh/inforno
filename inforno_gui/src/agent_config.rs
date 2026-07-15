@@ -1,10 +1,10 @@
 use egui::{Vec2b, Window};
 use rust_i18n::t;
-use crate::common::ModelOptions;
-use crate::db::update_agent_preset_snapshot;
-use crate::gui::State;
+use inforno_core::common::ModelOptions;
+use inforno_core::db::update_agent_preset_snapshot;
+use crate::state::State;
 // Import the reusable components
-use crate::gui::preset_editor::{
+use crate::preset_editor::{
     PresetEditorState, render_common_options,
 };
 

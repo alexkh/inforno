@@ -43,7 +43,7 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
 pub async fn do_openr_chat_sync(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
-    ctx: &egui::Context,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("using key: {}", mask_key_secure(
@@ -100,7 +100,7 @@ pub async fn do_openr_chat_sync(
                             query.agent_ind, 
                             reasoning.to_string()
                         ));
-                        ctx.request_repaint();
+                        wakeup();
                     }
                 }
                 
@@ -111,7 +111,7 @@ pub async fn do_openr_chat_sync(
                             query.agent_ind, 
                             content.to_string()
                         ));
-                        ctx.request_repaint();
+                        wakeup();
                     }
                 }
             }
@@ -121,12 +121,12 @@ pub async fn do_openr_chat_sync(
                 query.agent_ind, 
                 format!("OpenRouter sync error: {:?}", e)
             ));
-            ctx.request_repaint();
+            wakeup();
         }
     }
 
     println!("Finished sync request from OpenRouter");
-    ctx.request_repaint();
+    wakeup();
     Ok(())
 }
 
@@ -134,7 +134,7 @@ pub async fn do_openr_chat_sync(
 pub async fn do_openr_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
-    ctx: &egui::Context,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("using key: {}", mask_key_secure(
@@ -196,14 +196,14 @@ pub async fn do_openr_chat_stream(
                         if !reasoning.is_empty() {
                             let _ = tx.send(ChatStreamEvent::Reasoning(
                                     query.agent_ind, reasoning.to_string()));
-                            ctx.request_repaint();
+                            wakeup();
                         }
                     }
                     if let Some(content) = choice.content() {
                         if !content.is_empty() {
                             let _ = tx.send(ChatStreamEvent::Content(
                                     query.agent_ind, content.to_string()));
-                            ctx.request_repaint();
+                            wakeup();
                         }
                     }
                 }
@@ -211,12 +211,12 @@ pub async fn do_openr_chat_stream(
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(
                             query.agent_ind, e.to_string()));
-                ctx.request_repaint();
+                wakeup();
             }
         }
     }
     println!("Finished stream from OpenRouter");
-    ctx.request_repaint();
+    wakeup();
     Ok(())
 }
 

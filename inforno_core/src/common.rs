@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, LazyLock};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use egui::Color32;
 use openrouter_rs::Message;
 use openrouter_rs::types::Role;
 use rusqlite::{Connection, ToSql};
@@ -20,63 +19,8 @@ use ollama_rs::generation::images::Image;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-pub use inforno_core::*;
 
 pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
-
-// Global static storage
-pub static THEME_COLORS: LazyLock<RwLock<AppColors>> = LazyLock::new(|| {
-    RwLock::new(AppColors::default())
-});
-
-#[derive(Clone, Copy)]
-pub struct AppColors {
-    pub cloud: Color32,
-    pub local: Color32,
-    pub text: Color32,
-    pub strong: Color32,
-    pub err: Color32,
-}
-
-impl Default for AppColors {
-    fn default() -> Self {
-        Self {
-            cloud: Color32::from_rgb(0, 0, 255), // Default Blue
-            local: Color32::from_rgb(127, 127, 127), // Default Grey
-            text: Color32::from_rgb(127, 127, 127), // Default Grey
-            strong: Color32::from_rgb(127, 127, 127), // Default Grey
-            err: Color32::from_rgb(255, 0, 0), // Default Red
-        }
-    }
-}
-
-// Helper functions for clean access
-pub fn cloud_color() -> Color32 {
-    THEME_COLORS.read().unwrap().cloud
-}
-
-pub fn local_color() -> Color32 {
-    THEME_COLORS.read().unwrap().local
-}
-
-pub fn text_color() -> Color32 {
-    THEME_COLORS.read().unwrap().text
-}
-
-pub fn strong_color() -> Color32 {
-    THEME_COLORS.read().unwrap().strong
-}
-
-pub fn err_color() -> Color32 {
-    THEME_COLORS.read().unwrap().err
-}
-
-pub fn router_color(router: &ChatRouter) -> Color32 {
-    match router {
-        ChatRouter::Ollama => local_color(),
-        ChatRouter::Openrouter => cloud_color(),
-    }
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
@@ -236,27 +180,6 @@ impl ToSql for ChatRouter {
         // Use the derived Display trait
         Ok(ToSqlOutput::from(self.to_string()))
     }
-}
-
-/*
-impl fmt::Display for ChatRouter {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ChatRouter::Ollama => write!(f, "Ollama"),
-            ChatRouter::Openrouter => write!(f, "Openrouter"),
-        }
-    }
-}
-*/
-
-#[derive(Default, Clone)]
-pub struct ChatMsgUi {
-    pub show_raw: bool,
-    pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
-
-    // Inline Diff Tracking (Index of the chunk -> Diff App State)
-    pub inline_diffs: std::collections::HashMap<usize, bulat::DiffApp>,
-    pub inline_diffs_saved: std::collections::HashMap<usize, bool>,
 }
 
 // ChatMsg to be stored in the database
@@ -763,7 +686,7 @@ pub fn mask_key_secure(key: &str) -> String {
 pub async fn run_chat_stream_router(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
-    ctx: &egui::Context,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Agent options: {:?}", &query.preset.options);
@@ -774,16 +697,16 @@ pub async fn run_chat_stream_router(
     match query.preset.chat_router {
         ChatRouter::Openrouter => {
             if use_streaming {
-                crate::openr::do_openr_chat_stream(query, tx, ctx, abort_flag).await
+                crate::openr::do_openr_chat_stream(query, tx, wakeup, abort_flag).await
             } else {
-                crate::openr::do_openr_chat_sync(query, tx, ctx, abort_flag).await
+                crate::openr::do_openr_chat_sync(query, tx, wakeup, abort_flag).await
             }
         }
         ChatRouter::Ollama => {
             if use_streaming {
-                crate::ollama::do_ollama_chat_stream(query, tx, ctx, abort_flag).await
+                crate::ollama::do_ollama_chat_stream(query, tx, wakeup, abort_flag).await
             } else {
-                crate::ollama::do_ollama_chat_sync(query, tx, ctx, abort_flag).await
+                crate::ollama::do_ollama_chat_sync(query, tx, wakeup, abort_flag).await
             }
         }
     }
@@ -794,4 +717,104 @@ pub struct SearchResult {
     pub chat_id: i64,
     pub chat_title: String,
     pub snippet: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RealmMountConfig {
+    pub host: PathBuf,
+    #[serde(default)]
+    pub templates: Vec<String>,
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    pub description: Option<String>,
+    // E.g., "project", "workspace", "docs", "static"
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RealmConfig {
+    pub default_workspace: Option<String>,
+    #[serde(default)]
+    pub ignore_templates: IndexMap<String, Vec<String>>,
+    #[serde(default)]
+    pub mounts: IndexMap<String, RealmMountConfig>,
+}
+
+#[derive(Clone)]
+pub struct CompiledMount {
+    pub virtual_path: String,
+    pub host_path: PathBuf,
+    pub ignore_set: Arc<GlobSet>,
+    pub description: Option<String>,
+    pub kind: String, // Defaults to "project", but can also be "workspace"
+}
+
+#[derive(Clone)]
+pub struct ActiveRealm {
+    pub name: String,
+    pub default_workspace: Option<String>,
+    pub mounts: Vec<CompiledMount>,
+}
+
+impl ActiveRealm {
+    pub fn from_config(name: String, config: RealmConfig) -> Result<Self, String> {
+        let mut mounts = Vec::new();
+
+        for (v_path, mount_cfg) in config.mounts {
+            let mut builder = GlobSetBuilder::new();
+
+            for tpl_name in &mount_cfg.templates {
+                if let Some(tpl_globs) = config.ignore_templates.get(tpl_name) {
+                    for g in tpl_globs {
+                        builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+                    }
+                } else {
+                    return Err(format!("Template '{}' not found for mount '{}'", tpl_name, v_path));
+                }
+            }
+
+            for g in &mount_cfg.ignore {
+                builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+            }
+
+            let ignore_set = builder.build().map_err(|e| e.to_string())?;
+            let kind = mount_cfg.kind.unwrap_or_else(|| "project".to_string());
+
+            mounts.push(CompiledMount {
+                virtual_path: v_path,
+                host_path: mount_cfg.host,
+                ignore_set: ignore_set.into(),
+                description: mount_cfg.description,
+                kind,
+            });
+        }
+
+        mounts.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
+
+        Ok(Self {
+            name,
+            default_workspace: config.default_workspace,
+            mounts,
+        })
+    }
+
+    pub fn secure_resolve_path(&self, virtual_path: &Path) -> Option<PathBuf> {
+        let path_str = virtual_path.to_str()?;
+        for mount in &self.mounts {
+            if path_str.starts_with(&mount.virtual_path) {
+                let relative = path_str
+                    .strip_prefix(&mount.virtual_path)
+                    .unwrap_or("")
+                    .trim_start_matches('/');
+                let host_target = mount.host_path.join(relative);
+                if mount.ignore_set.is_match(&host_target) { return None; }
+                return Some(host_target);
+            }
+        }
+        None
+    }
+}
+
+pub fn core_test() {
+    println!("Core is linked!");
 }

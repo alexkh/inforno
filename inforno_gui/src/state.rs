@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, RwLock, Mutex};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use dotenv::dotenv;
 use eframe::egui::{self};
@@ -10,34 +10,84 @@ use egui_commonmark::CommonMarkCache;
 use keyring::Entry;
 use rusqlite::Connection;
 use tokio::runtime::Handle;
-use crate::common::{self, ApiKey, ChatMsgUi, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, OllamaDownloading, Presets, THEME_COLORS, load_presets};
-use crate::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, is_table_empty, mod_msg_content_reasoning};
-use crate::db::cache::{get_cache_db_conn, get_ollama_model_installed, get_ollama_model_names, get_openr_model_names, populate_ollama_installed, populate_openr_model};
-use crate::gui::agent_config::{AgentConfigState, ui_agent_config};
-use crate::gui::bottom_panel::{BottomPanelState, ui_bottom_panel};
-use crate::gui::chat::ui_chat;
-use crate::gui::key_manager::ui_key_manager;
-use crate::gui::preset_editor::{PresetEditorState, ui_preset_editor};
-use crate::gui::right_panel::ui_right_panel;
-use crate::gui::side_panel::ui_side_panel;
-use crate::gui::top_panel::ui_top_panel;
-use crate::ollama::ollama_fetch_models;
-use crate::openr::openr_fetch_models;
+use egui::Color32;
+use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, OllamaDownloading, Presets, load_presets};
+use inforno_core::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, is_table_empty, mod_msg_content_reasoning};
+use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_installed, get_ollama_model_names, get_openr_model_names, populate_ollama_installed, populate_openr_model};
+use crate::agent_config::{AgentConfigState, ui_agent_config};
+use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
+use crate::chat::ui_chat;
+use crate::key_manager::ui_key_manager;
+use crate::preset_editor::{PresetEditorState, ui_preset_editor};
+use crate::side_panel::ui_side_panel;
+use crate::top_panel::ui_top_panel;
+use inforno_core::ollama::ollama_fetch_models;
+use inforno_core::openr::openr_fetch_models;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-mod top_panel;
-mod side_panel;
-mod right_panel;
-mod preset_editor;
-mod key_manager;
-mod bottom_panel;
-mod chat;
-mod agent_config;
-pub mod math_render;
-mod autocomplete;
-mod panes;
-pub mod split_button;
-pub use split_button::SplitButton;
+
+pub static THEME_COLORS: LazyLock<RwLock<AppColors>> = LazyLock::new(|| {
+    RwLock::new(AppColors::default())
+});
+
+#[derive(Clone, Copy)]
+pub struct AppColors {
+    pub cloud: Color32,
+    pub local: Color32,
+    pub text: Color32,
+    pub strong: Color32,
+    pub err: Color32,
+}
+
+impl Default for AppColors {
+    fn default() -> Self {
+        Self {
+            cloud: Color32::from_rgb(0, 0, 255), // Default Blue
+            local: Color32::from_rgb(127, 127, 127), // Default Grey
+            text: Color32::from_rgb(127, 127, 127), // Default Grey
+            strong: Color32::from_rgb(127, 127, 127), // Default Grey
+            err: Color32::from_rgb(255, 0, 0), // Default Red
+        }
+    }
+}
+
+// Helper functions for clean access
+pub fn cloud_color() -> Color32 {
+    THEME_COLORS.read().unwrap().cloud
+}
+
+pub fn local_color() -> Color32 {
+    THEME_COLORS.read().unwrap().local
+}
+
+pub fn text_color() -> Color32 {
+    THEME_COLORS.read().unwrap().text
+}
+
+pub fn strong_color() -> Color32 {
+    THEME_COLORS.read().unwrap().strong
+}
+
+pub fn err_color() -> Color32 {
+    THEME_COLORS.read().unwrap().err
+}
+
+pub fn router_color(router: &ChatRouter) -> Color32 {
+    match router {
+        ChatRouter::Ollama => local_color(),
+        ChatRouter::Openrouter => cloud_color(),
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct ChatMsgUi {
+    pub show_raw: bool,
+    pub is_rhai: Option<bool>, // NEW: Caches the syntax detection per message
+
+    // Inline Diff Tracking (Index of the chunk -> Diff App State)
+    pub inline_diffs: std::collections::HashMap<usize, bulat::DiffApp>,
+    pub inline_diffs_saved: std::collections::HashMap<usize, bool>,
+}
 
 pub struct MyAppPermanent {
     pub rt: Handle,
@@ -66,58 +116,58 @@ pub struct ChatStreamingState {
 //#[derive(serde::Deserialize, serde::Serialize)]
 //#[serde(default)]
 pub struct State {
-    perma: Arc<MyAppPermanent>,
-    tile_labels: std::collections::HashMap<egui_tiles::TileId, String>,
-    active_tile_id: Option<egui_tiles::TileId>,
-    chat_locations: std::collections::HashMap<i64, Vec<String>>,
+    pub perma: Arc<MyAppPermanent>,
+    pub tile_labels: std::collections::HashMap<egui_tiles::TileId, String>,
+    pub active_tile_id: Option<egui_tiles::TileId>,
+    pub chat_locations: std::collections::HashMap<i64, Vec<String>>,
     // chat: common::Chat,
-    open_chats: HashMap<i64, common::Chat>,
-    active_chat_id: Option<i64>,
-    dragging_chat: Option<i64>,
-    chat_msg_ui: HashMap<i64, ChatMsgUi>,
-    chat_to_rename: Option<i64>,
-    chat_rename_buffer: String,
-    common_mark_cache: CommonMarkCache,
-    presets: Presets,
-    cache_conn: Option<rusqlite::Connection>, // connection to cache db
-    db_conn: rusqlite::Connection, // connection to main db
-    db_chats: Vec<DbChat>, // chat titles fetched from the main db
-    show_key_manager: bool,
-    show_preset_editor: bool,
-    api_key_entered: String,
-    openrouter_api_key: ApiKey,
-    keyring_used: bool,
-    preset_editor_state: PresetEditorState,
-    openr_model_names: Vec<String>,
-    ollama_model_names: Vec<String>,
-    ollama_model_names_installed: Vec<String>,
-    op_tx: Sender<FileOpMsg>,
-    pending_file_dialog_op: Option<FileOp>,
-    pending_export_content: Option<String>,
-    is_in_home_sandbox: bool,
-    sandbox: PathBuf,
+    pub open_chats: HashMap<i64, common::Chat>,
+    pub active_chat_id: Option<i64>,
+    pub dragging_chat: Option<i64>,
+    pub chat_msg_ui: HashMap<i64, ChatMsgUi>,
+    pub chat_to_rename: Option<i64>,
+    pub chat_rename_buffer: String,
+    pub common_mark_cache: CommonMarkCache,
+    pub presets: Presets,
+    pub cache_conn: Option<rusqlite::Connection>, // connection to cache db
+    pub db_conn: rusqlite::Connection, // connection to main db
+    pub db_chats: Vec<DbChat>, // chat titles fetched from the main db
+    pub show_key_manager: bool,
+    pub show_preset_editor: bool,
+    pub api_key_entered: String,
+    pub openrouter_api_key: ApiKey,
+    pub keyring_used: bool,
+    pub preset_editor_state: PresetEditorState,
+    pub openr_model_names: Vec<String>,
+    pub ollama_model_names: Vec<String>,
+    pub ollama_model_names_installed: Vec<String>,
+    pub op_tx: Sender<FileOpMsg>,
+    pub pending_file_dialog_op: Option<FileOp>,
+    pub pending_export_content: Option<String>,
+    pub is_in_home_sandbox: bool,
+    pub sandbox: PathBuf,
     // when receiving reply from the LLM's we need to store them during
     // streaming. Each buffer is indexed by the Agent index.
-    chat_streaming_state: ChatStreamingState,
+    pub chat_streaming_state: ChatStreamingState,
     // error modal's content:
-    error_msg: Option<String>,
-    is_modal_open: bool,
-    bottom_panel_state: BottomPanelState,
-    agent_config_state: AgentConfigState,
-    math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
-    show_project_init_modal: bool,
-    project_dir_to_init: Option<PathBuf>,
-    copy_presets_checked: bool,
-    project_root: Option<PathBuf>,
-    pub active_realm: Option<crate::common::ActiveRealm>,
+    pub error_msg: Option<String>,
+    pub is_modal_open: bool,
+    pub bottom_panel_state: BottomPanelState,
+    pub agent_config_state: AgentConfigState,
+    pub math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
+    pub show_project_init_modal: bool,
+    pub project_dir_to_init: Option<PathBuf>,
+    pub copy_presets_checked: bool,
+    pub project_root: Option<PathBuf>,
+    pub active_realm: Option<inforno_core::common::ActiveRealm>,
     pub active_workspace_name: Option<String>,
     pub workspace_search_buffer: String,
     pub show_workspace_selector: bool,
-    merge_apps: std::collections::HashMap<egui_tiles::TileId, bulat::DiffApp>,
-    file_dialog: egui_file_dialog::FileDialog,
-    pane_tree: egui_tiles::Tree<crate::gui::panes::Pane>,
-    search_query: String,
-    chat_widths: std::collections::HashMap<i64, f32>,
+    pub merge_apps: std::collections::HashMap<egui_tiles::TileId, bulat::DiffApp>,
+    pub file_dialog: egui_file_dialog::FileDialog,
+    pub pane_tree: egui_tiles::Tree<crate::panes::Pane>,
+    pub search_query: String,
+    pub chat_widths: std::collections::HashMap<i64, f32>,
 }
 
 impl State {
@@ -162,10 +212,10 @@ impl State {
             if let Some(realm_dir) = sandbox.parent() {
                 let yaml_path = realm_dir.join("realm.yml");
                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
-                    if let Ok(raw_config) = serde_yaml::from_str::<crate::common::RealmConfig>(&config_str) {
+                    if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::common::RealmConfig>(&config_str) {
 
                         // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
-                        if let Ok(realm) = crate::common::ActiveRealm::from_config(realm_name, raw_config) {
+                        if let Ok(realm) = inforno_core::common::ActiveRealm::from_config(realm_name, raw_config) {
                             // Resolve the default workspace (Fallback to the longest mount point)
                             let explicit_default = realm.default_workspace.clone().and_then(|def| {
                                 realm.mounts.iter()
@@ -319,7 +369,7 @@ impl State {
 
         if pane_tree.is_empty() {
             let mut tiles = egui_tiles::Tiles::default();
-            let chat_pane = tiles.insert_pane(crate::gui::panes::Pane::Chat {
+            let chat_pane = tiles.insert_pane(crate::panes::Pane::Chat {
                 chat_id: active_chat_id.unwrap_or(0)
             });
 
@@ -463,7 +513,7 @@ impl eframe::App for MyApp {
         let state = &mut self.state;
 
         // Generate our Tile Map ---
-        let (labels, locs) = crate::gui::panes::compute_tile_locations(&state.pane_tree);
+        let (labels, locs) = crate::panes::compute_tile_locations(&state.pane_tree);
         state.tile_labels = labels;
         state.chat_locations = locs;
 
@@ -555,9 +605,9 @@ impl eframe::App for MyApp {
                                 Ok(content) => {
                                     // Route to the correct placement function
                                     if matches!(file_op_msg.op, FileOp::OpenEditorRight) {
-                                        crate::gui::panes::open_editor_in_right_pane(state, path, content);
+                                        crate::panes::open_editor_in_right_pane(state, path, content);
                                     } else {
-                                        crate::gui::panes::open_editor_in_tab(state, path, content);
+                                        crate::panes::open_editor_in_tab(state, path, content);
                                     }
                                 }
                                 Err(e) => {
@@ -572,9 +622,9 @@ impl eframe::App for MyApp {
                     if !file_op_msg.cancelled {
                         if let (Some(path), Some(left), Some(right)) = (file_op_msg.path, file_op_msg.left_content, file_op_msg.right_content) {
                             if matches!(file_op_msg.op, FileOp::OpenMergeRight) {
-                                crate::gui::panes::open_merge_in_right_pane(state, path, left, right);
+                                crate::panes::open_merge_in_right_pane(state, path, left, right);
                             } else {
-                                crate::gui::panes::open_merge_in_tab(state, path, left, right);
+                                crate::panes::open_merge_in_tab(state, path, left, right);
                             }
                         }
                     }
@@ -683,8 +733,6 @@ impl eframe::App for MyApp {
 
         ui_bottom_panel(ctx, state);
 
-        ui_right_panel(ctx, state);
-
         ui_chat(ctx, state);
 
         // File Dialog Start
@@ -694,12 +742,12 @@ impl eframe::App for MyApp {
         if let Some(path) = state.file_dialog.take_picked() {
             if let Some(op) = state.pending_file_dialog_op.take() {
                 // If it's an export, write it directly and skip the channel
-                if matches!(op, crate::common::FileOp::ExportChat | crate::common::FileOp::ExportNotebook) {
+                if matches!(op, inforno_core::common::FileOp::ExportChat | inforno_core::common::FileOp::ExportNotebook) {
                     if let Some(content) = state.pending_export_content.take() {
                         let _ = std::fs::write(&path, content);
                     }
                 } else {
-                    let _ = state.op_tx.send(crate::common::FileOpMsg {
+                    let _ = state.op_tx.send(inforno_core::common::FileOpMsg {
                         op,
                         cancelled: false,
                         path: Some(path.to_path_buf()),
@@ -740,7 +788,7 @@ impl eframe::App for MyApp {
                     if path.is_dir() {
                         // Recursively read directory (we can leave this for text only as before,
                         // or you could expand it to images. Let's keep it safe and just do text for folders)
-                        fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<crate::common::Attachment>, root_path: &std::path::Path) {
+                        fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<inforno_core::common::Attachment>, root_path: &std::path::Path) {
                             if let Ok(entries) = std::fs::read_dir(dir) {
                                 for entry in entries.flatten() {
                                     let p = entry.path();
@@ -749,7 +797,7 @@ impl eframe::App for MyApp {
                                     } else {
                                         if let Ok(content) = std::fs::read_to_string(&p) {
                                             let relative_path = p.strip_prefix(root_path).unwrap_or(&p).display().to_string();
-                                            out.push(crate::common::Attachment {
+                                            out.push(inforno_core::common::Attachment {
                                                 filename: relative_path,
                                                 mime_type: "text/plain".to_string(),
                                                 content,
@@ -818,7 +866,7 @@ impl eframe::App for MyApp {
                             // It's an image, read as binary and base64 encode
                             if let Ok(bytes) = std::fs::read(&path) {
                                 let base64_str = STANDARD.encode(&bytes);
-                                attachments.push(crate::common::Attachment {
+                                attachments.push(inforno_core::common::Attachment {
                                     filename: relative_name.clone(),
                                     mime_type: mime,
                                     content: base64_str,
@@ -827,7 +875,7 @@ impl eframe::App for MyApp {
                         } else {
                             // Read as standard text
                             if let Ok(content) = std::fs::read_to_string(&path) {
-                                attachments.push(crate::common::Attachment {
+                                attachments.push(inforno_core::common::Attachment {
                                     filename: relative_name,
                                     mime_type: "text/plain".to_string(),
                                     content,
@@ -838,8 +886,8 @@ impl eframe::App for MyApp {
                 }
 
                 // Send the payload back to the UI thread
-                let _ = tx_clone.send(crate::common::FileOpMsg {
-                    op: crate::common::FileOp::Attach,
+                let _ = tx_clone.send(inforno_core::common::FileOpMsg {
+                    op: inforno_core::common::FileOp::Attach,
                     cancelled: false,
                     path: None,
                     attachments: Some(attachments),
@@ -906,7 +954,7 @@ impl eframe::App for MyApp {
                     ui.horizontal(|ui| {
                         if ui.button("Create Sandbox").clicked() {
                             if let Some(proj_dir) = &state.project_dir_to_init {
-                                if let Err(e) = crate::db::init_project_sandbox(proj_dir, state.copy_presets_checked) {
+                                if let Err(e) = inforno_core::db::init_project_sandbox(proj_dir, state.copy_presets_checked) {
                                     state.error_msg = Some(format!("Failed to create project sandbox: {}", e));
                                     state.is_modal_open = true;
                                 } else {
@@ -937,7 +985,7 @@ impl eframe::App for MyApp {
 }
 
 pub fn reload_db_chats(conn: &Connection, db_chats: &mut Vec<DbChat>) {
-    let titles = crate::db::fetch_chat_titles(conn).unwrap_or_else(|e| {
+    let titles = inforno_core::db::fetch_chat_titles(conn).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         vec![]
     });
@@ -966,7 +1014,7 @@ fn get_layout_path(project_root: &Option<PathBuf>) -> Option<PathBuf> {
 }
 
 // Loads the layout from disk, returning an empty tree if it fails
-fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crate::gui::panes::Pane> {
+fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crate::panes::Pane> {
     if let Some(path) = get_layout_path(project_root) {
         if let Ok(file_content) = std::fs::read_to_string(path) {
             if let Ok(tree) = ron::from_str(&file_content) {

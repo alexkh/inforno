@@ -1,4 +1,6 @@
-use crate::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}, gui::{State, split_button}};
+use inforno_core::{common::Chat, db::{delete_chat, export_chat_to_markdown, fetch_chat}};
+use crate::state::State;
+use crate::split_button;
 use rust_i18n::t;
 use split_button::SplitButton;
 
@@ -11,7 +13,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
         egui::ScrollArea::vertical().show(ui, |ui| {
 
             ui.add(egui::Image::new(
-                egui::include_image!("../../assets/inforno.webp"))
+                egui::include_image!("../assets/inforno.webp"))
                 .max_width(260.0)
                 .corner_radius(5));
 
@@ -28,8 +30,8 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                 let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 if (ui.button("🔍").clicked() || enter_pressed) && !state.search_query.trim().is_empty() {
-                    if let Ok(results) = crate::db::search_chats(&state.db_conn, &state.search_query) {
-                        crate::gui::panes::open_search_results_in_tab(state, state.search_query.clone(), results);
+                    if let Ok(results) = inforno_core::db::search_chats(&state.db_conn, &state.search_query) {
+                        crate::panes::open_search_results_in_tab(state, state.search_query.clone(), results);
                     }
                 }
             });
@@ -70,7 +72,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
                     state.open_chats.insert(temp_id, new_chat);
-                    crate::gui::panes::open_chat_in_tab(state, temp_id);
+                    crate::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if btn_resp.arrow_clicked {
@@ -78,7 +80,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
                     state.open_chats.insert(temp_id, new_chat);
-                    crate::gui::panes::open_chat_in_right_pane(state, temp_id);
+                    crate::panes::open_chat_in_right_pane(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_tooltip")).strong().heading()).clicked() {
@@ -93,7 +95,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         agent.msg_ids.clear();
                     }
                     state.open_chats.insert(temp_id, template);
-                    crate::gui::panes::open_chat_in_tab(state, temp_id);
+                    crate::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_prompts_tooltip")).strong().heading()).clicked() {
@@ -105,7 +107,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     let mut new_chat = Chat::default();
                     new_chat.id = temp_id;
                     state.open_chats.insert(temp_id, new_chat);
-                    crate::gui::panes::open_chat_in_tab(state, temp_id);
+                    crate::panes::open_chat_in_tab(state, temp_id);
                 }
 
                 if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip")).strong().heading()).clicked() {
@@ -121,7 +123,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         agent.msg_ids.clear();
                     }
                     state.open_chats.insert(temp_id, template);
-                    crate::gui::panes::open_chat_in_tab(state, temp_id);
+                    crate::panes::open_chat_in_tab(state, temp_id);
                 }
             });
 
@@ -180,13 +182,13 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                             if btn_resp.left_clicked {
                                 ui.memory_mut(|mem| mem.toggle_popup(popup_id));
                             }
-                            
+
                             egui::popup_below_widget(ui, popup_id, &left_resp, egui::PopupCloseBehavior::CloseOnClick, |ui: &mut egui::Ui| {
                                 ui.set_min_width(140.0); // Slightly wider to avoid squishing
-                                
+
                                 // Force top-down layout so buttons stretch horizontally
                                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                                    
+
                                     // Remove standard button background to mimic a flat menu item
                                     ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
                                     ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
@@ -202,7 +204,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                     if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
                                         if let Ok(markdown) = export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
                                             // Trigger the native egui dialog for saving
-                                            state.pending_file_dialog_op = Some(crate::common::FileOp::ExportChat);
+                                            state.pending_file_dialog_op = Some(inforno_core::common::FileOp::ExportChat);
                                             state.pending_export_content = Some(markdown);
 
                                             // Create a safe default filename based on the chat's title
@@ -218,8 +220,8 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                     }
 
                                     if ui.button(egui::RichText::new("Export Notebook")).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
-                                        if let Ok(ron_data) = crate::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
-                                            state.pending_file_dialog_op = Some(crate::common::FileOp::ExportNotebook);
+                                        if let Ok(ron_data) = inforno_core::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
+                                            state.pending_file_dialog_op = Some(inforno_core::common::FileOp::ExportNotebook);
                                             state.pending_export_content = Some(ron_data);
 
                                             let safe_title = db_chat.title.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-', "_");
@@ -264,7 +266,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     let loaded_chat = fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
                     state.open_chats.insert(chat_id, loaded_chat);
                 }
-                crate::gui::panes::open_chat_in_tab(state, chat_id);
+                crate::panes::open_chat_in_tab(state, chat_id);
             }
 
             // Handle opening in the right pane!
@@ -273,7 +275,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                     let loaded_chat = fetch_chat(&state.db_conn, chat_id, &state.presets).unwrap_or_default();
                     state.open_chats.insert(chat_id, loaded_chat);
                 }
-                crate::gui::panes::open_chat_in_right_pane(state, chat_id);
+                crate::panes::open_chat_in_right_pane(state, chat_id);
             }
         });
     });
@@ -286,7 +288,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 // Helper function to extract prompts and re-attach files
 fn extract_prompts(
     chat: &Chat,
-    bottom_state: &mut crate::gui::bottom_panel::BottomPanelState,
+    bottom_state: &mut crate::bottom_panel::BottomPanelState,
     project_root: &Option<std::path::PathBuf>,
 ) {
     let mut first_sys = None;
@@ -297,10 +299,10 @@ fn extract_prompts(
     if let Some(agent) = chat.agents.first() {
         for msg_id in &agent.msg_ids {
             if let Some(msg) = chat.msg_pool.get(msg_id) {
-                if first_sys.is_none() && msg.msg_role == crate::common::MsgRole::System {
+                if first_sys.is_none() && msg.msg_role == inforno_core::common::MsgRole::System {
                     first_sys = Some(msg.content.clone());
                 }
-                if first_usr.is_none() && msg.msg_role == crate::common::MsgRole::User {
+                if first_usr.is_none() && msg.msg_role == inforno_core::common::MsgRole::User {
                     first_usr = Some(msg.content.clone());
                     details = msg.details.clone();
                 }
@@ -327,7 +329,7 @@ fn extract_prompts(
 
     bottom_state.pending_attachments.clear();
     if let Some(det) = details {
-        if let Ok(atts) = serde_json::from_str::<Vec<crate::common::Attachment>>(&det) {
+        if let Ok(atts) = serde_json::from_str::<Vec<inforno_core::common::Attachment>>(&det) {
             for mut att in atts {
                 let mut reattached = false;
 
@@ -408,7 +410,7 @@ fn save_rename(state: &mut State, chat_id: i64) {
         let clean_title = state.chat_rename_buffer.split('\n').next().unwrap_or(&state.chat_rename_buffer).trim().to_string();
 
         // Update DB
-        if let Err(error) = crate::db::mod_chat_title(&state.db_conn,
+        if let Err(error) = inforno_core::db::mod_chat_title(&state.db_conn,
                 chat_id, &clean_title) {
             println!("Error: could not rename chat in the Sandbox: {}", error);
             return;

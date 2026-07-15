@@ -1,16 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use egui::{Align, Layout, RichText, Ui, Vec2b};
-use crate::gui::autocomplete::AutoCompleteTextEdit;
+use crate::autocomplete::AutoCompleteTextEdit;
 use ollama_rs::Ollama;
 use rand::RngExt;
 use rusqlite::Connection;
 use rust_i18n::t;
 use tokio_stream::StreamExt;
 
-use crate::{
+use inforno_core::{
     common::{
-        ChatRouter, DbOllamaModel, DbOpenrModel, ModelOptions, OllamaDownloading, Preset, PresetSelection, Presets, cloud_color, format_bytes, load_presets, local_color, router_color, err_color, strong_color
+        ChatRouter, DbOllamaModel, DbOpenrModel, ModelOptions, OllamaDownloading, Preset, PresetSelection, Presets, format_bytes, load_presets,
     },
     db::{
         cache::{
@@ -18,8 +18,9 @@ use crate::{
         },
         delete_preset, save_preset,
     },
-    gui::State,
 };
+
+use crate::state::{State, strong_color, router_color, cloud_color, local_color, err_color};
 
 // --- Data Structures ---
 #[derive(Default)]
@@ -135,11 +136,11 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
     // Handle window close (either via 'X' or an internal action like 'Save and Exit')
     if !show_preset_editor || !state.show_preset_editor {
         state.show_preset_editor = false;
-        
+
         // Reset the editor state, but PRESERVE the active downloading tracker
         // so background downloads remain attached to the UI if reopened!
         let preserved_downloading = state.preset_editor_state.ollama_downloading.clone();
-        
+
         state.preset_editor_state = PresetEditorState {
             ollama_downloading: preserved_downloading,
             ..Default::default()
@@ -197,7 +198,7 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
         if num_presets > 0 {
             ui.label(t!("preset_or_select_existing_one"));
 
-            crate::gui::bottom_panel::preset_combo_box(ui, "pe_preset_select",
+            crate::bottom_panel::preset_combo_box(ui, "pe_preset_select",
                 &mut substate.selected_preset,
                 &state.presets);
 

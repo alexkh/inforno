@@ -36,7 +36,7 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
 pub async fn do_ollama_chat_sync(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
-    ctx: &egui::Context,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ollama = Ollama::default();
@@ -90,7 +90,7 @@ pub async fn do_ollama_chat_sync(
                         query.agent_ind,
                         thinking.to_string(),
                     ));
-                    ctx.request_repaint();
+                    wakeup();
                 }
             }
 
@@ -100,7 +100,7 @@ pub async fn do_ollama_chat_sync(
                     query.agent_ind,
                     msg.content
                 ));
-                ctx.request_repaint();
+                wakeup();
             }
         }
         Err(e) => {
@@ -108,12 +108,12 @@ pub async fn do_ollama_chat_sync(
                 query.agent_ind,
                 format!("Ollama sync error: {:?}", e)
             ));
-            ctx.request_repaint();
+            wakeup();
         }
     }
 
     println!("Finished sync request from Ollama/Fox");
-    ctx.request_repaint();
+    wakeup();
     Ok(())
 }
 
@@ -121,7 +121,7 @@ pub async fn do_ollama_chat_sync(
 pub async fn do_ollama_chat_stream(
     query: ChatQue,
     tx: Sender<ChatStreamEvent>,
-    ctx: &egui::Context,
+    wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ollama = Ollama::default();
@@ -185,7 +185,7 @@ pub async fn do_ollama_chat_stream(
                         query.agent_ind,
                         msg.content
                     ));
-                    ctx.request_repaint();
+                    wakeup();
                 }
                 if let Some(thinking) = &msg.thinking {
                     if !thinking.is_empty() {
@@ -193,7 +193,7 @@ pub async fn do_ollama_chat_stream(
                             query.agent_ind,
                             thinking.to_string(),
                         ));
-                        ctx.request_repaint();
+                        wakeup();
                     }
                 }
             }
@@ -202,12 +202,12 @@ pub async fn do_ollama_chat_stream(
                     query.agent_ind,
                     format!("Ollama stream error: {:?}", e)
                 ));
-                ctx.request_repaint();
+                wakeup();
             }
         }
     }
     println!("Finished stream from Ollama");
-    ctx.request_repaint();
+    wakeup();
     Ok(())
 }
 
