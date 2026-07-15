@@ -3,8 +3,8 @@ use egui_commonmark::CommonMarkViewer;
 use rust_i18n::t;
 use inforno_core::common::Attachment;
 use crate::math_render::compile_math_to_svg_embedded;
-use regex::Regex;
 use std::sync::OnceLock;
+use regex::Regex;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use bulat::editor::{CodeEditor, Syntax, ColorTheme};
@@ -17,379 +17,6 @@ use inforno_core::{
 };
 
 use crate::state::{State, ChatMsgUi};
-
-// --- Markdown Chunker ---
-
-enum ContentChunk<'a> {
-    Markdown(&'a str),
-    RustCode {
-        code: &'a str,
-        filepath: Option<String>,
-    }
-}
-
-fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
-    static RE_DIFF: OnceLock<Regex> = OnceLock::new();
-    let re_diff = RE_DIFF.get_or_init(|| {
-        Regex::new(r"(?ms)^[ \t]*<{4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*={4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*>{4,}[ \t]*[^\n]*").unwrap()
-    });
-
-    let mut current_text = original.to_string();
-    let mut diff_block_found = false;
-
-    fn clean_block(mut block: &str) -> &str {
-        // Remove leading empty lines
-        while let Some(nl) = block.find('\n') {
-            if block[..nl].trim().is_empty() {
-                block = &block[nl + 1..];
-            } else {
-                break;
-            }
-        }
-
-        let first_line_end = block.find('\n').unwrap_or(block.len());
-        let first_line = block[..first_line_end].trim();
-
-        // Detect if the first line is a file path header or purely a dashed divider
-        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#"))
-            && first_line.contains("---") {
-            let lower = first_line.to_lowercase();
-            let is_file_marker = lower.contains("file:") || lower.contains(".rs") || lower.contains(".md") || lower.contains(".toml") || lower.contains(".c") || lower.contains(".h") || first_line.chars().all(|c| c == '-' || c == ' ' || c == '/' || c == '*' || c == '#');
-
-            if is_file_marker {
-                let next_start = if first_line_end < block.len() { first_line_end + 1 } else { first_line_end };
-                block = &block[next_start..];
-            }
-        }
-
-        // Remove trailing empty lines
-        while block.ends_with('\n') || block.ends_with('\r') {
-            block = &block[..block.len() - 1];
-        }
-        block
-    };
-
-    for caps in re_diff.captures_iter(snippet) {
-        diff_block_found = true;
-
-        let search_block = clean_block(caps.get(1).map_or("", |m| m.as_str()));
-        let replace_block = clean_block(caps.get(2).map_or("", |m| m.as_str()));
-
-        if search_block.trim().is_empty() && replace_block.trim().is_empty() {
-            continue;
-        }
-
-        // --- 0. Prevent Double Application ---
-        let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
-        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-        let orig_norm = current_text.replace("\r\n", "\n");
-
-        if !replace_norm.is_empty() && orig_norm.contains(&replace_norm) {
-            // If the replacement is already in the text, and it's substantial or contains the search block
-            // (which is the classic cause of infinite duplication), we skip it!
-            if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
-                continue;
-            }
-        }
-
-        // 1. Try exact match
-        if !search_block.is_empty() {
-            if let Some(idx) = current_text.find(search_block) {
-                let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
-                new_text.push_str(&current_text[..idx]);
-                new_text.push_str(replace_block);
-                new_text.push_str(&current_text[idx + search_block.len()..]);
-                current_text = new_text;
-                continue;
-            }
-        }
-
-        // 2. Try normalized match (ignoring \r and leading/trailing whitespace of the block)
-        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-        let orig_norm = current_text.replace("\r\n", "\n");
-        if !search_norm.is_empty() {
-            if let Some(idx) = orig_norm.find(&search_norm) {
-                let replace_norm = replace_block.replace("\r\n", "\n");
-                let mut new_text = String::with_capacity(orig_norm.len() + replace_norm.len());
-                new_text.push_str(&orig_norm[..idx]);
-                new_text.push_str(&replace_norm);
-                new_text.push_str(&orig_norm[idx + search_norm.len()..]);
-                current_text = new_text;
-                continue;
-            }
-        }
-
-        // 3. Try highly tolerant fuzzy match (ignores all internal whitespace differences)
-        let search_trimmed = search_block.trim();
-        if !search_trimmed.is_empty() {
-            let escaped_search = regex::escape(search_trimmed);
-            let fuzzy_pattern = escaped_search.split_whitespace().collect::<Vec<_>>().join(r"\s+");
-            if let Ok(re) = Regex::new(&fuzzy_pattern) {
-                if let Some(mat) = re.find(&current_text) {
-                    let mut new_text = String::with_capacity(current_text.len() + replace_block.len());
-                    new_text.push_str(&current_text[..mat.start()]);
-                    new_text.push_str(replace_block);
-                    new_text.push_str(&current_text[mat.end()..]);
-                    current_text = new_text;
-                    continue;
-                }
-            }
-        }
-    }
-
-    // If we detected diff markers, we MUST return Some() so we don't fall back
-    // to passing raw <<<< markers to the merge tool. If patching failed, returning
-    // the un-patched original simply shows 0 diffs in the merge tool instead of a broken file.
-    if diff_block_found {
-        Some(current_text)
-    } else {
-        None
-    }
-}
-
-fn resolve_filepath(
-    realm: &Option<inforno_core::common::ActiveRealm>,
-    project_root: &Option<std::path::PathBuf>,
-    requested_path: &str
-) -> Option<(std::path::PathBuf, bool)> {
-    let mut target_root = None;
-    let mut relative_path_str = requested_path.trim();
-
-    // 1. Attempt VFS Translation if we are in a Realm
-    if let Some(active_realm) = realm {
-        let req_path = std::path::Path::new(relative_path_str);
-
-        if let Some(secure_host_path) = active_realm.secure_resolve_path(req_path) {
-            // Perfect match found and permitted by the ignore list
-            if secure_host_path.exists() && secure_host_path.is_file() {
-                return Some((secure_host_path, false));
-            }
-
-            // If the exact match fails (e.g., a typo in the file name), prepare for the fuzzy fallback.
-            // We need to extract the specific mount root this path belonged to.
-            for mount in &active_realm.mounts {
-                if relative_path_str.starts_with(&mount.virtual_path) {
-                    target_root = Some(mount.host_path.clone());
-                    relative_path_str = relative_path_str
-                        .strip_prefix(&mount.virtual_path)
-                        .unwrap_or(relative_path_str)
-                        .trim_start_matches('/');
-                    break;
-                }
-            }
-        }
-    }
-
-    // 2. Fallback to standard project_root if no valid Realm VFS match was found
-    let root_to_search = target_root.or_else(|| project_root.clone())?;
-
-    // 3. Standard Exact Match Check
-    let req_path = std::path::Path::new(relative_path_str);
-    let full_path = root_to_search.join(req_path);
-    if full_path.exists() && full_path.is_file() {
-        return Some((full_path, false));
-    }
-
-    let target_name = req_path.file_name()?;
-
-    let mut best_match = None;
-    let mut best_score = -1;
-
-    let mut dirs_to_visit = vec![root_to_search.clone()];
-    let req_components: Vec<_> = req_path.components().rev().collect();
-
-    while let Some(dir) = dirs_to_visit.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let name = path.file_name().unwrap_or_default();
-                    if name != "target" && name != ".git" && name != ".inforno" {
-                        dirs_to_visit.push(path);
-                    }
-                } else if path.is_file() {
-                    let is_match = {
-                        let path_name = path.file_name().unwrap_or_default();
-                        if path_name == target_name {
-                            true
-                        } else {
-                            // fuzzy fallback: if the stem matches exactly!
-                            let path_stem = path.file_stem().unwrap_or_default();
-                            let target_stem = req_path.file_stem().unwrap_or_default();
-                            path_stem == target_stem && !path_stem.is_empty()
-                        }
-                    };
-
-                    if is_match {
-                        let path_components: Vec<_> = path.components().rev().collect();
-                        let mut score = 0;
-                        for (a, b) in req_components.iter().zip(path_components.iter()) {
-                            if a == b {
-                                score += 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        if score > best_score {
-                            best_score = score;
-                            best_match = Some(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(matched) = best_match {
-        return Some((matched, true));
-    }
-
-    None
-}
-
-fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
-    static RE_CODE: OnceLock<Regex> = OnceLock::new();
-    static RE_FILEPATH: OnceLock<Regex> = OnceLock::new();
-    static RE_INNER_FILE: OnceLock<Regex> = OnceLock::new();
-
-    let re_code = RE_CODE.get_or_init(|| {
-        Regex::new(r"(?ms)^[ \t]{0,3}\x60{3}([a-zA-Z0-9]*)[ \t]*\r?\n(.*?)\r?\n[ \t]{0,3}\x60{3}[ \t]*(?:\r?\n|$)").unwrap()
-    });
-
-    // Broadened regex: Matches strings ending in ".rs" ANYWHERE in the text.
-    let re_filepath = RE_FILEPATH.get_or_init(|| {
-        Regex::new(r"(?i)([a-z0-9_/\.\-]+\.[a-z]+)").unwrap()
-    });
-
-    // Specifically targets filenames embedded directly inside the code block
-    let re_inner_file = RE_INNER_FILE.get_or_init(|| {
-        Regex::new(r"(?im)^[ \t]*---[ \t]*(?:File:)?[ \t]*([a-z0-9_/\.\-]+\.[a-z]+)[ \t]*---").unwrap()
-    });
-
-    let mut chunks = Vec::new();
-    let mut last_end = 0;
-
-    // NEW: State variable to remember the filename across multiple code blocks
-    let mut current_filepath: Option<String> = None;
-
-    for caps in re_code.captures_iter(text) {
-        // Safe extraction of the full match
-        let full_match = if let Some(m) = caps.get(0) { m } else { continue; };
-
-        if full_match.start() > last_end {
-            let md_text = &text[last_end..full_match.start()];
-            chunks.push(ContentChunk::Markdown(md_text));
-
-            // Search the entire markdown chunk for filepaths
-            let mut found_in_chunk = None;
-            for path_caps in re_filepath.captures_iter(md_text) {
-                if let Some(m) = path_caps.get(1) {
-                    found_in_chunk = Some(m.as_str().to_string());
-                }
-            }
-
-            // If we found a filename in this intermediate text, update our active tracker.
-            // If we didn't, `current_filepath` retains whatever file it was already tracking!
-            if found_in_chunk.is_some() {
-                current_filepath = found_in_chunk;
-            }
-        }
-
-        let code_match = caps.get(2).map_or("", |m| m.as_str());
-
-        // --- Extract filename if it was written inside the code block ---
-        if let Some(inner_caps) = re_inner_file.captures(code_match) {
-            if let Some(m) = inner_caps.get(1) {
-                current_filepath = Some(m.as_str().to_string());
-            }
-        }
-
-        chunks.push(ContentChunk::RustCode {
-            code: code_match,
-            filepath: current_filepath.clone(),
-        });
-
-        last_end = full_match.end();
-    }
-
-    if last_end < text.len() {
-        chunks.push(ContentChunk::Markdown(&text[last_end..]));
-    }
-
-    chunks
-}
-
-// --- Helper: Detect Rhai ---
-fn is_likely_rhai(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() { return false; }
-
-    let engine = rhai::Engine::new();
-    // It must compile into a valid AST AND contain at least one code-like structural element
-    // This avoids identifying a single English word (like "Note") as code.
-    engine.compile(text).is_ok() && (
-        text.contains('=') || text.contains('(') || text.contains('{') ||
-        text.contains("let ") || text.contains("fn ") || text.contains("print")
-    )
-}
-
-// --- Helper: Run Rhai Script ---
-fn run_rhai(script: &str) -> (String, Option<String>) {
-    use rhai::Engine;
-    use std::sync::{Arc, Mutex};
-
-    let mut engine = Engine::new();
-    engine.set_max_operations(1_000_000); // 1 million max ops to prevent infinite loops
-
-    // Thread-safe buffer to capture stdout
-    let output = Arc::new(Mutex::new(String::new()));
-    let out_clone = output.clone();
-
-    engine.on_print(move |s| {
-        let mut out = out_clone.lock().unwrap();
-        out.push_str(s);
-        out.push('\n');
-    });
-
-    let out_clone2 = output.clone();
-    engine.on_debug(move |s, _src, _pos| {
-        let mut out = out_clone2.lock().unwrap();
-        out.push_str(&format!("[DEBUG] {}\n", s));
-    });
-
-    // NEW: Bridge for LLM Prompting
-    let prompt_request = Arc::new(Mutex::new(None));
-    let pr_clone = prompt_request.clone();
-    engine.register_fn("send_prompt", move |text: &str| {
-        *pr_clone.lock().unwrap() = Some(text.to_string());
-    });
-
-    let result = engine.eval::<rhai::Dynamic>(script);
-    let mut final_out = output.lock().unwrap().clone();
-
-    match result {
-        Ok(val) => {
-            if !val.is_unit() {
-                final_out.push_str(&format!("=> {}", val));
-            }
-        }
-        Err(e) => {
-            final_out.push_str(&format!("Error: {}", e));
-        }
-    }
-
-    let final_str = if final_out.is_empty() {
-        "Execution finished (no output)".to_string()
-    } else {
-        final_out
-    };
-
-    let requested = prompt_request.lock().unwrap().take();
-    (final_str, requested)
-}
-
-
-// --- Main Entry Point ---
 
 pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
     egui::CentralPanel::default()
@@ -615,7 +242,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             let num_lines = note_content.lines().count().max(1);
 
                             // Dynamically check syntax on load, cache it in UI state
-                            let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| is_likely_rhai(&note_content));
+                            let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| inforno_core::scripting::is_likely_rhai(&note_content));
 
                             // Enforce the max width limit for the Developer Note Cell
                             let note_margin_offset = 40.0;
@@ -651,7 +278,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                                             // NEW: Execute Rhai Script!
                                             if ui.button("▶ Run").on_hover_text("Execute as Rhai Script").clicked() {
-                                                let (output, prompt_req) = run_rhai(&note_content);
+                                                let (output, prompt_req) = inforno_core::scripting::run_rhai(&note_content);
                                                 rhai_updates.push((msg_id, output));
                                                 if prompt_req.is_some() {
                                                     llm_prompt_request = prompt_req;
@@ -693,7 +320,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     if out.output.response.changed() {
                                         let mut new_is_rhai = is_rhai;
 
-                                        if !new_is_rhai && is_likely_rhai(&note_content) {
+                                        if !new_is_rhai && inforno_core::scripting::is_likely_rhai(&note_content) {
                                             new_is_rhai = true; // Upgrade to Rhai
                                         } else if new_is_rhai && note_content.trim().is_empty() {
                                             new_is_rhai = false; // Downgrade to Text if emptied
@@ -775,7 +402,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                     if out.output.response.changed() || draft_note != chat.draft_note {
                         let mut new_is_rhai = chat.draft_is_rhai;
-                        if !new_is_rhai && is_likely_rhai(&draft_note) {
+                        if !new_is_rhai && inforno_core::scripting::is_likely_rhai(&draft_note) {
                             new_is_rhai = true;
                         } else if new_is_rhai && draft_note.trim().is_empty() {
                             new_is_rhai = false;
@@ -1178,11 +805,11 @@ fn render_msg_content(
         ui.label(RichText::new(format!("{}", msg.content)).strong());
     } else {
         // Break the content into pieces
-        let chunks = parse_chunks(&msg.content);
+        let chunks = inforno_core::parsing::parse_chunks(&msg.content);
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             match chunk {
-                ContentChunk::Markdown(md_text) => {
+                inforno_core::parsing::ContentChunk::Markdown(md_text) => {
                     // Only render markdown if there's actually text to render
                     if md_text.trim().is_empty() {
                         continue;
@@ -1245,7 +872,7 @@ fn render_msg_content(
                     });
                 }
 
-                ContentChunk::RustCode { code, filepath } => {
+                inforno_core::parsing::ContentChunk::RustCode { code, filepath } => {
                     let mut code_buffer = code.to_string();
                     let num_lines = code_buffer.lines().count().max(1);
 
@@ -1257,7 +884,7 @@ fn render_msg_content(
 
                     if let Some(path) = &filepath {
                         display_path = path.clone();
-                        if let Some((resolved, corrected)) = resolve_filepath(active_realm, project_root, path) {
+                        if let Some((resolved, corrected)) = inforno_core::realm::resolve_filepath(active_realm, project_root, path) {
                             actual_path = Some(resolved);
                             autocorrected = corrected;
                         }
@@ -1335,11 +962,11 @@ fn render_msg_content(
                                 }
 
                                 // 2. Try applying LLM Search/Replace Diffs
-                                let mut right_content = apply_llm_diffs(&original_content, clean_snippet);
+                                let mut right_content = bulat::engine::apply_llm_diffs(&original_content, clean_snippet);
 
                                 // 3. Try fallback to function splicing
                                 if right_content.is_none() {
-                                    right_content = try_splice_snippet(&original_content, clean_snippet);
+                                    right_content = bulat::engine::try_splice_snippet(&original_content, clean_snippet);
                                 }
 
                                 // 4. Final fallback to the whole snippet body
@@ -1380,7 +1007,7 @@ fn render_msg_content(
                             if let Some(path) = &actual_path {
                                 // --- NEW: INLINE DIFF DETECTOR ---
                                 // 1. Check if the LLM provided a formal <<<< ==== >>>> block
-                                if let Some((search_block, replace_block)) = extract_raw_diff_blocks(&code_buffer) {
+                                if let Some((search_block, replace_block)) = bulat::engine::extract_raw_diff_blocks(&code_buffer) {
                                     // 2. Read the live file to verify the exact SEARCH block exists right now
                                     let original_content = std::fs::read_to_string(path).unwrap_or_default();
 
@@ -1586,162 +1213,4 @@ fn render_reasoning_block(ui: &mut egui::Ui, text: &str,
             });
     });
     ui.add_space(10.0);
-}
-
-// when LLM sends only one function, we want to pre-merge it with the target
-// file before sending it to the GUI merge tool
-fn find_function_spans(code: &str, fn_name: &str) -> Vec<(usize, usize)> {
-    // Looks for: fn my_function_name( or fn my_function_name<
-    let pattern = format!(r"(?m)^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+{}(?:\s|<|\()", regex::escape(fn_name));
-    let re = match Regex::new(&pattern) {
-        Ok(r) => r,
-        Err(_) => return vec![],
-    };
-
-    let mut spans = Vec::new();
-    for mat in re.find_iter(code) {
-        let start_idx = mat.start();
-        let mut brace_count = 0;
-        let mut found_first_brace = false;
-
-        let mut chars = code[start_idx..].char_indices().peekable();
-        let mut in_string = false;
-        let mut in_char = false;
-        let mut in_comment = false;
-        let mut in_multi_comment = false;
-
-        // A lightweight lexer to safely count braces without tripping on strings/comments
-        while let Some((i, c)) = chars.next() {
-            if in_comment {
-                if c == '\n' { in_comment = false; }
-                continue;
-            }
-            if in_multi_comment {
-                if c == '*' {
-                    if let Some(&(_, '/')) = chars.peek() {
-                        chars.next();
-                        in_multi_comment = false;
-                    }
-                }
-                continue;
-            }
-            if in_string {
-                if c == '\\' { chars.next(); } // skip escaped char
-                else if c == '"' { in_string = false; }
-                continue;
-            }
-            if in_char {
-                if c == '\\' { chars.next(); }
-                else if c == '\'' { in_char = false; }
-                continue;
-            }
-
-            match c {
-                '"' => in_string = true,
-                '\'' => in_char = true,
-                '/' => {
-                    if let Some(&(_, '/')) = chars.peek() {
-                        in_comment = true;
-                        chars.next();
-                    } else if let Some(&(_, '*')) = chars.peek() {
-                        in_multi_comment = true;
-                        chars.next();
-                    }
-                },
-                '{' => {
-                    brace_count += 1;
-                    found_first_brace = true;
-                },
-                '}' => {
-                    brace_count -= 1;
-                    if found_first_brace && brace_count == 0 {
-                        spans.push((start_idx, start_idx + i + 1));
-                        break;
-                    }
-                },
-                _ => {}
-            }
-        }
-    }
-    spans
-}
-
-/// Helper to extract raw SEARCH and REPLACE blocks without attempting to apply them to the file.
-fn extract_raw_diff_blocks(snippet: &str) -> Option<(String, String)> {
-    static RE_DIFF: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re_diff = RE_DIFF.get_or_init(|| {
-        regex::Regex::new(r"(?ms)^[ \t]*<{4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*={4,}[ \t]*[^\n]*\r?\n(.*?)\r?\n^[ \t]*>{4,}[ \t]*[^\n]*").unwrap()
-    });
-
-    fn clean_block(mut block: &str) -> &str {
-        while let Some(nl) = block.find('\n') {
-            if block[..nl].trim().is_empty() { block = &block[nl + 1..]; } else { break; }
-        }
-        let first_line_end = block.find('\n').unwrap_or(block.len());
-        let first_line = block[..first_line_end].trim();
-        if (first_line.starts_with("---") || first_line.starts_with("//") || first_line.starts_with("/*") || first_line.starts_with("#")) && first_line.contains("---") {
-            let lower = first_line.to_lowercase();
-            let is_file_marker = lower.contains("file:") || lower.contains(".rs") || lower.contains(".md") || lower.contains(".toml") || lower.contains(".c") || lower.contains(".h") || first_line.chars().all(|c| c == '-' || c == ' ' || c == '/' || c == '*' || c == '#');
-            if is_file_marker {
-                let next_start = if first_line_end < block.len() { first_line_end + 1 } else { first_line_end };
-                block = &block[next_start..];
-            }
-        }
-        while block.ends_with('\n') || block.ends_with('\r') { block = &block[..block.len() - 1]; }
-        block
-    }
-
-    let mut matches = re_diff.captures_iter(snippet);
-    if let Some(caps) = matches.next() {
-        // --- NEW: Abort if there are multiple diff blocks in the same snippet!
-        // This prevents the embedded merge tool from rendering incorrectly.
-        if matches.next().is_some() {
-            return None;
-        }
-
-        let search_block = clean_block(caps.get(1).map_or("", |m| m.as_str()));
-        let replace_block = clean_block(caps.get(2).map_or("", |m| m.as_str()));
-        return Some((search_block.to_string(), replace_block.to_string()));
-    }
-    None
-}
-
-fn try_splice_snippet(original: &str, snippet: &str) -> Option<String> {
-    static RE_FN: OnceLock<Regex> = OnceLock::new();
-    let re_fn = RE_FN.get_or_init(|| Regex::new(r"(?m)^[ \t]*(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z0-9_]+)(?:\s|<|\()").unwrap());
-
-    let mut fn_names = Vec::new();
-    for caps in re_fn.captures_iter(snippet) {
-        if let Some(name) = caps.get(1) {
-            fn_names.push(name.as_str());
-        }
-    }
-
-    // Safety check: Only attempt splice if there is EXACTLY one function in the snippet
-    if fn_names.len() == 1 {
-        let fn_name = fn_names[0];
-
-        let orig_spans = find_function_spans(original, fn_name);
-        let snip_spans = find_function_spans(snippet, fn_name);
-
-        println!("orig_spans: {:?}", orig_spans);
-        println!("snip_spans: {:?}", snip_spans);
-
-        // Safety check: Only splice if the function name is completely unique in BOTH strings
-        // (This prevents accidentally overwriting the wrong `fn new()` in a file with multiple structs)
-        if orig_spans.len() == 1 && snip_spans.len() == 1 {
-            let (orig_start, orig_end) = orig_spans[0];
-            let (snip_start, snip_end) = snip_spans[0];
-
-            let spliced_function = &snippet[snip_start..snip_end];
-
-            let mut new_code = String::with_capacity(original.len() + spliced_function.len());
-            new_code.push_str(&original[..orig_start]);
-            new_code.push_str(spliced_function);
-            new_code.push_str(&original[orig_end..]);
-
-            return Some(new_code);
-        }
-    }
-    None
 }
