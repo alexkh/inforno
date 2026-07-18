@@ -19,6 +19,7 @@ use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
 use crate::chat::ui_chat;
 use crate::key_manager::ui_key_manager;
 use crate::preset_editor::{PresetEditorState, ui_preset_editor};
+use crate::realm_config::{RealmConfigState, ui_realm_config};
 use crate::side_panel::ui_side_panel;
 use crate::top_panel::ui_top_panel;
 use inforno_core::ollama::ollama_fetch_models;
@@ -134,6 +135,8 @@ pub struct State {
     pub db_chats: Vec<DbChat>, // chat titles fetched from the main db
     pub show_key_manager: bool,
     pub show_preset_editor: bool,
+    pub show_realm_config: bool,
+    pub realm_config_state: RealmConfigState,
     pub api_key_entered: String,
     pub openrouter_api_key: ApiKey,
     pub keyring_used: bool,
@@ -159,7 +162,7 @@ pub struct State {
     pub project_dir_to_init: Option<PathBuf>,
     pub copy_presets_checked: bool,
     pub project_root: Option<PathBuf>,
-    pub active_realm: Option<inforno_core::common::ActiveRealm>,
+    pub active_realm: Option<inforno_core::realm::ActiveRealm>,
     pub active_workspace_name: Option<String>,
     pub workspace_search_buffer: String,
     pub show_workspace_selector: bool,
@@ -212,10 +215,10 @@ impl State {
             if let Some(realm_dir) = sandbox.parent() {
                 let yaml_path = realm_dir.join("realm.yml");
                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
-                    if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::common::RealmConfig>(&config_str) {
+                    if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
 
                         // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
-                        if let Ok(realm) = inforno_core::common::ActiveRealm::from_config(realm_name, raw_config) {
+                        if let Ok(realm) = inforno_core::realm::ActiveRealm::from_config(realm_name, raw_config) {
                             // Resolve the default workspace (Fallback to the longest mount point)
                             let explicit_default = realm.default_workspace.clone().and_then(|def| {
                                 realm.mounts.iter()
@@ -414,6 +417,8 @@ impl State {
             db_chats: chats,
             show_key_manager: false,
             show_preset_editor: false,
+            show_realm_config: false,
+            realm_config_state: RealmConfigState::default(),
             api_key_entered: String::new(),
             openrouter_api_key: api_key,
             keyring_used: is_keyring_used,
@@ -730,6 +735,8 @@ impl eframe::App for MyApp {
         ui_preset_editor(ctx, state);
 
         ui_agent_config(ctx, state);
+
+        ui_realm_config(ctx, state);
 
         ui_bottom_panel(ctx, state);
 

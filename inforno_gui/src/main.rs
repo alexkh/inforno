@@ -25,6 +25,7 @@ mod side_panel;
 mod split_button;
 mod state;
 mod top_panel;
+mod realm_config;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

@@ -332,9 +332,25 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                             // --- PART 1: 🏰 The Realm ---
                             ui.label(egui::RichText::new("/").color(orange).strong());
 
-                            ui.label(egui::RichText::new(format!("🏰 {}", realm.name))
-                                .color(orange)
-                                .strong());
+                            if ui.button(
+                                egui::RichText::new(format!("🏰 {} ⚙", realm.name))
+                                        .color(orange)
+                                        .strong()
+                                )
+                                .on_hover_text("Open Realm Configuration")
+                                .clicked() {
+                                    state.show_realm_config = !state.show_realm_config;
+
+                                    // Initialize the YAML buffer if opening
+                                    if state.show_realm_config {
+                                        if let Some(active_realm) = &state.active_realm {
+                                            // Assuming ActiveRealm can be serialized back to RealmConfig
+                                            if let Ok(yaml) = serde_yaml::to_string(&active_realm.raw_config) {
+                                                state.realm_config_state.yaml_buffer = yaml;
+                                            }
+                                        }
+                                    }
+                                }
                         });
                     }
             });

@@ -39,17 +39,21 @@ pub struct ActiveRealm {
     pub name: String,
     pub default_workspace: Option<String>,
     pub mounts: Vec<CompiledMount>,
+    pub raw_config: RealmConfig,
 }
 
 impl ActiveRealm {
     pub fn from_config(name: String, config: RealmConfig) -> Result<Self, String> {
         let mut mounts = Vec::new();
 
+        // 2. Clone the config BEFORE the loop consumes it
+        let raw_config = config.clone();
+
         for (v_path, mount_cfg) in config.mounts {
             let mut builder = GlobSetBuilder::new();
 
             for tpl_name in &mount_cfg.templates {
-                if let Some(tpl_globs) = config.ignore_templates.get(tpl_name) {
+                if let Some(tpl_globs) = raw_config.ignore_templates.get(tpl_name) {
                     for g in tpl_globs {
                         builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
                     }
@@ -78,8 +82,9 @@ impl ActiveRealm {
 
         Ok(Self {
             name,
-            default_workspace: config.default_workspace,
+            default_workspace: raw_config.default_workspace.clone(),
             mounts,
+            raw_config, // 3. Store the cloned config in the struct
         })
     }
 
@@ -101,7 +106,7 @@ impl ActiveRealm {
 }
 
 pub fn resolve_filepath(
-    realm: &Option<crate::common::ActiveRealm>,
+    realm: &Option<ActiveRealm>,
     project_root: &Option<std::path::PathBuf>,
     requested_path: &str
 ) -> Option<(std::path::PathBuf, bool)> {

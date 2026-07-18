@@ -536,7 +536,7 @@ fn render_assistant_grid(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
@@ -592,7 +592,7 @@ fn render_user_msg(
     total_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
 ) {
@@ -725,7 +725,7 @@ fn render_assistant_msg(
     item_width: f32,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
 ) {
     egui::Frame::default()
@@ -798,7 +798,7 @@ fn render_msg_content(
     max_image_width: usize,
     math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     project_root: &Option<std::path::PathBuf>,
-    active_realm: &Option<inforno_core::common::ActiveRealm>,
+    active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
 ) {
     if msg_ui.show_raw {
