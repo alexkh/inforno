@@ -8,7 +8,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 pub struct RealmMountConfig {
     pub host: PathBuf,
     #[serde(default)]
-    pub templates: Vec<String>,
+    pub wildcards: Vec<String>,
     #[serde(default)]
     pub ignore: Vec<String>,
     pub description: Option<String>,
@@ -20,7 +20,7 @@ pub struct RealmMountConfig {
 pub struct RealmConfig {
     pub default_workspace: Option<String>,
     #[serde(default)]
-    pub ignore_templates: IndexMap<String, Vec<String>>,
+    pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
 }
@@ -46,22 +46,24 @@ impl ActiveRealm {
     pub fn from_config(name: String, config: RealmConfig) -> Result<Self, String> {
         let mut mounts = Vec::new();
 
-        // 2. Clone the config BEFORE the loop consumes it
+        // Clone the config BEFORE the loop consumes it
         let raw_config = config.clone();
 
         for (v_path, mount_cfg) in config.mounts {
             let mut builder = GlobSetBuilder::new();
 
-            for tpl_name in &mount_cfg.templates {
-                if let Some(tpl_globs) = raw_config.ignore_templates.get(tpl_name) {
-                    for g in tpl_globs {
+            // Apply the reusable wildcard rules
+            for wc_name in &mount_cfg.wildcards {
+                if let Some(wc_globs) = raw_config.wildcards.get(wc_name) {
+                    for g in wc_globs {
                         builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
                     }
                 } else {
-                    return Err(format!("Template '{}' not found for mount '{}'", tpl_name, v_path));
+                    return Err(format!("Wildcard '{}' not found for mount '{}'", wc_name, v_path));
                 }
             }
 
+            // Apply mount-specific ignores
             for g in &mount_cfg.ignore {
                 builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
             }
@@ -84,7 +86,7 @@ impl ActiveRealm {
             name,
             default_workspace: raw_config.default_workspace.clone(),
             mounts,
-            raw_config, // 3. Store the cloned config in the struct
+            raw_config, 
         })
     }
 
@@ -204,4 +206,3 @@ pub fn resolve_filepath(
 
     None
 }
-

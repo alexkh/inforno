@@ -96,21 +96,21 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
 fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     // Here you build the UI for your mounts, globs, roles, and actors.
-    // Example:
     egui::CollapsingHeader::new("🗄 Mounts")
         .default_open(true)
         .show(ui, |ui| {
-            // Loop through state.active_realm.config.mounts to render editable text fields
+            // Loop through state.active_realm.raw_config.mounts to render editable text fields
             ui.label("Mount form elements go here...");
             ui.button("+ Add Mount");
         });
 
     ui.add_space(10.0);
 
-    egui::CollapsingHeader::new("🔍 Glob Selections")
+    // CHANGED: Terminology reflects "Wildcards" instead of "Glob Selections"
+    egui::CollapsingHeader::new("🔍 Wildcards")
         .default_open(true)
         .show(ui, |ui| {
-             ui.label("Glob form elements go here...");
+             ui.label("Wildcard form elements go here...");
         });
 
     ui.add_space(10.0);
