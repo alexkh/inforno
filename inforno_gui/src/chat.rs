@@ -283,6 +283,11 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                             let toggle_label = if is_edit_mode { "👁 View" } else { "📝 Edit" };
                                             if ui.toggle_value(&mut is_edit_mode, toggle_label).clicked() {
                                                 ui.data_mut(|d| d.insert_temp(edit_mode_id, is_edit_mode));
+                                                // Explicitly save when switching back to View mode
+                                                if !is_edit_mode {
+                                                    db_updates.push((msg_id, note_content.clone()));
+                                                    content_updates.push((msg_id, note_content.clone(), false));
+                                                }
                                             }
 
                                             // NEW: Execute Rhai Script!
