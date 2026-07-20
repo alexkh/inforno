@@ -294,7 +294,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                             });
 
                                             if is_edit_mode {
-                                        let syntax = if is_rhai { Syntax::rhai() } else { Syntax::text() };
+                                        let syntax = if is_rhai { Syntax::rhai() } else { Syntax::from_mime("text/markdown") };
 
                                         let out = CodeEditor::default()
                                             .id_source(format!("note_{}", msg.id))
@@ -376,7 +376,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             let mut draft_note = chat.draft_note.clone();
                             let num_lines = draft_note.lines().count().max(1);
 
-                            let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::text() };
+                            let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::from_mime("text/markdown") };
 
                             let out = CodeEditor::default()
                                 .id_source(format!("draft_{}", chat_id))
@@ -881,7 +881,14 @@ fn render_msg_content(
                 }
 
                 inforno_core::parsing::ContentChunk::Code { lang, code, filepath } => {
-                    if lang == "rhai" {
+                    // 1. Evaluate the precise MIME type
+                    let mime_type = if let Some(path) = &filepath {
+                        bulat::editor::Syntax::guess_mime_from_path(std::path::Path::new(path))
+                    } else {
+                        bulat::editor::Syntax::guess_mime_from_ext(lang)
+                    };
+
+                    if mime_type == "application/x-rhai" {
                         let mut code_buffer = code.to_string();
                         ui.add_space(6.0);
                         egui::Frame::default()
@@ -1070,8 +1077,21 @@ fn render_msg_content(
                                 });
                             }
                         } else {
-                            let lang_label = if lang.is_empty() { "🦀 Rust".to_string() } else { format!("🦀 {}", lang) };
-                            ui.label(egui::RichText::new(lang_label).weak());
+                            let display_name = match mime_type {
+                                "text/rust" => "🦀 Rust",
+                                "text/x-c" | "text/x-c++" => "⚙️ C/C++",
+                                "application/x-rhai" => "📜 Rhai",
+                                "text/x-python" => "🐍 Python",
+                                "text/javascript" | "text/typescript" => "🌐 JS/TS",
+                                "text/html" => "🌐 HTML",
+                                "text/markdown" => "📝 Markdown",
+                                "application/json" => "📦 JSON",
+                                "application/toml" | "application/yaml" => "⚙️ Config",
+                                "application/x-sh" => "🐚 Shell",
+                                _ => "📄 Text",
+                            };
+                            
+                            ui.label(egui::RichText::new(display_name).weak());
                         }
 
                         // Right side: Copy Button AND Inline Diff Tools
@@ -1253,7 +1273,7 @@ fn render_msg_content(
                         CodeEditor::default()
                             .id_source(format!("code_block_{}_{}", msg.id, i))
                             .with_theme(ColorTheme::SV)
-                            .with_syntax(Syntax::rust())
+                            .with_syntax(Syntax::from_mime(mime_type))
                             .with_numlines(false)
                             .with_rows(num_lines)
                             // Disable internal scroll so the parent chat window handles scrolling natively
