@@ -244,6 +244,10 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             // Dynamically check syntax on load, cache it in UI state
                             let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| inforno_core::scripting::is_likely_rhai(&note_content));
 
+                            let edit_mode_id = ui.id().with(format!("note_edit_mode_{}", msg.id));
+                            // Default to view mode (false) 
+                            let mut is_edit_mode = ui.data(|d| d.get_temp::<bool>(edit_mode_id).unwrap_or(false));
+
                             // Enforce the max width limit for the Developer Note Cell
                             let note_margin_offset = 40.0;
                             let effective_width = (total_width - note_margin_offset).max(400.0);
@@ -276,6 +280,11 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 ui.ctx().copy_text(note_content.clone());
                                             }
 
+                                            let toggle_label = if is_edit_mode { "👁 View" } else { "📝 Edit" };
+                                            if ui.toggle_value(&mut is_edit_mode, toggle_label).clicked() {
+                                                ui.data_mut(|d| d.insert_temp(edit_mode_id, is_edit_mode));
+                                            }
+
                                             // NEW: Execute Rhai Script!
                                             if ui.button("▶ Run").on_hover_text("Execute as Rhai Script").clicked() {
                                                 let (output, prompt_req) = inforno_core::scripting::run_rhai(&note_content);
@@ -287,18 +296,48 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                         });
                                     });
 
-                                    let syntax = if is_rhai { Syntax::rhai() } else { Syntax::text() };
+                                    if is_edit_mode {
+                                        let syntax = if is_rhai { Syntax::rhai() } else { Syntax::text() };
 
-                                    let out = CodeEditor::default()
-                                        .id_source(format!("note_{}", msg.id))
-                                        .with_theme(ColorTheme::SV)
-                                        .with_syntax(syntax)
-                                        .with_numlines(false)
-                                        .with_rows(num_lines)
-                                        .vscroll(false)
-                                        .v_auto_shrink(true) // Uncap height to display full text
-                                        .desired_width(max_w)
-                                        .show(ui, &mut note_content);
+                                        let out = CodeEditor::default()
+                                            .id_source(format!("note_{}", msg.id))
+                                            .with_theme(ColorTheme::SV)
+                                            .with_syntax(syntax)
+                                            .with_numlines(false)
+                                            .with_rows(num_lines)
+                                            .vscroll(false)
+                                            .v_auto_shrink(true) // Uncap height to display full text
+                                            .desired_width(max_w)
+                                            .show(ui, &mut note_content);
+
+                                        // Sticky Rhai Detection & Mark as unsaved while typing
+                                        if out.output.response.changed() {
+                                            let mut new_is_rhai = is_rhai;
+
+                                            if !new_is_rhai && inforno_core::scripting::is_likely_rhai(&note_content) {
+                                                new_is_rhai = true; // Upgrade to Rhai
+                                            } else if new_is_rhai && note_content.trim().is_empty() {
+                                                new_is_rhai = false; // Downgrade to Text if emptied
+                                            }
+
+                                            msg_ui.is_rhai = Some(new_is_rhai); // Cache immediately to UI
+
+                                            content_updates.push((msg_id, note_content.clone(), true));
+                                        }
+
+                                        // Commit to database and mark as saved on focus lost
+                                        if out.output.response.lost_focus() {
+                                            db_updates.push((msg_id, note_content.clone()));
+                                            content_updates.push((msg_id, note_content.clone(), false));
+                                        }
+                                    } else {
+                                        // VIEW MODE
+                                        ui.add_space(5.0);
+                                        render_msg_content(
+                                            ui, cache, msg, msg_ui, max_w as usize, math_cache.clone(),
+                                            project_root, active_realm, &op_tx
+                                        );
+                                    }
 
                                     // --- NEW: Display the Volatile Output ---
                                     if let Some(vol_out) = &msg.volatile_output {
@@ -314,27 +353,6 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 .frame(false)
                                                 .desired_width(max_w)
                                         );
-                                    }
-
-                                    // Sticky Rhai Detection & Mark as unsaved while typing
-                                    if out.output.response.changed() {
-                                        let mut new_is_rhai = is_rhai;
-
-                                        if !new_is_rhai && inforno_core::scripting::is_likely_rhai(&note_content) {
-                                            new_is_rhai = true; // Upgrade to Rhai
-                                        } else if new_is_rhai && note_content.trim().is_empty() {
-                                            new_is_rhai = false; // Downgrade to Text if emptied
-                                        }
-
-                                        msg_ui.is_rhai = Some(new_is_rhai); // Cache immediately to UI
-
-                                        content_updates.push((msg_id, note_content.clone(), true));
-                                    }
-
-                                    // Commit to database and mark as saved on focus lost
-                                    if out.output.response.lost_focus() {
-                                        db_updates.push((msg_id, note_content.clone()));
-                                        content_updates.push((msg_id, note_content.clone(), false));
                                     }
                                 });
                                 }); // End vertical wrapper
