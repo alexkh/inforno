@@ -219,7 +219,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 // Pass a clone of the cache pointer
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
                                 assistant_batch.clear();
                             }
 
@@ -227,13 +227,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
                             render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
                         }
                         MsgRole::Developer => {
                             if !assistant_batch.is_empty() {
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
                                 assistant_batch.clear();
                             }
 
@@ -245,7 +245,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| inforno_core::scripting::is_likely_rhai(&note_content));
 
                             let edit_mode_id = ui.id().with(format!("note_edit_mode_{}", msg.id));
-                            // Default to view mode (false) 
+                            // Default to view mode (false)
                             let mut is_edit_mode = ui.data(|d| d.get_temp::<bool>(edit_mode_id).unwrap_or(false));
 
                             // Enforce the max width limit for the Developer Note Cell
@@ -280,28 +280,20 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 ui.ctx().copy_text(note_content.clone());
                                             }
 
-                                            let toggle_label = if is_edit_mode { "👁 View" } else { "📝 Edit" };
-                                            if ui.toggle_value(&mut is_edit_mode, toggle_label).clicked() {
-                                                ui.data_mut(|d| d.insert_temp(edit_mode_id, is_edit_mode));
-                                                // Explicitly save when switching back to View mode
-                                                if !is_edit_mode {
-                                                    db_updates.push((msg_id, note_content.clone()));
-                                                    content_updates.push((msg_id, note_content.clone(), false));
-                                                }
-                                            }
+                                                                                                let toggle_label = if is_edit_mode { "👁 View" } else { "📝 Edit" };
+                                                    if ui.toggle_value(&mut is_edit_mode, toggle_label).clicked() {
+                                                        ui.data_mut(|d| d.insert_temp(edit_mode_id, is_edit_mode));
 
-                                            // NEW: Execute Rhai Script!
-                                            if ui.button("▶ Run").on_hover_text("Execute as Rhai Script").clicked() {
-                                                let (output, prompt_req) = inforno_core::scripting::run_rhai(&note_content);
-                                                rhai_updates.push((msg_id, output));
-                                                if prompt_req.is_some() {
-                                                    llm_prompt_request = prompt_req;
-                                                }
-                                            }
-                                        });
-                                    });
+                                                        // Explicitly save when switching back to View mode
+                                                        if !is_edit_mode {
+                                                            db_updates.push((msg_id, note_content.clone()));
+                                                            content_updates.push((msg_id, note_content.clone(), false));
+                                                        }
+                                                    }
+                                                });
+                                            });
 
-                                    if is_edit_mode {
+                                            if is_edit_mode {
                                         let syntax = if is_rhai { Syntax::rhai() } else { Syntax::text() };
 
                                         let out = CodeEditor::default()
@@ -335,31 +327,16 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                             db_updates.push((msg_id, note_content.clone()));
                                             content_updates.push((msg_id, note_content.clone(), false));
                                         }
-                                    } else {
-                                        // VIEW MODE
-                                        ui.add_space(5.0);
-                                        render_msg_content(
-                                            ui, cache, msg, msg_ui, max_w as usize, math_cache.clone(),
-                                            project_root, active_realm, &op_tx
-                                        );
-                                    }
-
-                                    // --- NEW: Display the Volatile Output ---
-                                    if let Some(vol_out) = &msg.volatile_output {
-                                        ui.separator();
-                                        ui.label(egui::RichText::new("Output:").weak().small());
-
-                                        // Embed another text area just for the output
-                                        let mut out_str = vol_out.clone();
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut out_str)
-                                                .font(egui::TextStyle::Monospace)
-                                                .interactive(false)
-                                                .frame(false)
-                                                .desired_width(max_w)
-                                        );
-                                    }
-                                });
+                                                                                } else {
+                                                // VIEW MODE
+                                                ui.add_space(5.0);
+                                                render_msg_content(
+                                                    ui, cache, msg, msg_ui, max_w as usize, math_cache.clone(),
+                                                    project_root, active_realm, &op_tx,
+                                                    &mut rhai_updates, &mut llm_prompt_request
+                                                );
+                                            }
+                                        });
                                 }); // End vertical wrapper
                                 ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                             }); // End horizontal wrapper
@@ -375,7 +352,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
-                        project_root, active_realm, &op_tx, max_msg_width);
+                        project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
             }
 
             // --- NOTEBOOK APPENDER CELL ---
@@ -562,6 +539,8 @@ fn render_assistant_grid(
     active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
+    rhai_updates: &mut Vec<(i64, String)>,
+    llm_prompt_request: &mut Option<String>,
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
@@ -592,7 +571,7 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, active_realm, op_tx);
+                                    project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
                         }
                     );
                 }
@@ -618,6 +597,8 @@ fn render_user_msg(
     active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     max_msg_width: f32,
+    rhai_updates: &mut Vec<(i64, String)>,
+    llm_prompt_request: &mut Option<String>,
 ) {
     let left_offset = 127.0; // Matches the left outer margin of the user frame
     let right_padding = 30.0;
@@ -647,7 +628,7 @@ fn render_user_msg(
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
-                        project_root, active_realm, op_tx);
+                        project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
 
                     // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
@@ -750,6 +731,8 @@ fn render_assistant_msg(
     project_root: &Option<std::path::PathBuf>,
     active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
+    rhai_updates: &mut Vec<(i64, String)>,
+    llm_prompt_request: &mut Option<String>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -780,7 +763,7 @@ fn render_assistant_msg(
 
             let content_width = (item_width - 25.0).max(100.0);
             render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-                project_root, active_realm, op_tx);
+                project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
         });
     });
 }
@@ -823,6 +806,8 @@ fn render_msg_content(
     project_root: &Option<std::path::PathBuf>,
     active_realm: &Option<inforno_core::realm::ActiveRealm>,
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
+    rhai_updates: &mut Vec<(i64, String)>,
+    llm_prompt_request: &mut Option<String>,
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -895,7 +880,58 @@ fn render_msg_content(
                     });
                 }
 
-                inforno_core::parsing::ContentChunk::RustCode { code, filepath } => {
+                inforno_core::parsing::ContentChunk::Code { lang, code, filepath } => {
+                    if lang == "rhai" {
+                        let mut code_buffer = code.to_string();
+                        ui.add_space(6.0);
+                        egui::Frame::default()
+                            .inner_margin(8.0)
+                            .corner_radius(5.0)
+                            .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                            .fill(ui.visuals().extreme_bg_color)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("📜 Rhai Script");
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
+                                            ui.ctx().copy_text(code.to_string());
+                                        }
+                                        if ui.button("▶ Run").on_hover_text("Execute this Rhai script").clicked() {
+                                            let (output, prompt_req) = inforno_core::scripting::run_rhai(code);
+                                            rhai_updates.push((msg.id, output));
+                                            if prompt_req.is_some() {
+                                                *llm_prompt_request = prompt_req;
+                                            }
+                                        }
+                                    });
+                                });
+
+                                CodeEditor::default()
+                                    .id_source(format!("rhai_code_{}_{}", msg.id, i))
+                                    .with_theme(ColorTheme::SV)
+                                    .with_syntax(Syntax::rhai())
+                                    .with_numlines(false)
+                                    .with_rows(code_buffer.lines().count().max(1))
+                                    .vscroll(false)
+                                    .v_auto_shrink(true)
+                                    .show(ui, &mut code_buffer);
+
+                                if let Some(vol_out) = &msg.volatile_output {
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("Output:").weak().small());
+                                    let mut out_str = vol_out.clone();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut out_str)
+                                            .font(egui::TextStyle::Monospace)
+                                            .interactive(false)
+                                            .frame(false)
+                                            .desired_width(f32::INFINITY)
+                                    );
+                                }
+                            });
+                        ui.add_space(6.0);
+                        continue;
+                    }
                     let mut code_buffer = code.to_string();
                     let num_lines = code_buffer.lines().count().max(1);
 
@@ -966,9 +1002,10 @@ fn render_msg_content(
                                 let original_content = std::fs::read_to_string(path).unwrap_or_default();
 
                                 // 1. Strip leading `--- File: ...` metadata line
+                                // 1. Strip leading `--- File: ...` metadata line
                                 static RE_STRIP_FILE: OnceLock<Regex> = OnceLock::new();
                                 let re_strip = RE_STRIP_FILE.get_or_init(|| {
-                                    Regex::new(r"(?im)^[ \t]*(?://|/\*|#)?[ \t]*---[ \t]*(?:File:)?[ \t]*[a-z0-9_/\.\-]+\.[a-z]+[ \t]*---(?: \*/)?\r?\n?").unwrap()
+                                    Regex::new(r"(?im)^[ \t]*(?://|/\*|#)?[ \t]*(?:---[ \t]*(?:File:)?[ \t]*|File:[ \t]*)[a-z0-9_/\.\-]+\.[a-z]+[ \t]*(?:---|\*/)?\r?\n?").unwrap()
                                 });
 
                                 let stripped_owned = re_strip.replace(code_buffer.as_str(), "");
@@ -981,6 +1018,21 @@ fn render_msg_content(
                                         clean_snippet = &clean_snippet[nl + 1..];
                                     } else {
                                         clean_snippet = ""; // Single line snippet completely removed
+                                    }
+                                }
+
+                                // NEW: If the LLM left a standalone filename right before the <<<< marker, strip it manually
+                                let mut lines = clean_snippet.lines().filter(|l| !l.trim().is_empty());
+                                if let Some(first_line) = lines.next() {
+                                    if let Some(second_line) = lines.next() {
+                                        if second_line.trim_start().starts_with("<<<<") {
+                                            // Ensure the first line is just a stray filename/comment and not actual code
+                                            if first_line.contains('.') && !first_line.contains('{') && !first_line.contains('(') && !first_line.contains(';') {
+                                                // Mathematically slice off the first line to guarantee we don't corrupt the diff marker's indentation
+                                                let offset = (second_line.as_ptr() as usize) - (clean_snippet.as_ptr() as usize);
+                                                clean_snippet = &clean_snippet[offset..];
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1018,7 +1070,8 @@ fn render_msg_content(
                                 });
                             }
                         } else {
-                            ui.label(egui::RichText::new("🦀 Rust").weak());
+                            let lang_label = if lang.is_empty() { "🦀 Rust".to_string() } else { format!("🦀 {}", lang) };
+                            ui.label(egui::RichText::new(lang_label).weak());
                         }
 
                         // Right side: Copy Button AND Inline Diff Tools

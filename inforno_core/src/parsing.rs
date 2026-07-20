@@ -3,7 +3,8 @@ use regex::Regex;
 
 pub enum ContentChunk<'a> {
     Markdown(&'a str),
-    RustCode {
+    Code {
+        lang: &'a str,
         code: &'a str,
         filepath: Option<String>,
     }
@@ -25,7 +26,7 @@ pub fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
 
     // Specifically targets filenames embedded directly inside the code block
     let re_inner_file = RE_INNER_FILE.get_or_init(|| {
-        Regex::new(r"(?im)^[ \t]*---[ \t]*(?:File:)?[ \t]*([a-z0-9_/\.\-]+\.[a-z]+)[ \t]*---").unwrap()
+        Regex::new(r"(?im)(?:^[ \t]*(?://|/\*|#)?[ \t]*(?:---[ \t]*(?:File:)?[ \t]*|File:[ \t]*|<{4,}(?:[ \tA-Z]*))[ \t]*([a-z0-9_/\.\-]+\.[a-z]+)[ \t]*(?:---|\*/)?)|(?:^[ \t]*(?://|/\*|#)?[ \t]*([a-z0-9_/\.\-]+\.[a-z]+)[ \t]*(?:---|\*/)?(?:\r?\n[ \t]*)+<{4,})").unwrap()
     });
 
     let mut chunks = Vec::new();
@@ -57,16 +58,18 @@ pub fn parse_chunks(text: &str) -> Vec<ContentChunk<'_>> {
             }
         }
 
+        let lang_match = caps.get(1).map_or("", |m| m.as_str());
         let code_match = caps.get(2).map_or("", |m| m.as_str());
 
         // --- Extract filename if it was written inside the code block ---
         if let Some(inner_caps) = re_inner_file.captures(code_match) {
-            if let Some(m) = inner_caps.get(1) {
+            if let Some(m) = inner_caps.get(1).or_else(|| inner_caps.get(2)) {
                 current_filepath = Some(m.as_str().to_string());
             }
         }
 
-        chunks.push(ContentChunk::RustCode {
+        chunks.push(ContentChunk::Code {
+            lang: lang_match,
             code: code_match,
             filepath: current_filepath.clone(),
         });
