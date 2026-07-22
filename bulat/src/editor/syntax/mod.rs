@@ -75,6 +75,31 @@ impl Default for Syntax {
 }
 
 impl Syntax {
+    /// Converts a markdown code block language tag (e.g., "rust ", "cpp\r") into a standard MIME type.
+    /// This is highly robust against trailing whitespaces and capitalization.
+    pub fn guess_mime_from_markdown_lang(lang: &str) -> &'static str {
+        let clean_lang = lang.trim().to_lowercase();
+
+        match clean_lang.as_str() {
+            "rust" | "rs" => "text/rust",
+            "rhai" => "application/x-rhai",
+            "c" | "h" => "text/x-c",
+            "cpp" | "cxx" | "c++" | "hpp" => "text/x-c++",
+            "python" | "py" => "text/x-python",
+            "javascript" | "js" => "text/javascript",
+            "typescript" | "ts" => "text/typescript",
+            "html" | "htm" => "text/html",
+            "markdown" | "md" => "text/markdown",
+            "json" => "application/json",
+            "toml" => "application/toml",
+            "yaml" | "yml" => "application/yaml",
+            "sh" | "bash" | "shell" => "application/x-sh",
+            _ => {
+                // Fallback to the standard extension guesser just in case it recognizes it
+                Self::guess_mime_from_ext(&clean_lang)
+            }
+        }
+    }
     /// Standardizes an extension or markdown language tag into a MIME type
     pub fn guess_mime_from_ext(ext: &str) -> &'static str {
         match ext.to_lowercase().as_str() {

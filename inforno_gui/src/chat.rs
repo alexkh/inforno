@@ -882,11 +882,11 @@ fn render_msg_content(
 
                 inforno_core::parsing::ContentChunk::Code { lang, code, filepath } => {
                     // 1. Evaluate the precise MIME type
-                    let mime_type = if let Some(path) = &filepath {
-                        bulat::editor::Syntax::guess_mime_from_path(std::path::Path::new(path))
-                    } else {
-                        bulat::editor::Syntax::guess_mime_from_ext(lang)
-                    };
+                    //let mime_type = if let Some(path) = &filepath {
+                    //    bulat::editor::Syntax::guess_mime_from_path(std::path::Path::new(path))
+                    //} else {
+                    let mime_type = bulat::editor::Syntax::guess_mime_from_markdown_lang(lang);
+                    //};
 
                     if mime_type == "application/x-rhai" {
                         let mut code_buffer = code.to_string();
