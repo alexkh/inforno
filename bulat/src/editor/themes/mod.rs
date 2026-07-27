@@ -4,6 +4,7 @@ pub mod github;
 pub mod gruvbox;
 pub mod sonokai;
 pub mod sv;
+pub mod loader;
 
 use super::syntax::TokenType;
 use egui::Color32;
@@ -151,5 +152,10 @@ impl ColorTheme {
             comments: fg,
             special: fg,
         }
+    }
+
+    /// Returns a slice of all themes (built-in + any custom YAML themes loaded from disk)
+    pub fn available_themes() -> &'static [ColorTheme] {
+        loader::available_themes()
     }
 }
