@@ -113,6 +113,10 @@ impl DiffApp {
         self
     }
 
+    pub fn set_theme(&mut self, theme: ColorTheme) {
+        self.theme = theme;
+    }
+
     /// Uses the `similar` crate to compare text and populate the highlight maps
     fn recalculate_diff(&mut self) {
         self.left_diff_map.clear();
