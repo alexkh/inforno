@@ -108,6 +108,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(StandaloneBulat { 
                 mode,
                 current_theme: initial_theme, 
+                show_settings: false,
             }))
         }),
     )
@@ -129,10 +130,40 @@ enum AppMode {
 struct StandaloneBulat {
     mode: AppMode,
     current_theme: ColorTheme,
+    show_settings: bool,
 }
 
 impl eframe::App for StandaloneBulat {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // --- Settings Window ---
+        let mut show_settings = self.show_settings;
+        if show_settings {
+            egui::Window::new("⚙ Editor Configuration")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut show_settings)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Theme:");
+                        egui::ComboBox::from_id_salt("global_theme_selector")
+                            .selected_text(self.current_theme.name())
+                            .show_ui(ui, |ui| {
+                                for theme in ColorTheme::available_themes() {
+                                    if ui.selectable_value(&mut self.current_theme, *theme, theme.name()).changed() {
+                                        if theme.is_dark() {
+                                            ctx.set_visuals(egui::Visuals::dark());
+                                        } else {
+                                            ctx.set_visuals(egui::Visuals::light());
+                                        }
+                                        save_global_config(theme.name());
+                                    }
+                                }
+                            });
+                    });
+                });
+        }
+        self.show_settings = show_settings;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             match &mut self.mode {
                 // ==========================================
@@ -153,22 +184,11 @@ impl eframe::App for StandaloneBulat {
                             ui.heading("New File");
                         }
                         
-                        // Push the theme selector to the far right
+                        // Push the config wrench to the far right
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::ComboBox::from_id_salt("editor_theme_selector")
-                                .selected_text(self.current_theme.name())
-                                .show_ui(ui, |ui| {
-                                    for theme in ColorTheme::available_themes() {
-                                        if ui.selectable_value(&mut self.current_theme, *theme, theme.name()).changed() {
-                                            if theme.is_dark() {
-                                                ctx.set_visuals(egui::Visuals::dark());
-                                            } else {
-                                                ctx.set_visuals(egui::Visuals::light());
-                                            }
-                                            save_global_config(theme.name());
-                                        }
-                                    }
-                                });
+                            if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+                                self.show_settings = true;
+                            }
                         });
                     });
                     ui.separator();
@@ -203,20 +223,9 @@ impl eframe::App for StandaloneBulat {
 
                         // Push save buttons and theme selector to the far right
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::ComboBox::from_id_salt("diff_theme_selector")
-                                .selected_text(self.current_theme.name())
-                                .show_ui(ui, |ui| {
-                                    for theme in ColorTheme::available_themes() {
-                                        if ui.selectable_value(&mut self.current_theme, *theme, theme.name()).changed() {
-                                            if theme.is_dark() {
-                                                ctx.set_visuals(egui::Visuals::dark());
-                                            } else {
-                                                ctx.set_visuals(egui::Visuals::light());
-                                            }
-											save_global_config(theme.name());
-                                        }
-                                    }
-                                });
+                            if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+                                self.show_settings = true;
+                            }
                                 
                             if ui.button("💾 Save Right File").clicked() {
                                 if let Err(e) = fs::write(&right_filepath, &app.right_code_real) {
