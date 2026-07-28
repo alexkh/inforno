@@ -512,6 +512,30 @@ impl CodeEditor {
         let mut max_hscroll_offset = 0.0;
 
         let mut code_editor = |ui: &mut egui::Ui| {
+            let has_focus = ui.memory(|m| m.focused().is_some());
+            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+            let is_hovered = pointer_pos.map_or(false, |pos| ui.clip_rect().contains(pos));
+
+            if is_hovered && !has_focus {
+                let mut page_up = false;
+                let mut page_down = false;
+                ui.input_mut(|i| {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                        page_up = true;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                        page_down = true;
+                    }
+                });
+
+                if page_up || page_down {
+                    let height = ui.ctx().screen_rect().height() * 0.8;
+                    let shift = if page_up { -height } else { height };
+                    let target_rect = ui.clip_rect().translate(egui::vec2(0.0, shift));
+                    ui.scroll_to_rect(target_rect, None);
+                }
+            }
+
             // 4. Wrap the horizontal_top inside a unified background frame
             egui::Frame::new().fill(self.theme.bg()).inner_margin(0.0).show(ui, |ui| {
                 if !self.auto_shrink_v {
