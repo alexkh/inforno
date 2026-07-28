@@ -2,6 +2,11 @@
 name = "bulat"
 version = "0.1.0"
 edition = "2024"
+authors = ["Alexandre Kharlamov"]
+description = "A GUI tool for editing and merging code, MD and text files."
+license = "MIT"
+repository = "https://github.com/alexkh/inforno/tree/main/bulat"
+categories = ["artificial-intelligence", "development-tools", "gui", "parser-implementations", "parsing", "text-editors"]
 default-run = "bulat"
 
 [[bin]]

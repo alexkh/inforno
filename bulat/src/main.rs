@@ -69,12 +69,14 @@ fn main() -> eframe::Result {
         AppMode::Editor {
             filepath: Some(path),
             code,
+            scroll_offset: 0.0,
         }
     } else {
         // --- ZERO FILES: Empty Editor Mode ---
         AppMode::Editor {
             filepath: None,
             code: String::new(),
+            scroll_offset: 0.0,
         }
     };
 
@@ -119,6 +121,7 @@ enum AppMode {
     Editor {
         filepath: Option<String>,
         code: String,
+        scroll_offset: f32,
     },
     Diff {
         left_filepath: String,
@@ -169,7 +172,7 @@ impl eframe::App for StandaloneBulat {
                 // ==========================================
                 // SINGLE FILE EDITOR VIEW
                 // ==========================================
-                AppMode::Editor { filepath, code } => {
+                AppMode::Editor { filepath, code, scroll_offset } => {
                     ui.horizontal(|ui| {
                         if let Some(path) = filepath {
                             ui.heading(format!("Editing: {}", path));
@@ -204,14 +207,41 @@ impl eframe::App for StandaloneBulat {
                         Syntax::rust()
                     };
 
-                    CodeEditor::default()
+                    let has_focus = ui.memory(|m| m.focused().is_some());
+                    let mut page_scroll = false;
+                    if !has_focus {
+                        ui.input_mut(|i| {
+                            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                                *scroll_offset -= ui.available_height() - 50.0;
+                                page_scroll = true;
+                            }
+                            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                                *scroll_offset += ui.available_height() - 50.0;
+                                page_scroll = true;
+                            }
+                        });
+                        if page_scroll {
+                            *scroll_offset = scroll_offset.max(0.0);
+                        }
+                    }
+
+                    let mut editor = CodeEditor::default()
                         .id_source("standalone_editor")
                         .with_theme(self.current_theme)
                         .with_syntax(syntax)
                         .with_numlines(true)
                         .vscroll(true)
-                        .v_auto_shrink(false) // Force the editor to fill the window
-                        .show(ui, code);
+                        .v_auto_shrink(false); // Force the editor to fill the window
+                        
+                    if page_scroll {
+                        editor = editor.with_vscroll_offset(*scroll_offset);
+                    }
+
+                    let out = editor.show(ui, code);
+
+                    if !page_scroll {
+                        *scroll_offset = out.scroll_offset;
+                    }
                 }
 
                 // ==========================================

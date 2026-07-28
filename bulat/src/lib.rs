@@ -269,13 +269,36 @@ impl DiffApp {
         // prepare the horizontal offset we will apply next frame
         let mut next_hscroll_ratio = self.hscroll_ratio;
 
+        let has_focus = ui.memory(|m| m.focused().is_some());
+        let mut page_scroll = false;
+        if !has_focus {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                    self.scroll_offset -= ui.available_height() - 50.0;
+                    page_scroll = true;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                    self.scroll_offset += ui.available_height() - 50.0;
+                    page_scroll = true;
+                }
+            });
+            if page_scroll {
+                self.scroll_offset = self.scroll_offset.max(0.0);
+            }
+        }
+
         // 1. Single Outer ScrollArea for everything
         // When embedded, we completely disable vertical scrolling. This naturally
         // removes the scrollbar and forces the container to expand to its full content height.
-        egui::ScrollArea::new([false, !self.embedded])
+        let mut scroll_area = egui::ScrollArea::new([false, !self.embedded])
             .id_salt("global_scroll")
-            .min_scrolled_height(0.0)
-            .show(ui, |ui| {
+            .min_scrolled_height(0.0);
+
+        if page_scroll {
+            scroll_area = scroll_area.vertical_scroll_offset(self.scroll_offset);
+        }
+
+        let scroll_out = scroll_area.show(ui, |ui| {
                 // Set our spacing FIRST so we know exactly what we are dealing with
                 ui.spacing_mut().item_spacing.x = 5.0;
 
@@ -472,6 +495,10 @@ impl DiffApp {
                     });
                 });
         });
+
+        if !page_scroll {
+            self.scroll_offset = scroll_out.state.offset.y;
+        }
 
         self.hscroll_ratio = next_hscroll_ratio.clamp(0.0, 1.0);
 
