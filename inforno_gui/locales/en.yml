@@ -147,9 +147,19 @@ welcome_tour: "
   file, but stay in the default sandbox. You can also clear the Sandbox if
   you want.
   \n\n
-  The Prompt editor in the bottom allows you to add a System prompt. There is a
-  small 💻 button, clicking which opens the text editor just for that purpose.
-  "
+        The Prompt editor in the bottom allows you to add a System prompt. There is a
+      small 💻 button, clicking which opens the text editor just for that purpose.
+      \n\n
+      ✨ Unicode Showcase: Inforno supports a wide range of languages out of the box!
+      🇬🇧 Hello, World!
+      🇷🇺 Здравствуй, Мир!
+      🇨🇳 你好，世界！
+      🇯🇵 こんにちは世界！
+      🇰🇷 안녕 세상!
+      🇸🇦 مرحبا بالعالم!
+      🇮🇳 नमस्ते दुनिया!
+      🇬🇷 Γειά σου Κόσμε!
+      "
 error_no_agent_preset_selected: "Error: no agent has a valid preset selected!"
 error_empty_prompt: "Error: no prompt text entered!"
 agent_config_window_title: "Agent Config"

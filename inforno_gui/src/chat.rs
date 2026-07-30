@@ -166,18 +166,6 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     let msg_pool = &chat.msg_pool;
 
-    if msg_pool.is_empty() {
-           egui::Frame::default()
-        .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
-        .outer_margin(Margin { top: 0, right: 5, bottom: 0, left: 5 })
-        .inner_margin(10.0)
-        .corner_radius(5.0)
-        .fill(ui.visuals().faint_bg_color)
-        .show(ui, |ui| {
-            ui.heading(t!("welcome_tour"));
-        });
-        return;
-    }
 
     let mut content_updates = Vec::new();
     let mut db_updates = Vec::new();
@@ -195,16 +183,43 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let msg_pool = &chat.msg_pool;
 
         if msg_pool.is_empty() {
-            egui::Frame::default()
-            .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
-            .outer_margin(Margin { top: 0, right: 5, bottom: 0, left: 5 })
-            .inner_margin(10.0)
-            .corner_radius(5.0)
-            .fill(ui.visuals().faint_bg_color)
-            .show(ui, |ui| {
-                ui.heading(t!("welcome_tour"));
+            let mut welcome_text = t!("welcome_tour").to_string();
+            let num_lines = welcome_text.lines().count().max(1);
+            let note_margin_offset = 40.0;
+            let effective_width = (total_width - note_margin_offset).max(400.0);
+            let max_w = effective_width.min(max_msg_width);
+
+            ui.horizontal(|ui| {
+                ui.set_max_width(max_w);
+                ui.vertical(|ui| {
+                    ui.set_max_width(max_w);
+                    egui::Frame::default()
+                        .outer_margin(Margin { top: 5, right: 10, bottom: 5, left: 10 })
+                        .inner_margin(10.0)
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(5.0)
+                        .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("📝 Note Cell").weak().small());
+                                ui.label(egui::RichText::new("✨ Welcome").color(egui::Color32::DARK_GREEN).small());
+                            });
+                            ui.add_space(5.0);
+                            let mut fake_msg = inforno_core::common::ChatMsg::default();
+                            fake_msg.content = welcome_text;
+                            fake_msg.id = -1; // Arbitrary temporary ID
+                            let mut fake_msg_ui = ChatMsgUi::default();
+
+                            render_msg_content(
+                                ui, cache, &fake_msg, &mut fake_msg_ui, max_w as usize, math_cache.clone(),
+                                project_root, active_realm, &op_tx, &mut rhai_updates, &mut llm_prompt_request
+                            );
+                        });
+                });
+                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
             });
-            return;
+            // NO `return;` HERE! We allow the execution to fall through
+            // so the Notebook Appender cell renders beneath this fake view.
         }
 
         let active_agent_ind = 0;
@@ -322,8 +337,19 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                             content_updates.push((msg_id, note_content.clone(), true));
                                         }
 
+                                        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Enter);
+                                        let mut force_save = false;
+
+                                        if out.output.response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                                            force_save = true;
+                                            out.output.response.surrender_focus();
+                                            // Switch back to View mode automatically
+                                            is_edit_mode = false;
+                                            ui.data_mut(|d| d.insert_temp(edit_mode_id, false));
+                                        }
+
                                         // Commit to database and mark as saved on focus lost
-                                        if out.output.response.lost_focus() {
+                                        if out.output.response.lost_focus() || force_save {
                                             db_updates.push((msg_id, note_content.clone()));
                                             content_updates.push((msg_id, note_content.clone(), false));
                                         }
@@ -400,6 +426,12 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                         );
                     }
 
+                    let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Enter);
+                    if out.output.response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                        out.output.response.surrender_focus();
+                        draft_lost_focus = true; // Force commit immediately
+                    }
+
                     if out.output.response.changed() || draft_note != chat.draft_note {
                         let mut new_is_rhai = chat.draft_is_rhai;
                         if !new_is_rhai && inforno_core::scripting::is_likely_rhai(&draft_note) {
@@ -422,6 +454,9 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
     // Apply mutable updates outside of the chat borrow
     if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() || llm_prompt_request.is_some() {
+        
+        let mut extracted_draft_to_save = None;
+
         if let Some(chat) = state.open_chats.get_mut(&chat_id) {
             for (id, content, unsaved) in content_updates {
                 if let Some(m) = chat.msg_pool.get_mut(&id) {
@@ -441,22 +476,64 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             if draft_lost_focus {
                 let draft = chat.draft_note.trim();
                 if !draft.is_empty() {
-                    let mut new_msg = inforno_core::common::ChatMsg {
-                        id: 0,
-                        msg_role: inforno_core::common::MsgRole::Developer,
-                        content: chat.draft_note.clone(),
-                        ..Default::default()
-                    };
+                    // Extract the content safely, then clear it!
+                    extracted_draft_to_save = Some(chat.draft_note.clone());
+                    chat.draft_note.clear();
+                }
+            }
+        } // <--- THE BORROW ON state.open_chats DROPS HERE!
 
-                    if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut new_msg) {
-                        let new_id = new_msg.id;
-                        chat.msg_pool.insert(new_id, new_msg);
-                        for agent in chat.agents.iter_mut() {
-                            agent.msg_ids.push(new_id);
-                            let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+        // Now we can safely mutate the HashMap without conflicts
+        if let Some(draft_content) = extracted_draft_to_save {
+            let mut actual_chat_id = chat_id;
+
+                    // 1. Promote to a persistent chat if we are in the placeholder
+                    if actual_chat_id == 0 {
+                        let mut new_chat = inforno_core::common::Chat::default();
+                        new_chat.title = "Notebook".to_string();
+                        if let Ok(()) = inforno_core::db::mk_chat(&state.db_conn, &mut new_chat) {
+                            actual_chat_id = new_chat.id;
+                            
+                            let mut omnis = inforno_core::common::Agent::default();
+                            omnis.name = "Omnis".to_string();
+                            omnis.hidden = true;
+                            let _ = inforno_core::db::mk_agent(&state.db_conn, actual_chat_id, &mut omnis);
+                            new_chat.agents.push(omnis);
+
+                            state.open_chats.insert(actual_chat_id, new_chat);
+                            state.active_chat_id = Some(actual_chat_id);
+                            
+                            // Dynamically update the UI tab to point to the new Chat ID!
+                            if let Some(active_tile) = state.active_tile_id {
+                                if let Some(egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id: id })) = state.pane_tree.tiles.get_mut(active_tile) {
+                                    if *id == 0 {
+                                        *id = actual_chat_id;
+                                    }
+                                }
+                            }
+                            
+                            // Refresh sidebar
+                            crate::state::reload_db_chats(&state.db_conn, &mut state.db_chats);
                         }
                     }
-                    chat.draft_note.clear();
+
+            // 2. Append the Note Cell Message to the Chat
+            let mut new_msg = inforno_core::common::ChatMsg {
+                id: 0,
+                msg_role: inforno_core::common::MsgRole::Developer,
+                content: draft_content, // Use the extracted String
+                ..Default::default()
+            };
+
+            if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut new_msg) {
+                let new_id = new_msg.id;
+                // Safely grab a fresh mutable borrow to the specific target chat
+                if let Some(target_chat) = state.open_chats.get_mut(&actual_chat_id) {
+                    target_chat.msg_pool.insert(new_id, new_msg);
+                    for agent in target_chat.agents.iter_mut() {
+                        agent.msg_ids.push(new_id);
+                        let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                    }
                 }
             }
         }

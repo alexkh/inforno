@@ -168,26 +168,28 @@ pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
                     });
 
                     // --- Column 1: System Prompt ---
+                    let mut sys_has_focus = false;
                     if state.bottom_panel_state.show_system_prompt {
                         ui.allocate_ui(egui::vec2(col1_w, panel_height), |ui| {
                             ui.set_width(col1_w);
-                            render_system_prompt_col(ui, state);
+                            sys_has_focus = render_system_prompt_col(ui, state);
                         });
                         // Splitter 1
                         vertical_splitter(ui, &mut col1_w);
                     }
 
                     // --- Column 2: User Prompt ---
+                    let mut prompt_has_focus = false;
                     ui.allocate_ui(egui::vec2(col2_w, panel_height), |ui| {
                         ui.set_width(col2_w);
-                        render_user_prompt_col(ui, state, panel_height);
+                        prompt_has_focus = render_user_prompt_col(ui, state, panel_height);
                     });
 
                     // Splitter 2
                     vertical_splitter(ui, &mut col2_w);
 
                     // --- Column 3: Actions (Send & Presets) ---
-                    render_actions_col(ui, state, &ctx);
+                    render_actions_col(ui, state, &ctx, sys_has_focus || prompt_has_focus);
                 });
             });
         });
@@ -220,7 +222,8 @@ fn handle_panel_resize(ui: &mut Ui, state: &mut State, mut current_height: f32)
     current_height
 }
 
-fn render_system_prompt_col(ui: &mut Ui, state: &mut State) {
+fn render_system_prompt_col(ui: &mut Ui, state: &mut State) -> bool {
+    let mut has_focus = false;
     egui::ScrollArea::vertical()
     .id_salt("system_prompt_scroll")
     .show(ui, |ui| {
@@ -228,18 +231,21 @@ fn render_system_prompt_col(ui: &mut Ui, state: &mut State) {
             .stroke(egui::Stroke::new(1.0, ui.visuals().hyperlink_color))
             .corner_radius(ui.visuals().widgets.active.corner_radius)
             .show(ui, |ui| {
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::multiline(
                         &mut state.bottom_panel_state.system_prompt_edited)
                         .desired_width(f32::INFINITY)
                         .desired_rows(state.bottom_panel_state.desired_rows)
                         .hint_text(t!("system_prompt_optional"))
-                )
+                );
+                has_focus = response.has_focus();
             });
     });
+    has_focus
 }
 
-fn render_user_prompt_col(ui: &mut Ui, state: &mut State, panel_height: f32) {
+fn render_user_prompt_col(ui: &mut Ui, state: &mut State, panel_height: f32) -> bool {
+    let mut has_focus = false;
     egui::ScrollArea::vertical()
         .id_salt("prompt_scroll")
         .show(ui, |ui| {
@@ -250,6 +256,7 @@ fn render_user_prompt_col(ui: &mut Ui, state: &mut State, panel_height: f32) {
                     .desired_rows(state.bottom_panel_state.desired_rows)
                     .hint_text(t!("enter_prompt_here")),
             );
+            has_focus = response.has_focus();
 
             // Calculate row height once if unknown
             if state.bottom_panel_state.row_height == 0.0 {
@@ -269,12 +276,13 @@ fn render_user_prompt_col(ui: &mut Ui, state: &mut State, panel_height: f32) {
                 state.bottom_panel_state.height_modified = false;
             }
         });
+    has_focus
 }
 
-fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context) {
+fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context, prompt_is_focused: bool) {
     let mut do_send_prompt_now = false;
 
-    if ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter)) {
+    if prompt_is_focused && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Enter)) {
         do_send_prompt_now = true;
     }
 
