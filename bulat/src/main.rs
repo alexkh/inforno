@@ -69,12 +69,14 @@ fn main() -> eframe::Result {
         AppMode::Editor {
             filepath: Some(path),
             code,
+            language_override: None,
         }
     } else {
         // --- ZERO FILES: Empty Editor Mode ---
         AppMode::Editor {
             filepath: None,
             code: String::new(),
+            language_override: None,
         }
     };
 
@@ -86,7 +88,7 @@ fn main() -> eframe::Result {
     // Load user theme preference
     let global_config = load_global_config();
     let mut initial_theme = ColorTheme::default();
-    
+
     if let Some(saved_theme_name) = global_config.theme {
         if let Some(found_theme) = ColorTheme::available_themes().iter().find(|t| t.name() == saved_theme_name) {
             initial_theme = *found_theme;
@@ -105,9 +107,9 @@ fn main() -> eframe::Result {
                 cc.egui_ctx.set_visuals(egui::Visuals::light());
             }
 
-            Ok(Box::new(StandaloneBulat { 
+            Ok(Box::new(StandaloneBulat {
                 mode,
-                current_theme: initial_theme, 
+                current_theme: initial_theme,
                 show_settings: false,
             }))
         }),
@@ -119,6 +121,7 @@ enum AppMode {
     Editor {
         filepath: Option<String>,
         code: String,
+        language_override: Option<String>,
     },
     Diff {
         left_filepath: String,
@@ -169,10 +172,44 @@ impl eframe::App for StandaloneBulat {
                 // ==========================================
                 // SINGLE FILE EDITOR VIEW
                 // ==========================================
-                AppMode::Editor { filepath, code } => {
+                AppMode::Editor { filepath, code, language_override } => {
                     ui.horizontal(|ui| {
-                        if let Some(path) = filepath {
+                        if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+                            self.show_settings = true;
+                        }
+
+                        // Safely extract the current MIME directly (no extensions involved!)
+                        let current_mime = language_override.clone().unwrap_or_else(|| {
+                            filepath.as_ref()
+                                .map(|p| Syntax::guess_mime_from_path(Path::new(p)))
+                                .unwrap_or("text/plain")
+                                .to_string()
+                        });
+
+                        if let Some(path) = &*filepath {
                             ui.heading(format!("Editing: {}", path));
+                        } else {
+                            ui.heading("New File");
+                        }
+
+                        egui::ComboBox::from_id_salt("mime_type_selector")
+                            .selected_text(&current_mime)
+                            .show_ui(ui, |ui| {
+                                let supported_mimes = [
+                                    "text/plain", "text/rust", "text/x-c", "text/x-c++", 
+                                    "application/x-rhai", "text/markdown", "application/json", 
+                                    "application/toml", "application/yaml", "text/javascript", 
+                                    "text/typescript", "text/x-python", "text/html", "text/css", 
+                                    "application/x-sh"
+                                ];
+                                for &mime_opt in &supported_mimes {
+                                    if ui.selectable_label(current_mime == mime_opt, mime_opt).clicked() {
+                                        *language_override = Some(mime_opt.to_string());
+                                    }
+                                }
+                            });
+
+                        if let Some(path) = &*filepath {
                             if ui.button("💾 Save").clicked() {
                                 if let Err(e) = fs::write(path, &*code) {
                                     eprintln!("Failed to save file: {}", e);
@@ -180,29 +217,19 @@ impl eframe::App for StandaloneBulat {
                                     println!("File saved successfully!");
                                 }
                             }
-                        } else {
-                            ui.heading("New File");
                         }
-                        
-                        // Push the config wrench to the far right
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("🔧").on_hover_text("Open Settings").clicked() {
-                                self.show_settings = true;
-                            }
-                        });
                     });
                     ui.separator();
 
-                    // Dynamically pick syntax based on file extension!
-                    let syntax = if let Some(path) = filepath {
-                        let ext = Path::new(path)
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        Syntax::get_or_load(ctx, ext)
-                    } else {
-                        Syntax::rust()
-                    };
+                    let active_mime = language_override.clone().unwrap_or_else(|| {
+                        filepath.as_ref()
+                            .map(|p| Syntax::guess_mime_from_path(Path::new(p)))
+                            .unwrap_or("text/plain")
+                            .to_string()
+                    });
+
+                    // Engine uses MIME type exclusively now
+                    let syntax = Syntax::get_or_load(ctx, &active_mime);
 
                     CodeEditor::default()
                         .id_source("standalone_editor")
@@ -219,14 +246,14 @@ impl eframe::App for StandaloneBulat {
                 // ==========================================
                 AppMode::Diff { left_filepath, right_filepath, app } => {
                     ui.horizontal(|ui| {
+                        if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+                            self.show_settings = true;
+                        }
+
                         ui.heading("Diff Merge");
 
-                        // Push save buttons and theme selector to the far right
+                        // Push save buttons to the far right
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("🔧").on_hover_text("Open Settings").clicked() {
-                                self.show_settings = true;
-                            }
-                                
                             if ui.button("💾 Save Right File").clicked() {
                                 if let Err(e) = fs::write(&right_filepath, &app.right_code_real) {
                                     eprintln!("Failed to save right file: {}", e);

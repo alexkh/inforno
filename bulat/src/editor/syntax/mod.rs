@@ -289,48 +289,47 @@ pub struct SyntaxCache {
 
 impl Syntax {
     /// Lazily loads a syntax plugin and caches it securely inside egui's context memory.
-    pub fn get_or_load(ctx: &egui::Context, ext: &str) -> Self {
-        // 1. Fallback logic for hardcoded languages
-        if ext != "c" && ext != "h" {
-            return Syntax::rust();
-        }
-
+    pub fn get_or_load(ctx: &egui::Context, mime_type: &str) -> Self {
         let cache_id = egui::Id::new("editor_syntax_cache");
 
-        // 2. Check egui's internal memory cache for a hit
+        // 1. Check egui's internal memory cache for a hit using MIME type
         let cached_syntax = ctx.data_mut(|d| {
             let cache = d.get_temp_mut_or_default::<SyntaxCache>(cache_id);
-            cache.plugins.get(ext).cloned()
+            cache.plugins.get(mime_type).cloned()
         });
 
         if let Some(syntax) = cached_syntax {
             return syntax; // Cache Hit: Instant return
         }
 
-        // 3. Cache Miss: Load the plugin from disk
-        // (For a truly standalone editor, you could later pass a base directory here
-        // instead of hardcoding the inforno path)
+        // 2. Use the robust built-in MIME-based constructor
+        let builtin = Syntax::from_mime(mime_type);
+
+        // 3. Check for an overriding user Rhai script
+        // We sanitize the mime_type into a valid filename (e.g., text/x-c -> text_x-c.rhai)
+        let safe_filename = mime_type.replace('/', "_") + ".rhai";
         let plugin_path = std::path::PathBuf::from(
             std::env::var("HOME").unwrap_or_default()
-        ).join(".config/bulat/scripts/syntax/v1/my_c_syntax.rhai");
+        ).join(".config/bulat/scripts/syntax/v1/").join(&safe_filename);
 
-        let loaded_syntax = match crate::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
-            Ok(syn) => {
-                println!("✅ Lazy-loaded Rhai syntax plugin for '.{}' into egui memory!", ext);
-                syn
+        if plugin_path.exists() {
+            if let Ok(syn) = crate::editor::syntax::loader::load_syntax_plugin(&plugin_path) {
+                println!("✅ Lazy-loaded Rhai syntax plugin '{}' into egui memory!", safe_filename);
+                
+                ctx.data_mut(|d| {
+                    let cache = d.get_temp_mut_or_default::<SyntaxCache>(cache_id);
+                    cache.plugins.insert(mime_type.to_string(), syn.clone());
+                });
+                return syn;
             }
-            Err(e) => {
-                println!("❌ Failed to lazy-load Rhai plugin: {}", e);
-                Syntax::text()
-            }
-        };
+        }
 
-        // 4. Save it back to egui's memory for the next frame
+        // If no plugin exists, cache the built-in to skip disk checks next frame
         ctx.data_mut(|d| {
             let cache = d.get_temp_mut_or_default::<SyntaxCache>(cache_id);
-            cache.plugins.insert(ext.to_string(), loaded_syntax.clone());
+            cache.plugins.insert(mime_type.to_string(), builtin.clone());
         });
 
-        loaded_syntax
+        builtin
     }
 }
