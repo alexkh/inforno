@@ -70,6 +70,7 @@ fn main() -> eframe::Result {
             filepath: Some(path),
             code,
             language_override: None,
+            is_dirty: false,
         }
     } else {
         // --- ZERO FILES: Empty Editor Mode ---
@@ -77,6 +78,7 @@ fn main() -> eframe::Result {
             filepath: None,
             code: String::new(),
             language_override: None,
+            is_dirty: false,
         }
     };
 
@@ -122,6 +124,7 @@ enum AppMode {
         filepath: Option<String>,
         code: String,
         language_override: Option<String>,
+        is_dirty: bool,
     },
     Diff {
         left_filepath: String,
@@ -172,7 +175,12 @@ impl eframe::App for StandaloneBulat {
                 // ==========================================
                 // SINGLE FILE EDITOR VIEW
                 // ==========================================
-                AppMode::Editor { filepath, code, language_override } => {
+                AppMode::Editor { filepath, code, language_override, is_dirty } => {
+                    // Check for Ctrl+S / Cmd+S
+                    let save_requested = ui.input_mut(|i| {
+                        i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))
+                    });
+
                     ui.horizontal(|ui| {
                         if ui.button("🔧").on_hover_text("Open Settings").clicked() {
                             self.show_settings = true;
@@ -210,11 +218,19 @@ impl eframe::App for StandaloneBulat {
                             });
 
                         if let Some(path) = &*filepath {
-                            if ui.button("💾 Save").clicked() {
+                            let mut save_btn = egui::Button::new("💾 Save");
+                            
+                            // Highlight the save button with a border if the file is modified
+                            if *is_dirty {
+                                save_btn = save_btn.stroke(egui::Stroke::new(1.0, ui.visuals().warn_fg_color));
+                            }
+
+                            if ui.add(save_btn).clicked() || save_requested {
                                 if let Err(e) = fs::write(path, &*code) {
                                     eprintln!("Failed to save file: {}", e);
                                 } else {
                                     println!("File saved successfully!");
+                                    *is_dirty = false;
                                 }
                             }
                         }
@@ -231,7 +247,7 @@ impl eframe::App for StandaloneBulat {
                     // Engine uses MIME type exclusively now
                     let syntax = Syntax::get_or_load(ctx, &active_mime);
 
-                    CodeEditor::default()
+                    let editor_output = CodeEditor::default()
                         .id_source("standalone_editor")
                         .with_theme(self.current_theme)
                         .with_syntax(syntax)
@@ -239,6 +255,11 @@ impl eframe::App for StandaloneBulat {
                         .vscroll(true)
                         .v_auto_shrink(false) // Force the editor to fill the window
                         .show(ui, code);
+
+                    // Track changes to show the unsaved indicator
+                    if editor_output.output.response.changed() {
+                        *is_dirty = true;
+                    }
                 }
 
                 // ==========================================
