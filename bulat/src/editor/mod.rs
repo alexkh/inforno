@@ -10,7 +10,7 @@
 //!   .id_source("code editor")
 //!   .with_rows(12)
 //!   .with_fontsize(14.0)
-//!   .with_theme(ColorTheme::GRUVBOX)
+//!   .with_theme(ColorTheme::SV)
 //!   .with_syntax(Syntax::rust())
 //!   .with_numlines(true)
 //!   .show(ui, &mut self.code);
@@ -155,7 +155,7 @@ impl Default for CodeEditor {
         let syntax = Syntax::rust();
         CodeEditor {
             id: String::from("Code Editor"),
-            theme: ColorTheme::GRUVBOX,
+            theme: ColorTheme::SV,
             syntax,
             numlines: true,
             numlines_shift: 0,

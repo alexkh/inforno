@@ -56,7 +56,7 @@ pub struct ColorTheme {
 }
 impl Default for ColorTheme {
     fn default() -> Self {
-        ColorTheme::GRUVBOX
+        ColorTheme::SV
     }
 }
 impl ColorTheme {
