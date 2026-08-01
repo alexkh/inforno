@@ -72,7 +72,7 @@ pub mod highlighting;
 pub mod syntax;
 #[cfg(test)]
 mod tests;
-mod themes;
+pub mod themes;
 
 use egui::{Color32, Rect, Shape, TextBuffer, Vec2};
 use egui::text::LayoutJob;

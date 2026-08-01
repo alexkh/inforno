@@ -161,84 +161,8 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let is_active = self.state.active_tile_id == Some(tile_id);
-        let mut request_search_focus = false;
 
-        // Only intercept Ctrl+F if this pane is currently focused
-        if is_active && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-            request_search_focus = true;
-        }
-
-        let render_search_bar = |ui: &mut egui::Ui| {
-            let state_id = egui::Id::new("tab_search").with(tile_id);
-            let search_edit_id = state_id.with("edit");
-            let mut search_state = ui.ctx().data_mut(|d| d.get_temp::<bulat::editor::CodeEditorState>(state_id).unwrap_or_default());
-
-            let mut next = false;
-            let mut prev = false;
-            let mut changed = false;
-
-            // Must be Left-to-Right so elements aren't flipped visually by the parent's Right-to-Left
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut search_state.search_term)
-                        .id_source(search_edit_id)
-                        .desired_width(120.0)
-                        .hint_text("🔍 Search...")
-                );
-
-                if request_search_focus {
-                    response.request_focus();
-                }
-
-                changed = response.changed();
-
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    next = true;
-                    response.request_focus();
-                }
-
-                // Dynamically reveal controls ONLY when there is a search term
-                if !search_state.search_term.is_empty() {
-                    if search_state.match_count > 0 {
-                        ui.label(egui::RichText::new(format!(" {}/{} ", search_state.current_match + 1, search_state.match_count)).color(egui::Color32::GRAY));
-                    } else {
-                        ui.label(egui::RichText::new(" 0/0 ").color(egui::Color32::GRAY));
-                    }
-
-                    if ui.button("↑").clicked() { prev = true; }
-                    if ui.button("↓").clicked() { next = true; }
-
-                    if ui.button("✖").clicked() {
-                        search_state.search_term.clear();
-                        changed = true; // Force highlight clearing
-                    }
-                } else {
-                    ui.label(" "); // Empty space to keep layout stable
-                }
-                ui.add_space(8.0);
-            });
-
-            if changed {
-                search_state.current_match = 0;
-            } else if next {
-                search_state.current_match = search_state.current_match.saturating_add(1);
-            } else if prev {
-                search_state.current_match = search_state.current_match.checked_sub(1).unwrap_or(search_state.match_count.saturating_sub(1));
-            }
-
-            if search_state.match_count > 0 {
-                search_state.current_match %= search_state.match_count;
-            }
-
-            search_state.scroll_to_match = changed || next || prev;
-            search_state.match_count = 0; // Reset so editors can re-accumulate this frame
-
-            ui.ctx().data_mut(|d| d.insert_temp(state_id, search_state));
-        };
-
-        // Define our highlight border. If active, use the theme's hyperlink/accent color.
+            // Define our highlight border. If active, use the theme's hyperlink/accent color.
         let frame = if is_active {
             egui::Frame::default()
                 .stroke(egui::Stroke::new(1.0, ui.visuals().strong_text_color()))
@@ -309,66 +233,48 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             });
                     }
 
-                    Pane::Editor { path, content } => {
-                        ui.horizontal(|ui| {
-                            ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
-                            ui.label(format!("{}: {}", t!("editing"), relative_path(path)));
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                // Now we only keep pane-specific actions like Save.
-                                if ui.button("💾 Save").clicked() {
-                                    if let Err(e) = std::fs::write(&path, &*content) {
-                                        self.state.error_msg = Some(format!("Failed to save file: {}", e));
-                                        self.state.is_modal_open = true;
-                                    }
-                                }
-
-                                render_search_bar(ui);
-                            });
-                        });
-                        ui.separator();
-
-                        let available_width = ui.available_width();
-                        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-
-                        // The editor handles its own caching and loading now!
-                        let syntax = bulat::editor::Syntax::get_or_load(ui.ctx(), ext);
-
-                        bulat::editor::CodeEditor::default()
-                            .with_search_state_id(egui::Id::new("tab_search").with(tile_id))
-                            .id_source(format!("editor_code_{:?}", tile_id))
-                            .with_theme(bulat::editor::ColorTheme::SV)
-                            .with_syntax(syntax)
-                            .vscroll(true)
-                            .v_auto_shrink(false)
-                            .desired_width(available_width)
-                            .show(ui, content);
-                    }
-
-                    Pane::Merge { path } => {
-                        ui.horizontal(|ui| {
-                            ui.visuals_mut().override_text_color = Some(ui.visuals().text_color().linear_multiply(0.8));
-                            ui.label(format!("{}: {}", t!("merging"), relative_path(path)));
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("💾 Save").clicked() {
-                                    if let Some(app) = self.state.merge_apps.get(&tile_id) {
-                                        if let Err(e) = std::fs::write(&path, &app.left_code_real) {
+                    Pane::Editor { path, content: _ } => {
+                        // Note: You must store `BulatEditorApp` in your Inforno State
+                        // exactly like you currently store `merge_apps`.
+                        if let Some(app) = self.state.editor_apps.get_mut(&tile_id) {
+                            if let Some(action) = app.show(ui) {
+                                match action {
+                                    bulat::EditorAction::SaveRequested => {
+                                        // Inforno handles the actual disk write safely using its realm knowledge
+                                        if let Err(e) = std::fs::write(&path, &app.content) {
                                             self.state.error_msg = Some(format!("Failed to save file: {}", e));
                                             self.state.is_modal_open = true;
                                         }
+                                    },
+                                    bulat::EditorAction::ThemeChanged(_new_theme) => {
+                                        // Inforno updates the global egui visual context here if needed
                                     }
                                 }
-
-                                render_search_bar(ui);
+                            }
+                        } else {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(20.0);
+                                ui.colored_label(ui.visuals().warn_fg_color, "Editor session data lost.");
+                                ui.label("Please close this tab and reopen it.");
                             });
-                        });
-                        ui.separator();
+                        }
+                    }
 
+                    Pane::Merge { path } => {
                         if let Some(app) = self.state.merge_apps.get_mut(&tile_id) {
-                            // Link the DiffApp to this tab's search bar state
+                            // Let the embedded tool know the virtual filename and the ID string
+                            app.left_filepath = Some(relative_path(path));
+                            app.right_filepath = None;
                             app.search_state_id = Some(egui::Id::new("tab_search").with(tile_id));
-                            app.show(ui);
+
+                            let (save_left, _) = app.show(ui);
+
+                            if save_left {
+                                if let Err(e) = std::fs::write(&path, &app.left_code_real) {
+                                    self.state.error_msg = Some(format!("Failed to save file: {}", e));
+                                    self.state.is_modal_open = true;
+                                }
+                            }
                         } else {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(20.0);
@@ -712,12 +618,14 @@ pub fn open_chat_in_right_pane(state: &mut crate::state::State, chat_id: i64) {
 }
 
 pub fn open_editor_in_tab(state: &mut crate::state::State, path: PathBuf, content: String) {
-    spawn_in_tab(state, Pane::Editor { path, content });
+    let new_tile_id = spawn_in_tab(state, Pane::Editor { path: path.clone(), content: String::new() });
+    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(path), content));
     state.active_chat_id = None; // Disconnect the bottom panel
 }
 
 pub fn open_editor_in_right_pane(state: &mut crate::state::State, path: PathBuf, content: String) {
-    spawn_in_right_pane(state, Pane::Editor { path, content });
+    let new_tile_id = spawn_in_right_pane(state, Pane::Editor { path: path.clone(), content: String::new() });
+    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(path), content));
     state.active_chat_id = None;
 }
 

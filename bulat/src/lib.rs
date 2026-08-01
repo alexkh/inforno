@@ -1,4 +1,5 @@
 pub mod engine;
+use std::path::PathBuf;
 
 #[cfg(feature = "gui")]
 pub mod editor;
@@ -26,8 +27,279 @@ struct DiffBlock {
 }
 
 #[cfg(feature = "gui")]
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct BulatConfig {
+    pub theme: Option<String>,
+}
+
+#[cfg(feature = "gui")]
+pub fn config_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("", "", "bulat")
+        .map(|proj_dirs| proj_dirs.config_dir().join("global.yml"))
+}
+
+#[cfg(feature = "gui")]
+pub fn load_config() -> BulatConfig {
+    if let Some(path) = config_path() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(config) = serde_yaml::from_str::<BulatConfig>(&content) {
+                return config;
+            }
+        }
+    }
+    BulatConfig::default()
+}
+
+#[cfg(feature = "gui")]
+pub fn save_config(theme_name: &str) {
+    if let Some(path) = config_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let config = BulatConfig {
+            theme: Some(theme_name.to_string()),
+        };
+        if let Ok(yaml) = serde_yaml::to_string(&config) {
+            let _ = std::fs::write(path, yaml);
+        }
+    }
+}
+
+#[cfg(feature = "gui")]
+pub fn render_settings_window(ctx: &egui::Context, show_settings: &mut bool, current_theme: &mut editor::ColorTheme) {
+    let mut show = *show_settings;
+    if show {
+        egui::Window::new("🔧 Editor Configuration")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut show)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Theme:");
+                    egui::ComboBox::from_id_salt("global_theme_selector")
+                        .selected_text(current_theme.name())
+                        .show_ui(ui, |ui| {
+                            for theme in editor::ColorTheme::available_themes() {
+                                if ui.selectable_value(current_theme, *theme, theme.name()).changed() {
+                                    if theme.is_dark() {
+                                        ctx.set_visuals(egui::Visuals::dark());
+                                    } else {
+                                        ctx.set_visuals(egui::Visuals::light());
+                                    }
+                                    save_config(theme.name());
+                                }
+                            }
+                        });
+                });
+            });
+    }
+    *show_settings = show;
+}
+
+#[cfg(feature = "gui")]
+pub fn render_search_bar(ui: &mut egui::Ui, state_id: egui::Id, request_search_focus: bool) {
+    let search_edit_id = state_id.with("edit");
+    let mut search_state = ui.ctx().data_mut(|d| d.get_temp::<editor::CodeEditorState>(state_id).unwrap_or_default());
+
+    let mut next = false;
+    let mut prev = false;
+    let mut changed = false;
+
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut search_state.search_term)
+                .id_source(search_edit_id)
+                .desired_width(120.0)
+                .hint_text("🔍 Search...")
+        );
+
+        if request_search_focus {
+            response.request_focus();
+        }
+
+        changed = response.changed();
+
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            next = true;
+            response.request_focus();
+        }
+
+        if !search_state.search_term.is_empty() {
+            if search_state.match_count > 0 {
+                ui.label(egui::RichText::new(format!(" {}/{} ", search_state.current_match + 1, search_state.match_count)).color(egui::Color32::GRAY));
+            } else {
+                ui.label(egui::RichText::new(" 0/0 ").color(egui::Color32::GRAY));
+            }
+
+            if ui.button("↑").clicked() { prev = true; }
+            if ui.button("↓").clicked() { next = true; }
+
+            if ui.button("✖").clicked() {
+                search_state.search_term.clear();
+                changed = true;
+            }
+        } else {
+            ui.label(" "); // Empty space to keep layout stable
+        }
+        ui.add_space(8.0);
+    });
+
+    if changed {
+        search_state.current_match = 0;
+    } else if next {
+        search_state.current_match = search_state.current_match.saturating_add(1);
+    } else if prev {
+        search_state.current_match = search_state.current_match.checked_sub(1).unwrap_or(search_state.match_count.saturating_sub(1));
+    }
+
+    if search_state.match_count > 0 {
+        search_state.current_match %= search_state.match_count;
+    }
+
+    search_state.scroll_to_match = changed || next || prev;
+    search_state.match_count = 0; // Reset so editors can re-accumulate this frame
+
+    ui.ctx().data_mut(|d| d.insert_temp(state_id, search_state));
+}
+
+#[cfg(feature = "gui")]
+#[derive(Clone)]
+pub struct EditorViewState {
+    pub language_override: Option<String>,
+    pub is_dirty: bool,
+    pub show_settings: bool,
+    pub theme: editor::ColorTheme,
+}
+
+#[cfg(feature = "gui")]
+impl Default for EditorViewState {
+    fn default() -> Self {
+        let config = load_config();
+        let mut theme = editor::ColorTheme::default();
+        if let Some(t_name) = config.theme {
+            if let Some(t) = editor::ColorTheme::available_themes().iter().find(|t| t.name() == t_name) {
+                theme = *t;
+            }
+        }
+        Self { language_override: None, is_dirty: false, show_settings: false, theme }
+    }
+}
+
+/// Natively embeds the full UI capability of the text editor without storing permanent structs.
+#[cfg(feature = "gui")]
+pub fn show_editor(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    filepath: Option<&str>,
+    title_override: Option<&str>,
+    code: &mut String,
+    hide_save: bool,
+) -> bool {
+    let mut view_state = ui.ctx().data_mut(|d| d.get_temp::<EditorViewState>(id).unwrap_or_default());
+    let mut save_requested = false;
+
+    if !hide_save {
+        save_requested = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S)));
+    }
+    let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
+
+    render_settings_window(ui.ctx(), &mut view_state.show_settings, &mut view_state.theme);
+
+    ui.horizontal(|ui| {
+        if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+            view_state.show_settings = true;
+        }
+
+        let current_mime = view_state.language_override.clone().unwrap_or_else(|| {
+            filepath
+                .map(|p| editor::Syntax::guess_mime_from_path(std::path::Path::new(p)))
+                .unwrap_or("text/plain")
+                .to_string()
+        });
+
+        let dirty_marker = if view_state.is_dirty && !hide_save { "*" } else { "" };
+
+        if let Some(title) = title_override {
+            ui.heading(format!("{}{}", title, dirty_marker));
+        } else {
+            let display_path = filepath.unwrap_or("New File");
+            ui.heading(format!("Editing: {}{}", display_path, dirty_marker));
+        }
+
+        egui::ComboBox::from_id_salt(id.with("mime_type_selector"))
+            .selected_text(&current_mime)
+            .show_ui(ui, |ui| {
+                let supported_mimes = [
+                    "text/plain", "text/rust", "text/x-c", "text/x-c++",
+                    "application/x-rhai", "text/markdown", "application/json",
+                    "application/toml", "application/yaml", "text/javascript",
+                    "text/typescript", "text/x-python", "text/html", "text/css",
+                    "application/x-sh"
+                ];
+                for &mime_opt in &supported_mimes {
+                    if ui.selectable_label(current_mime == mime_opt, mime_opt).clicked() {
+                        view_state.language_override = Some(mime_opt.to_string());
+                    }
+                }
+            });
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !hide_save && filepath.is_some() {
+                let save_btn = egui::Button::new("💾 Save");
+                if view_state.is_dirty {
+                    egui::Stroke::new(1.0_f32, ui.visuals().warn_fg_color);
+                }
+                if ui.add(save_btn).clicked() {
+                    save_requested = true;
+                }
+            }
+
+            render_search_bar(ui, id.with("search"), request_search_focus);
+        });
+    });
+    ui.separator();
+
+    let active_mime = view_state.language_override.clone().unwrap_or_else(|| {
+        filepath
+            .map(|p| editor::Syntax::guess_mime_from_path(std::path::Path::new(p)))
+            .unwrap_or("text/plain")
+            .to_string()
+    });
+
+    let syntax = editor::Syntax::get_or_load(ui.ctx(), &active_mime);
+
+    let editor_output = editor::CodeEditor::default()
+        .id_source(format!("{:?}", id.with("editor")))
+        .with_theme(view_state.theme)
+        .with_syntax(syntax)
+        .with_numlines(true)
+        .vscroll(true)
+        .v_auto_shrink(false)
+        .with_search_state_id(id.with("search"))
+        .show(ui, code);
+
+    if editor_output.output.response.changed() {
+        view_state.is_dirty = true;
+    }
+    if save_requested {
+        view_state.is_dirty = false;
+    }
+
+    ui.ctx().data_mut(|d| d.insert_temp(id, view_state));
+
+    save_requested
+}
+
+#[cfg(feature = "gui")]
 #[derive(Clone)]
 pub struct DiffApp {
+    pub left_filepath: Option<String>,
+    pub right_filepath: Option<String>,
+    pub language_override: Option<String>,
+    pub show_settings: bool,
+
     // The "True" content of the files
     pub left_code_real: String,
     pub right_code_real: String,
@@ -79,16 +351,28 @@ impl DiffApp {
         }
         // ------------------------------
 
+        let config = load_config();
+        let mut theme = editor::ColorTheme::default();
+        if let Some(t_name) = config.theme {
+            if let Some(t) = editor::ColorTheme::available_themes().iter().find(|t| t.name() == t_name) {
+                theme = *t;
+            }
+        }
+
         let mut app = Self {
+            left_filepath: None,
+            right_filepath: None,
+            language_override: None,
+            show_settings: false,
             left_code_real: left_code,
             right_code_real: right_code,
             left_view: String::new(),
             right_view: String::new(),
             left_line_map: Vec::new(),
             right_line_map: Vec::new(),
-            syntax: Syntax::rust(),
-            theme: ColorTheme::SV,
-            left_diff_map: BTreeMap::new(),
+            syntax: editor::Syntax::rust(),
+            theme,
+            left_diff_map: std::collections::BTreeMap::new(),
             right_diff_map: BTreeMap::new(),
             scroll_offset: 0.0,
             hscroll_ratio: 0.0,
@@ -251,7 +535,7 @@ impl DiffApp {
     fn apply_merge(&mut self, op: DiffOp) {
         // DELEGATE TO PURE ENGINE:
         self.left_code_real = BulatEngine::apply_merge(&self.left_code_real, &self.right_code_real, &op);
-        
+
         // Recalculate the diff!
         self.recalculate_diff();
     }
@@ -261,7 +545,67 @@ impl DiffApp {
         BulatEngine::extract_real_code(view)
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    pub fn show(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        let mut save_left = false;
+        let mut save_right = false;
+
+        render_settings_window(ui.ctx(), &mut self.show_settings, &mut self.theme);
+        let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
+
+        ui.horizontal(|ui| {
+            if ui.button("🔧").on_hover_text("Open Settings").clicked() {
+                self.show_settings = true;
+            }
+
+            let display_path = self.left_filepath.as_deref().or(self.right_filepath.as_deref()).unwrap_or("Diff Merge");
+            ui.heading(display_path);
+
+            let current_mime = self.language_override.clone().unwrap_or_else(|| {
+                self.left_filepath.as_ref().or(self.right_filepath.as_ref())
+                    .map(|p| editor::Syntax::guess_mime_from_path(std::path::Path::new(p)))
+                    .unwrap_or("text/plain")
+                    .to_string()
+            });
+
+            egui::ComboBox::from_id_salt(ui.id().with("diff_mime_type_selector"))
+                .selected_text(&current_mime)
+                .show_ui(ui, |ui| {
+                    let supported_mimes = [
+                        "text/plain", "text/rust", "text/x-c", "text/x-c++",
+                        "application/x-rhai", "text/markdown", "application/json",
+                        "application/toml", "application/yaml", "text/javascript",
+                        "text/typescript", "text/x-python", "text/html", "text/css",
+                        "application/x-sh"
+                    ];
+                    for &mime_opt in &supported_mimes {
+                        if ui.selectable_label(current_mime == mime_opt, mime_opt).clicked() {
+                            self.language_override = Some(mime_opt.to_string());
+                        }
+                    }
+                });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.right_filepath.is_some() {
+                    if ui.button("💾 Save Right").clicked() { save_right = true; }
+                }
+                if self.left_filepath.is_some() {
+                    if ui.button("💾 Save Left").clicked() { save_left = true; }
+                }
+
+                let search_id = self.search_state_id.unwrap_or_else(|| ui.id().with("search"));
+                render_search_bar(ui, search_id, request_search_focus);
+            });
+        });
+        ui.separator();
+
+        let active_mime = self.language_override.clone().unwrap_or_else(|| {
+            self.left_filepath.as_ref().or(self.right_filepath.as_ref())
+                .map(|p| editor::Syntax::guess_mime_from_path(std::path::Path::new(p)))
+                .unwrap_or("text/plain")
+                .to_string()
+        });
+        self.syntax = editor::Syntax::get_or_load(ui.ctx(), &active_mime);
+
         let mut left_changed = false;
         let mut right_changed = false;
         let row_height = self.calculated_row_height;
@@ -292,9 +636,9 @@ impl DiffApp {
                             page_down = true;
                         }
                     });
-                    
+
                     if page_up || page_down {
-                        let height = ui.ctx().screen_rect().height() * 0.8;
+                        let height = ui.ctx().content_rect().height() * 0.8;
                         let shift = if page_up { -height } else { height };
                         let target_rect = ui.clip_rect().translate(egui::vec2(0.0, shift));
                         ui.scroll_to_rect(target_rect, None);
@@ -324,7 +668,7 @@ impl DiffApp {
                         ui.set_min_width(side_width);
                         ui.set_max_width(side_width);
                         ui.horizontal(|ui| {
-                            ui.heading("File 1 (Filesystem)");
+                            ui.heading(self.left_filepath.as_deref().unwrap_or("File 1 (Left)"));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("🗐").on_hover_text("Copy original file").clicked() {
                                     ui.ctx().copy_text(self.left_code_real.clone());
@@ -450,7 +794,7 @@ impl DiffApp {
                         ui.set_min_width(side_width);
                         ui.set_max_width(side_width);
                         ui.horizontal(|ui| {
-                            ui.heading("File 2 (Diff)");
+                            ui.heading(self.right_filepath.as_deref().unwrap_or("File 2 (Right)"));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("🗐").on_hover_text("Copy modified file").clicked() {
                                     ui.ctx().copy_text(self.right_code_real.clone());
@@ -510,5 +854,169 @@ impl DiffApp {
         if left_changed || right_changed {
             self.recalculate_diff();
         }
+
+        (save_left, save_right)
+    }
+}
+
+pub enum EditorAction {
+    SaveRequested,
+    ThemeChanged(ColorTheme),
+    // Add other events you need the host to know about
+}
+
+pub struct BulatEditorApp {
+    pub filepath: Option<PathBuf>,
+    pub content: String,
+    pub search_term: String,
+    pub show_settings: bool,
+    pub current_theme: crate::editor::ColorTheme,
+    pub active_mime: Option<String>,
+    pub is_dirty: bool,
+}
+
+impl BulatEditorApp {
+    pub fn new(filepath: Option<PathBuf>, content: String) -> Self {
+        let config = load_config();
+        let mut active_theme = crate::editor::ColorTheme::default(); // Defaults to SV
+
+        // Load the globally saved theme from global.yml
+        if let Some(t_name) = config.theme {
+            if let Some(t) = crate::editor::themes::DEFAULT_THEMES.iter().find(|t| t.name() == t_name) {
+                active_theme = t.clone();
+            }
+        }
+
+        Self {
+            filepath,
+            content,
+            search_term: String::new(),
+            show_settings: false,
+            current_theme: active_theme,
+            active_mime: None,
+            is_dirty: false,
+        }
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<EditorAction> {
+        let mut action = None;
+
+        ui.horizontal(|ui| {
+            // 1. Wrench Menu (Left)
+            if ui.button("🔧").clicked() {
+                self.show_settings = !self.show_settings;
+            }
+
+            // 2. File Path
+            ui.label(self.filepath.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "New File".into()));
+
+            // 3. Language/MIME Selector
+            let current_mime = self.active_mime.clone().unwrap_or_else(|| {
+                self.filepath.as_ref()
+                    .map(|p| crate::editor::Syntax::guess_mime_from_path(p))
+                    .unwrap_or("text/plain")
+                    .to_string()
+            });
+
+            egui::ComboBox::from_id_salt("mime_selector")
+                .selected_text(&current_mime)
+                .show_ui(ui, |ui| {
+                    let supported_mimes = [
+                        "text/plain", "text/rust", "text/x-c", "text/x-c++",
+                        "application/x-rhai", "text/markdown", "application/json",
+                        "application/toml", "application/yaml", "text/javascript",
+                        "text/typescript", "text/x-python", "text/html", "text/css",
+                        "application/x-sh"
+                    ];
+                    for &mime_opt in &supported_mimes {
+                        ui.selectable_value(&mut self.active_mime, Some(mime_opt.to_string()), mime_opt);
+                    }
+                });
+
+            // 4. Search and Save (Right-to-Left)
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut save_btn = egui::Button::new("💾 Save");
+                if self.is_dirty {
+                    save_btn = save_btn.stroke(egui::Stroke::new(1.0, ui.visuals().warn_fg_color));
+                }
+
+                if ui.add(save_btn).clicked() {
+                    self.is_dirty = false;
+                    action = Some(EditorAction::SaveRequested);
+                }
+
+                // Embed the exact same render_search_bar logic here, but using `self.search_term`
+                // self.render_search_bar(ui);
+            });
+        });
+
+        ui.separator();
+
+        // 5. Render Settings Window if active
+        let mut close_settings = false;
+        if self.show_settings {
+            egui::Window::new("Editor Settings")
+                .open(&mut self.show_settings)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Theme:");
+                        egui::ComboBox::from_id_salt("theme_selector")
+                            .selected_text(self.current_theme.name())
+                            .show_ui(ui, |ui| {
+                                for theme in crate::editor::themes::DEFAULT_THEMES.iter() {
+                                    if ui.selectable_value(&mut self.current_theme, theme.clone(), theme.name()).clicked() {
+                                        save_config(theme.name());
+                                        action = Some(EditorAction::ThemeChanged(theme.clone()));
+                                    }
+                                }
+                            });
+                    });
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        close_settings = true;
+                    }
+                });
+        }
+        if close_settings {
+            self.show_settings = false;
+        }
+
+        // 6. Render the actual CodeEditor below
+        let available_width = ui.available_width();
+
+        // Use the requested MIME type to load the correct syntax rules
+        let active_mime = self.active_mime.clone().unwrap_or_else(|| {
+            self.filepath.as_ref()
+                .map(|p| crate::editor::Syntax::guess_mime_from_path(p))
+                .unwrap_or("text/plain")
+                .to_string()
+        });
+
+        let syntax = crate::editor::Syntax::get_or_load(ui.ctx(), &active_mime);
+
+        let editor_output = crate::editor::CodeEditor::default()
+            .with_search_state_id(egui::Id::new("bulat_search").with(ui.id()))
+            .id_source(format!("{:?}", ui.id().with("bulat_editor")))
+            .with_theme(self.current_theme.clone())
+            .with_syntax(syntax)
+            .vscroll(true)
+            .v_auto_shrink(false)
+            .desired_width(available_width)
+            .show(ui, &mut self.content);
+
+        // 7. Track modifications
+        if editor_output.output.response.changed() {
+            self.is_dirty = true;
+        }
+
+        // 8. Restore Ctrl+S functionality
+        if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
+            self.is_dirty = false;
+            action = Some(EditorAction::SaveRequested);
+        }
+
+        action
     }
 }
