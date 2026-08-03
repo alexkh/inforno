@@ -357,16 +357,27 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                             if is_edit_mode {
                                         let syntax = if is_rhai { Syntax::rhai() } else { Syntax::from_mime("text/markdown") };
 
+                                        let mut padded_note = note_content.clone();
+                                        padded_note.push('\n');
+
                                         let out = CodeEditor::default()
                                             .id_source(format!("note_{}", msg.id))
                                             .with_theme(ColorTheme::SV)
                                             .with_syntax(syntax)
                                             .with_numlines(false)
-                                            .with_rows(num_lines)
+                                            .with_rows(num_lines + 1)
                                             .vscroll(false)
                                             .v_auto_shrink(true) // Uncap height to display full text
                                             .desired_width(max_w)
-                                            .show(ui, &mut note_content);
+                                            .show(ui, &mut padded_note);
+
+                                        if padded_note.ends_with('\n') {
+                                            padded_note.pop();
+                                            if padded_note.ends_with('\r') {
+                                                padded_note.pop();
+                                            }
+                                        }
+                                        note_content = padded_note;
 
                                         // Sticky Rhai Detection & Mark as unsaved while typing
                                         if out.output.response.changed() {
@@ -450,16 +461,27 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                             let syntax = if chat.draft_is_rhai { Syntax::rhai() } else { Syntax::from_mime("text/markdown") };
 
+                            let mut padded_draft = draft_note.clone();
+                            padded_draft.push('\n');
+
                             let out = CodeEditor::default()
                                 .id_source(format!("draft_{}", chat_id))
                                 .with_theme(ColorTheme::SV)
                                 .with_syntax(syntax)
                                 .with_numlines(false)
-                                .with_rows(num_lines)
+                                .with_rows(num_lines + 1)
                                 .vscroll(false)
                                 .v_auto_shrink(true) // Uncap height to display full text
                                 .desired_width(max_w - 50.0)
-                                .show(ui, &mut draft_note);
+                                .show(ui, &mut padded_draft);
+
+                            if padded_draft.ends_with('\n') {
+                                padded_draft.pop();
+                                if padded_draft.ends_with('\r') {
+                                    padded_draft.pop();
+                                }
+                            }
+                            draft_note = padded_draft;
 
                     // Optional placeholder text if empty
                     if draft_note.is_empty() && !out.output.response.has_focus() {
@@ -1086,15 +1108,18 @@ fn render_msg_content(
                                     });
                                 });
 
+                                let mut display_buffer = code_buffer.clone();
+                                display_buffer.push('\n');
+
                                 CodeEditor::default()
                                     .id_source(format!("rhai_code_{}_{}", msg.id, i))
                                     .with_theme(ColorTheme::SV)
                                     .with_syntax(Syntax::rhai())
                                     .with_numlines(false)
-                                    .with_rows(code_buffer.lines().count().max(1))
+                                    .with_rows(display_buffer.lines().count().max(1))
                                     .vscroll(false)
                                     .v_auto_shrink(true)
-                                    .show(ui, &mut code_buffer);
+                                    .show(ui, &mut display_buffer);
 
                                 if let Some(vol_out) = &msg.volatile_output {
                                     ui.separator();
@@ -1444,16 +1469,20 @@ fn render_msg_content(
                         });
                     } else {
                         // Otherwise, just show the normal LLM raw text
+                        let mut display_buffer = code_buffer.clone();
+                        display_buffer.push('\n');
+                        let display_lines = display_buffer.lines().count().max(1);
+
                         CodeEditor::default()
                             .id_source(format!("code_block_{}_{}", msg.id, i))
                             .with_theme(ColorTheme::SV)
                             .with_syntax(Syntax::from_mime(mime_type))
                             .with_numlines(false)
-                            .with_rows(num_lines)
+                            .with_rows(display_lines)
                             // Disable internal scroll so the parent chat window handles scrolling natively
                             .vscroll(false)
                             .v_auto_shrink(true) // Uncap height to display full snippet
-                            .show(ui, &mut code_buffer);
+                            .show(ui, &mut display_buffer);
 
                     }
 
