@@ -207,12 +207,15 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                             });
                             ui.add_space(5.0);
                             let mut fake_msg = inforno_core::common::ChatMsg::default();
-                            fake_msg.content = welcome_text;
+                            // Guarantee strict Markdown compliance (like table spacing) is met!
+                            fake_msg.content = inforno_core::db::normalize_code_blocks(&welcome_text);
                             fake_msg.id = -1; // Arbitrary temporary ID
-                            let mut fake_msg_ui = ChatMsgUi::default();
+
+                            // Fetch persistent UI state using the temporary ID so interactions don't reset
+                            let fake_msg_ui = msg_ui_map.entry(fake_msg.id).or_insert_with(ChatMsgUi::default);
 
                             render_msg_content(
-                                ui, cache, &fake_msg, &mut fake_msg_ui, max_w as usize, math_cache.clone(),
+                                ui, cache, &fake_msg, fake_msg_ui, max_w as usize, math_cache.clone(),
                                 project_root, active_realm, &op_tx, &mut rhai_updates, &mut llm_prompt_request
                             );
                         });
@@ -1021,7 +1024,7 @@ fn render_msg_content(
                 inforno_core::parsing::ContentChunk::Code { lang, code, filepath } => {
                     // 1. Evaluate the precise MIME type
                     let mut mime_type = bulat::editor::Syntax::guess_mime_from_markdown_lang(lang);
-                    
+
                     // If the markdown tag was missing or unrecognized (defaulting to text/plain),
                     // fall back to guessing based on the file extension from the header.
                     if mime_type == "text/plain" {

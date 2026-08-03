@@ -311,7 +311,7 @@ pub fn update_agent_preset_snapshot(
 // data not to introduce any unforeseen issues.
 // We also use this to safely pad display math ($$) and blockquotes (>)
 // with newlines to force proper block rendering in egui_commonmark.
-fn normalize_code_blocks(markdown: &str) -> String {
+pub fn normalize_code_blocks(markdown: &str) -> String {
     static RE_CODE_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_BQ_UNINDENT: OnceLock<Regex> = OnceLock::new();
     static RE_MATH_UNINDENT: OnceLock<Regex> = OnceLock::new();

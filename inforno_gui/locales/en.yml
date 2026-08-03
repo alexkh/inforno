@@ -73,27 +73,27 @@ system_prompt_optional: "System Prompt (Optional)"
 enter_prompt_here: "Enter Your Prompt Here"
 send_prompt_btn: "Send Prompt"
 how_to_use: "How to use this software?"
-welcome_tour: "
-  Welcome to Inforno! Your private vehicle for exploring the AI Models World!\n
-  \n
+welcome_tour: |
+  ## Welcome to Inforno! Your private vehicle for exploring the AI Models World!
+
   Inforno is a graphical user interface frontend for Ollama and OpenRouter.
   It does not run any Large Language Models (LLMs), bur rather
   redirects the prompt entered by user to one or more Agents, which are
-  provided by one or both of the backend solutions: Ollama and OpenRouter.\n
-  \n
+  provided by one or both of the backend solutions: Ollama and OpenRouter.
+
   Ollama is a background service that runs on your computer
   that enables you to run LLM's on your
   for free, as long as the model is available for download and your
   computer has enough memory do run that model. For a list of models readily
-  supported by Ollama, go to ollama.com/search\n
-  \n
+  supported by Ollama, go to ollama.com/search
+
   OpenRouter is a commercial cloud solution that routes user prompts to other
   cloud providers, giving you access to big commercial LLM's like Claude Opus,
   without any monthly/yearly subscriptions. You just put the
   money on your OpenRouter account, and it is deducted on a per-token basis. The
   prices for different models range widely, but they are stated on their website
   and you can sompare and shop around before deciding which model(s) to talk to.
-  \n\n
+
   Disclaimer: we, the creators of Inforno are not affiliated to Ollama or
   OpenRouter. Inforno just uses those services on your behalf. We do not collect
   any of your personal information. Your OpenRouter key is never sent to us,
@@ -101,7 +101,7 @@ welcome_tour: "
   someone asks you your API key or money - it's a scam! We don't
   charge any money, we don't have any subscriptions, customer account page or
   a database server that stores any of your information.
-  \n\n
+
   Also, keep in mind that even OpenRouter itself does not run LLM's, but rather
   passes your query to 3rd party providers which can be monitored by all sorts
   of authorities, hackers or corporate environments with weak security measures,
@@ -110,7 +110,7 @@ welcome_tour: "
   your prompt contains private or sensitive information - stick strictly to
   Ollama for such requests. And remember in any case: LLM's are not the source
   of truth. Check responses and always use your own judgement!
-  \n\n
+
   If you open the Presets window and click the New Preset button, you will see
   the Select a Router radio buttons: Ollama or Openrouter. If you select Ollama,
   make sure that Ollama is running on your computer. You can then
@@ -118,7 +118,7 @@ welcome_tour: "
   models that can be downloaded by Ollama directly by preseing Download Model
   button. Ollama also supports custom user-made models in gguf format, but you
   would need to manually install those.
-  \n\n
+
   To start using OpenRouter, you don't need a powerful computer or download any
   models. All you need is an internet connection and the OpenRouter API Key.
   You can get one for free by just signing up on their page openrouter.ai and
@@ -130,12 +130,12 @@ welcome_tour: "
   functionality to what Inforno does. One advantage of Inforno, is that it
   stores the chat history in a local Sandbox file that can be saved as a copy,
   opened later and shared wih other Inforno users.
-  \n\n
+
   Once API Key is created you can press API Keys button and copy/paste the key
   into the API Key Manager window. You will have an option to save it to the
   System Keyring or just use it until you exit the application (if this is not
   your computer, for example).
-  \n\n
+
   You can now enter your prompts in the Chat pane, select presets to send the
   prompts to and press the Send Prommpt button. All the replies are
   automatically saved in a local file. The Sandbox menu allows you to save The
@@ -146,20 +146,26 @@ welcome_tour: "
   button. The Save A Copy... button allows you to save the Sandbox ot a specified
   file, but stay in the default sandbox. You can also clear the Sandbox if
   you want.
-  \n\n
-        The Prompt editor in the bottom allows you to add a System prompt. There is a
-      small 💻 button, clicking which opens the text editor just for that purpose.
-      \n\n
-      ✨ Unicode Showcase: Inforno supports a wide range of languages out of the box!
-      🇬🇧 Hello, World!
-      🇷🇺 Здравствуй, Мир!
-      🇨🇳 你好，世界！
-      🇯🇵 こんにちは世界！
-      🇰🇷 안녕 세상!
-      🇸🇦 مرحبا بالعالم!
-      🇮🇳 नमस्ते दुनिया!
-      🇬🇷 Γειά σου Κόσμε!
-      "
+
+  The Prompt editor in the bottom allows you to add a System prompt. There is a
+  small 💻 button, clicking which opens the text editor just for that purpose.
+
+  | ✨ Unicode Showcase: Inforno supports a wide range of languages out of the box! |
+  | ------------ |
+  | 🇬🇧 Hello, World!   |
+  | 🇷🇺 Здравствуй, Мир!   |
+  | 🇨🇳 你好，世界！   |
+  | 🇯🇵 こんにちは世界！   |
+  | 🇰🇷 안녕 세상!   |
+  | 🇸🇦 مرحبا بالعالم!   |
+  | 🇮🇳 नमस्ते दुनिया!   |
+  | 🇬🇷 Γειά σου Κόσμε!   |
+
+  To start a new notebook, create a Note by entering text in the text input
+  just below this message and press Ctrl+Enter. To start a new chat instead,
+  write the Prompt into the textbox in the bottom panel, sleect a Preset and
+  click "Send Prompt" button or press Ctrl+Enter.
+
 error_no_agent_preset_selected: "Error: no agent has a valid preset selected!"
 error_empty_prompt: "Error: no prompt text entered!"
 agent_config_window_title: "Agent Config"
