@@ -1020,11 +1020,15 @@ fn render_msg_content(
 
                 inforno_core::parsing::ContentChunk::Code { lang, code, filepath } => {
                     // 1. Evaluate the precise MIME type
-                    //let mime_type = if let Some(path) = &filepath {
-                    //    bulat::editor::Syntax::guess_mime_from_path(std::path::Path::new(path))
-                    //} else {
-                    let mime_type = bulat::editor::Syntax::guess_mime_from_markdown_lang(lang);
-                    //};
+                    let mut mime_type = bulat::editor::Syntax::guess_mime_from_markdown_lang(lang);
+                    
+                    // If the markdown tag was missing or unrecognized (defaulting to text/plain),
+                    // fall back to guessing based on the file extension from the header.
+                    if mime_type == "text/plain" {
+                        if let Some(path) = &filepath {
+                            mime_type = bulat::editor::Syntax::guess_mime_from_path(std::path::Path::new(path));
+                        }
+                    }
 
                     if mime_type == "application/x-rhai" {
                         let mut code_buffer = code.to_string();
