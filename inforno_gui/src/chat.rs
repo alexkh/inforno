@@ -112,6 +112,25 @@ pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
         // 6. Put the updated tree back! (Safe because `behavior` is dead)
         state.pane_tree = tree;
 
+        // 6.5 Process Tab Upgrades (e.g., Temporary Notebooks converting to saved Chats)
+        let upgrades = ui.data_mut(|d| {
+            let u = d.get_temp::<Vec<(i64, i64)>>(egui::Id::new("tab_upgrades")).unwrap_or_default();
+            d.insert_temp(egui::Id::new("tab_upgrades"), Vec::<(i64, i64)>::new());
+            u
+        });
+
+        for (old_id, new_id) in upgrades {
+            for (_, tile) in state.pane_tree.tiles.iter_mut() {
+                if let egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id: id }) = tile {
+                    if *id == old_id {
+                        *id = new_id;
+                    }
+                }
+            }
+            // Safely drop the old ghost chat from memory now that tabs are updated
+            state.open_chats.remove(&old_id);
+        }
+
         // 7. Process any requested chat opens
         for (chat_id, open_right) in open_chat_requests {
             // Guarantee the target chat is loaded into application memory
@@ -524,31 +543,40 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         if let Some(draft_content) = extracted_draft_to_save {
             let mut actual_chat_id = chat_id;
 
-                    // 1. Promote to a persistent chat if we are in the placeholder
-                    if actual_chat_id == 0 {
+                    // 1. Promote to a persistent chat if we are in the placeholder (temp IDs are <= 0)
+                    if actual_chat_id <= 0 {
                         let mut new_chat = inforno_core::common::Chat::default();
-                        new_chat.title = "Notebook".to_string();
+                        
+                        // Derive the title from the first non-empty line of the draft
+                        let title = draft_content.lines()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("Notebook")
+                            .trim();
+                            
+                        // Truncate if it's too long
+                        new_chat.title = if title.chars().count() > 40 {
+                            format!("{}...", title.chars().take(37).collect::<String>())
+                        } else {
+                            title.to_string()
+                        };
+                        
                         if let Ok(()) = inforno_core::db::mk_chat(&state.db_conn, &mut new_chat) {
                             actual_chat_id = new_chat.id;
-
-                            let mut omnis = inforno_core::common::Agent::default();
-                            omnis.name = "Omnis".to_string();
-                            omnis.hidden = true;
-                            let _ = inforno_core::db::mk_agent(&state.db_conn, actual_chat_id, &mut omnis);
-                            new_chat.agents.push(omnis);
+                            
+                            // We removed the manual 'Omnis' creation here because 
+                            // Chat::default() and mk_chat() already handle it perfectly!
 
                             state.open_chats.insert(actual_chat_id, new_chat);
                             state.active_chat_id = Some(actual_chat_id);
 
-                            // Dynamically update the UI tab to point to the new Chat ID!
-                            if let Some(active_tile) = state.active_tile_id {
-                                if let Some(egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id: id })) = state.pane_tree.tiles.get_mut(active_tile) {
-                                    if *id == 0 {
-                                        *id = actual_chat_id;
-                                    }
-                                }
-                            }
-
+                            // Queue the UI tab update in egui's memory since the pane_tree
+                            // is currently borrowed by the layout engine!
+                            ui.data_mut(|d| {
+                                let mut upgrades = d.get_temp::<Vec<(i64, i64)>>(egui::Id::new("tab_upgrades")).unwrap_or_default();
+                                upgrades.push((chat_id, actual_chat_id));
+                                d.insert_temp(egui::Id::new("tab_upgrades"), upgrades);
+                            });
+                            
                             // Refresh sidebar
                             crate::state::reload_db_chats(&state.db_conn, &mut state.db_chats);
                         }
