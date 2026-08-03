@@ -107,6 +107,44 @@ impl ActiveRealm {
     }
 }
 
+pub fn get_relative_path(
+    realm: &Option<ActiveRealm>,
+    project_root: &Option<std::path::PathBuf>,
+    file_path: &std::path::Path,
+) -> String {
+    let canonical_target = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_path_buf());
+
+    // 1. Try to map back to a Realm virtual path
+    if let Some(active_realm) = realm {
+        for mount in &active_realm.mounts {
+            let canonical_root = std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
+            
+            if let Ok(stripped) = canonical_target.strip_prefix(&canonical_root) {
+                // Ensure Windows slashes are converted to standard virtual path slashes
+                let stripped_str = stripped.to_string_lossy().replace('\\', "/");
+                let v_path = mount.virtual_path.trim_end_matches('/');
+                
+                if stripped_str.is_empty() {
+                    return if v_path.is_empty() { "/".to_string() } else { v_path.to_string() };
+                }
+                
+                return format!("{}/{}", v_path, stripped_str);
+            }
+        }
+    }
+
+    // 2. Fallback to Project Root
+    if let Some(root) = project_root {
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        if let Ok(stripped) = canonical_target.strip_prefix(&canonical_root) {
+            return stripped.display().to_string();
+        }
+    }
+
+    // 3. Fallback to the absolute path if it is completely external
+    file_path.display().to_string()
+}
+
 pub fn resolve_filepath(
     realm: &Option<ActiveRealm>,
     project_root: &Option<std::path::PathBuf>,

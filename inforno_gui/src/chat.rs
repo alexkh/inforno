@@ -1044,11 +1044,7 @@ fn render_msg_content(
 
                             if autocorrected {
                                 btn_text.push_str(" ⚠️");
-                                let rel_path_str = if let Some(root) = project_root {
-                                    path.strip_prefix(root).unwrap_or(path).display().to_string()
-                                } else {
-                                    path.display().to_string()
-                                };
+                                let rel_path_str = inforno_core::realm::get_relative_path(active_realm, project_root, path);
                                 tooltip = format!("File path autocorrected to:\n{}", rel_path_str);
                             }
 
@@ -1236,6 +1232,11 @@ fn render_msg_content(
                                             let mut app = bulat::DiffApp::new(search_block.clone(), replace_block.clone())
                                                 .with_line_offset(match_offset_lines);
                                             app.embedded = true; // Request full height!
+                                            
+                                            // Securely map the path back to the Realm or Project Root
+                                            let rel_path = inforno_core::realm::get_relative_path(active_realm, project_root, &path);
+                                            app.left_filepath = Some(rel_path);
+                                            
                                             msg_ui.inline_diffs.insert(i, app);
                                         }
 
