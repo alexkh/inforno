@@ -112,16 +112,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
         // --- ADD RELATIVE PATH TOOLTIP ---
         if let Some(egui_tiles::Tile::Pane(pane)) = tiles.get(tile_id) {
             if let Pane::Editor { path, .. } | Pane::Merge { path } = pane {
-                let tooltip_text = if let Some(root) = &self.state.project_root {
-                    let c_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                    let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-
-                    c_path.strip_prefix(&c_root)
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| path.display().to_string())
-                } else {
-                    path.display().to_string()
-                };
+                let tooltip_text = inforno_core::realm::get_relative_path(&self.state.active_realm, &self.state.project_root, path);
 
                 button_response = button_response.on_hover_text(
                     egui::RichText::new(tooltip_text)
@@ -202,19 +193,12 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
             // SANDBOX ALL IDS TO PREVENT COLLISIONS BETWEEN DUPLICATE PANES
             ui.push_id(tile_id, |ui| {
-                // Clone the root to avoid holding a borrow over self.state during UI interactions
+                // Clone the root and realm to avoid holding a borrow over self.state during UI interactions
                 let proj_root = self.state.project_root.clone();
+                let active_realm = self.state.active_realm.clone();
 
                 let relative_path = |p: &std::path::PathBuf| {
-                    if let Some(root) = &proj_root {
-                        let c_path = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-                        let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-                        c_path.strip_prefix(&c_root)
-                            .map(|stripped| stripped.display().to_string())
-                            .unwrap_or_else(|_| p.display().to_string())
-                    } else {
-                        p.display().to_string()
-                    }
+                    inforno_core::realm::get_relative_path(&active_realm, &proj_root, p)
                 };
 
                 match pane {
@@ -619,13 +603,21 @@ pub fn open_chat_in_right_pane(state: &mut crate::state::State, chat_id: i64) {
 
 pub fn open_editor_in_tab(state: &mut crate::state::State, path: PathBuf, content: String) {
     let new_tile_id = spawn_in_tab(state, Pane::Editor { path: path.clone(), content: String::new() });
-    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(path), content));
+    
+    // Generate the clean, relative path for the editor's UI display
+    let display_path = inforno_core::realm::get_relative_path(&state.active_realm, &state.project_root, &path);
+    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(PathBuf::from(display_path)), content));
+    
     state.active_chat_id = None; // Disconnect the bottom panel
 }
 
 pub fn open_editor_in_right_pane(state: &mut crate::state::State, path: PathBuf, content: String) {
     let new_tile_id = spawn_in_right_pane(state, Pane::Editor { path: path.clone(), content: String::new() });
-    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(path), content));
+    
+    // Generate the clean, relative path for the editor's UI display
+    let display_path = inforno_core::realm::get_relative_path(&state.active_realm, &state.project_root, &path);
+    state.editor_apps.insert(new_tile_id, bulat::BulatEditorApp::new(Some(PathBuf::from(display_path)), content));
+    
     state.active_chat_id = None;
 }
 
