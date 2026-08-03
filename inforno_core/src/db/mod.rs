@@ -531,6 +531,10 @@ pub fn mod_msg_content_reasoning(conn: &Connection, id: i64, content: &str,
     Ok(())
 }
 
+pub fn delete_msg(conn: &Connection, msg_id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM msg WHERE id = ?1", params![msg_id])?;
+    Ok(())
+}
 
 pub fn fetch_chat_titles(conn: &Connection) -> rusqlite::Result<Vec<DbChat>> {
     let mut stmt = conn.prepare(

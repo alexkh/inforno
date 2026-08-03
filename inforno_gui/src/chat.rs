@@ -173,6 +173,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let mut new_draft = None;
     let mut draft_lost_focus = false;
     let mut llm_prompt_request = None; // NEW: Captures requests sent via Rhai `send_prompt()`
+    let mut delete_requests = Vec::new(); // NEW: Queue deletions
 
     {
         // Fetch the specific chat being rendered
@@ -234,7 +235,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 // Pass a clone of the cache pointer
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
                                 assistant_batch.clear();
                             }
 
@@ -242,13 +243,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
                             render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
                         }
                         MsgRole::Developer => {
                             if !assistant_batch.is_empty() {
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
                                 assistant_batch.clear();
                             }
 
@@ -281,6 +282,29 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
+                                        let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
+                                        let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
+                                        if wrench_resp.clicked() {
+                                            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                        }
+                                        egui::popup_below_widget(ui, popup_id, &wrench_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                            ui.set_min_width(140.0); // Prevent text wrapping
+                                            ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                                                if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
+                                                .color(ui.visuals().error_fg_color))
+                                                .frame(false))
+                                                .on_hover_text(
+                                                    egui::RichText::new(t!("delete_msg_tooltip"))
+                                                    .strong()
+                                                    .heading()
+                                                )
+                                                .clicked() {
+                                                    delete_requests.push(msg.id);
+                                                    ui.close_menu();
+                                                }
+                                            });
+                                        });
+
                                         ui.label(egui::RichText::new("📝 Note Cell").weak().small());
 
                                         // NEW: Saved/Unsaved Indicators
@@ -378,7 +402,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
-                        project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request);
+                        project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
             }
 
             // --- NOTEBOOK APPENDER CELL ---
@@ -453,11 +477,21 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     }
 
     // Apply mutable updates outside of the chat borrow
-    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() || llm_prompt_request.is_some() {
-        
+    if !content_updates.is_empty() || new_draft.is_some() || draft_lost_focus || !rhai_updates.is_empty() || llm_prompt_request.is_some() || !delete_requests.is_empty() {
+
         let mut extracted_draft_to_save = None;
 
         if let Some(chat) = state.open_chats.get_mut(&chat_id) {
+            // Apply Deletions
+            for id in &delete_requests {
+                chat.msg_pool.remove(id);
+                for agent in chat.agents.iter_mut() {
+                    agent.msg_ids.retain(|x| x != id);
+                    let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                }
+                let _ = inforno_core::db::delete_msg(&state.db_conn, *id);
+            }
+
             for (id, content, unsaved) in content_updates {
                 if let Some(m) = chat.msg_pool.get_mut(&id) {
                     m.content = content;
@@ -493,7 +527,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                         new_chat.title = "Notebook".to_string();
                         if let Ok(()) = inforno_core::db::mk_chat(&state.db_conn, &mut new_chat) {
                             actual_chat_id = new_chat.id;
-                            
+
                             let mut omnis = inforno_core::common::Agent::default();
                             omnis.name = "Omnis".to_string();
                             omnis.hidden = true;
@@ -502,7 +536,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                             state.open_chats.insert(actual_chat_id, new_chat);
                             state.active_chat_id = Some(actual_chat_id);
-                            
+
                             // Dynamically update the UI tab to point to the new Chat ID!
                             if let Some(active_tile) = state.active_tile_id {
                                 if let Some(egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id: id })) = state.pane_tree.tiles.get_mut(active_tile) {
@@ -511,7 +545,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     }
                                 }
                             }
-                            
+
                             // Refresh sidebar
                             crate::state::reload_db_chats(&state.db_conn, &mut state.db_chats);
                         }
@@ -618,6 +652,7 @@ fn render_assistant_grid(
     max_msg_width: f32,
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
+    delete_requests: &mut Vec<i64>,
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
@@ -648,7 +683,7 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
+                                    project_root, active_realm, op_tx, rhai_updates, llm_prompt_request, delete_requests);
                         }
                     );
                 }
@@ -676,6 +711,7 @@ fn render_user_msg(
     max_msg_width: f32,
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
+    delete_requests: &mut Vec<i64>,
 ) {
     let left_offset = 127.0; // Matches the left outer margin of the user frame
     let right_padding = 30.0;
@@ -703,7 +739,7 @@ fn render_user_msg(
                 .corner_radius(5.0)
                 .fill(ui.visuals().extreme_bg_color)
                 .show(ui, |ui| {
-                    render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg);
+                    render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg, delete_requests);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
                         project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
 
@@ -810,6 +846,7 @@ fn render_assistant_msg(
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
+    delete_requests: &mut Vec<i64>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -825,7 +862,7 @@ fn render_assistant_msg(
             ui.set_max_width(item_width - 25.0);
 
             let label = format!("{}:", msg.name.as_deref().unwrap_or("assistant"));
-            render_msg_header(ui, msg_ui, &label, msg);
+            render_msg_header(ui, msg_ui, &label, msg, delete_requests);
 
             if let Some(reasoning) = &msg.reasoning {
                 if !reasoning.is_empty() {
@@ -850,8 +887,32 @@ fn render_msg_header(
     msg_ui: &mut ChatMsgUi,
     label: &str,
     msg: &ChatMsg, // Changed from msg_id: i64 to msg: &ChatMsg
+    delete_requests: &mut Vec<i64>,
 ) {
     ui.horizontal(|ui| {
+        let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
+        let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
+        if wrench_resp.clicked() {
+            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+        }
+        egui::popup_below_widget(ui, popup_id, &wrench_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(140.0); // Prevent text wrapping
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
+                .color(ui.visuals().error_fg_color))
+                .frame(false))
+                .on_hover_text(
+                    egui::RichText::new(t!("delete_msg_tooltip"))
+                    .strong()
+                    .heading()
+                )
+                .clicked() {
+                    delete_requests.push(msg.id);
+                    ui.close_menu();
+                }
+            });
+        });
+
         ui.label(RichText::new(label).strong());
 
         #[cfg(debug_assertions)]
@@ -1163,7 +1224,7 @@ fn render_msg_content(
                                 "application/x-sh" => "🐚 Shell",
                                 _ => "📄 Text",
                             };
-                            
+
                             ui.label(egui::RichText::new(display_name).weak());
                         }
 
@@ -1232,11 +1293,11 @@ fn render_msg_content(
                                             let mut app = bulat::DiffApp::new(search_block.clone(), replace_block.clone())
                                                 .with_line_offset(match_offset_lines);
                                             app.embedded = true; // Request full height!
-                                            
+
                                             // Securely map the path back to the Realm or Project Root
                                             let rel_path = inforno_core::realm::get_relative_path(active_realm, project_root, &path);
                                             app.left_filepath = Some(rel_path);
-                                            
+
                                             msg_ui.inline_diffs.insert(i, app);
                                         }
 

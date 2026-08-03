@@ -189,11 +189,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                 // Force top-down layout so buttons stretch horizontally
                                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
 
-                                    // Remove standard button background to mimic a flat menu item
-                                    ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                                    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-
-                                    if ui.button(egui::RichText::new(t!("rename_chat_btn"))).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new(t!("rename_chat_btn"))).frame(false)).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
                                         state.chat_to_rename = Some(db_chat.id);
                                         state.chat_rename_buffer = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim().to_string();
                                         ui.close_menu();
@@ -201,7 +197,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                                     ui.separator();
 
-                                    if ui.button(egui::RichText::new(t!("export_chat_btn"))).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new(t!("export_chat_btn"))).frame(false)).on_hover_text(egui::RichText::new(t!("export_chat_tooltip")).heading()).clicked() {
                                         if let Ok(markdown) = export_chat_to_markdown(&state.db_conn, db_chat.id, &state.presets) {
                                             // Trigger the native egui dialog for saving
                                             state.pending_file_dialog_op = Some(inforno_core::common::FileOp::ExportChat);
@@ -219,7 +215,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                         ui.close_menu();
                                     }
 
-                                    if ui.button(egui::RichText::new("Export Notebook")).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new("Export Notebook")).frame(false)).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
                                         if let Ok(ron_data) = inforno_core::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
                                             state.pending_file_dialog_op = Some(inforno_core::common::FileOp::ExportNotebook);
                                             state.pending_export_content = Some(ron_data);
@@ -237,7 +233,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                                     ui.separator();
 
-                                    if ui.button(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new(t!("delete_chat_btn")).color(ui.visuals().error_fg_color)).frame(false)).on_hover_text(egui::RichText::new(t!("delete_chat_tooltip")).heading().color(ui.visuals().error_fg_color)).clicked() {
                                         if let Ok(_) = delete_chat(&state.db_conn, db_chat.id) {
                                             if state.active_chat_id == Some(db_chat.id) {
                                                 state.open_chats.remove(&db_chat.id);

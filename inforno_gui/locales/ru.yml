@@ -213,3 +213,5 @@ open_in_merge_tool_tooltip: "Открыть Инструмент для Слия
 adjust_message_width_tooltip: "Максимальная ширина сообщения (или клавишами Ctrl+х / Ctrl+ъ)"
 editing: "Редактирование"
 merging: "Слияние"
+delete_msg_btn: "🗑 Удалить Сообщение."
+delete_msg_tooltip: "Удалить это сообщение. Нельзя отменить!"
