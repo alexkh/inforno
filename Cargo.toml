@@ -5,5 +5,5 @@ members = [
     "autorno",
     "bulat"
 ]
-
+default-members = ["inforno_gui"]
 resolver = "3"

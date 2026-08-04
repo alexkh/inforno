@@ -397,11 +397,36 @@ pub struct DbChat {
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ModelOptions {
     pub include_reasoning: Option<bool>,
     pub seed: Option<i32>, // we use i32 but do not allow negative values
     pub temperature: Option<f64>,
 	pub stream: Option<bool>,
+    pub openrouter_custom_url: Option<String>,
+}
+
+pub struct CustomOpenrConfig {
+    pub nickname: String,
+    pub url: String,
+    pub token: String,
+}
+
+pub fn get_custom_openr_configs() -> Vec<CustomOpenrConfig> {
+    let mut configs = Vec::new();
+    if let Ok(env_val) = std::env::var("OPENROUTER_API_URLS") {
+        let parts: Vec<&str> = env_val.split(',').collect();
+        for chunk in parts.chunks(3) {
+            if chunk.len() == 3 {
+                configs.push(CustomOpenrConfig {
+                    nickname: chunk[0].trim().to_string(),
+                    url: chunk[1].trim().to_string(),
+                    token: chunk[2].trim().to_string(),
+                });
+            }
+        }
+    }
+    configs
 }
 
 // Preset is the essential data structure, because it will hide all

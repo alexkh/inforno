@@ -282,6 +282,13 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                 .map_or(t!("unset").to_string(), |s| {
                 if s { t!("yes").to_string() } else { t!("no").to_string() }
             }));
+
+            if preset.chat_router == ChatRouter::Openrouter {
+                let current_nickname = preset.options.openrouter_custom_url
+                    .clone()
+                    .unwrap_or_else(|| "Authentic Openrouter".to_string());
+                row("Backend:", current_nickname);
+            }
         });
     }
 }
@@ -780,6 +787,45 @@ pub fn render_common_options(
     substate: &mut PresetEditorState,
     original_options: &ModelOptions,
 ) {
+    // --- Custom URL for OpenRouter ---
+    if substate.edited_preset.chat_router == ChatRouter::Openrouter {
+        ui.horizontal(|ui| {
+            ui.label("Backend:");
+            
+            // Visualizing the original value
+            let orig_text = match &original_options.openrouter_custom_url {
+                Some(nickname) => nickname.clone(),
+                None => "Authentic Openrouter".to_string(),
+            };
+            show_original_value(ui, orig_text);
+
+            // Manual Revert Button
+            if ui.button("⟲").on_hover_text(t!("revert_to_initial_tooltip")).clicked() {
+                substate.edited_preset.options.openrouter_custom_url = original_options.openrouter_custom_url.clone();
+                substate.router_changed = true;
+            }
+
+            let configs = inforno_core::common::get_custom_openr_configs();
+            let current_nickname = substate.edited_preset.options.openrouter_custom_url
+                .clone()
+                .unwrap_or_else(|| "Authentic Openrouter".to_string());
+
+            egui::ComboBox::from_id_salt("openr_backend_select")
+                .selected_text(&current_nickname)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut substate.edited_preset.options.openrouter_custom_url, None, "Authentic Openrouter").changed() {
+                        substate.router_changed = true;
+                    }
+                    for cfg in configs {
+                        // Store the nickname instead of the URL
+                        if ui.selectable_value(&mut substate.edited_preset.options.openrouter_custom_url, Some(cfg.nickname.clone()), cfg.nickname).changed() {
+                            substate.router_changed = true;
+                        }
+                    }
+                });
+        });
+    }
+
     // --- Reasoning ---
     ui.horizontal(|ui| {
         ui.label(t!("include_reasoning"));

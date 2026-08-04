@@ -14,19 +14,38 @@ use secrecy::ExposeSecret;
 
 use crate::common::{ApiKey, ChatQue, ChatStreamEvent, DbOpenrModel, mask_key_secure};
 
+fn build_openr_client(query: &ChatQue) -> Result<OpenRouterClient, String> {
+    let mut builder = OpenRouterClient::builder();
+    let mut used_key = query.preset.api_key.key.expose_secret().to_string();
+    
+    if let Some(nickname) = &query.preset.options.openrouter_custom_url {
+        let configs = crate::common::get_custom_openr_configs();
+        if let Some(cfg) = configs.iter().find(|c| c.nickname == *nickname) {
+            builder.base_url(cfg.url.as_str());
+            used_key = cfg.token.clone();
+        } else {
+            // Refuse to execute if the requested nickname isn't locally defined
+            return Err(format!("Custom URL nickname '{}' not found in OPENROUTER_API_URLS environment settings.", nickname));
+        }
+        
+        if used_key.trim().is_empty() {
+            used_key = "dummy_token".to_string();
+        }
+    }
+
+    // print the first two and last two characters of the key in case we are not
+    // sure whether the right key is used
+    println!("using key: {}", mask_key_secure(&used_key));
+
+    builder.api_key(used_key);
+    builder.build().map_err(|e| e.to_string())
+}
+
 // simple request without streaming or history
 pub async fn do_openr_chat_que(query: ChatQue) ->
         Result<CompletionsResponse, Box<dyn std::error::Error>> {
 
-    // print the frist two and last two characters of the key in case we are not
-    // sure whether the right key is used
-    println!("using key: {}", mask_key_secure(
-        query.preset.api_key.key.expose_secret()));
-
-    // Create client
-    let client = OpenRouterClient::builder()
-        .api_key(query.preset.api_key.key.expose_secret())
-        .build()?;
+    let client = build_openr_client(&query)?;
 
     // Send chat completion
     let request = ChatCompletionRequest::builder()
@@ -46,12 +65,7 @@ pub async fn do_openr_chat_sync(
     wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("using key: {}", mask_key_secure(
-        query.preset.api_key.key.expose_secret()));
-
-    let client = OpenRouterClient::builder()
-        .api_key(query.preset.api_key.key.expose_secret())
-        .build()?;
+    let client = build_openr_client(&query)?;
 
     // 1. Start the builder with mandatory fields
     let mut request_builder = ChatCompletionRequest::builder();
@@ -137,12 +151,7 @@ pub async fn do_openr_chat_stream(
     wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("using key: {}", mask_key_secure(
-        query.preset.api_key.key.expose_secret()));
-
-    let client = OpenRouterClient::builder()
-        .api_key(query.preset.api_key.key.expose_secret())
-        .build()?;
+    let client = build_openr_client(&query)?;
 
     // 1. Start the builder with mandatory fields
     let mut request_builder = ChatCompletionRequest::builder();
