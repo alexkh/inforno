@@ -21,7 +21,7 @@ The project is structured as a modular Cargo workspace:
 | :--- | :--- | :--- |
 | **`inforno_gui`** | `Binary` | The primary frontend application providing chat windows, notebook views, preset editors, and tile-based IDE layouts. |
 | **`inforno_core`** | `Library` | Core backend engine handling SQLite storage, OpenRouter & Ollama client streaming, Realm path isolation, and Rhai scripting execution. |
-| **`autorno`** | `Daemon` | Headless autonomous daemon worker that opens OS sockets to run automated prompt loops, scripts, and note cells across realms. |
+| **`autorno`** | `Daemon` | (in development) Headless autonomous daemon worker that opens OS sockets to run automated prompt loops, scripts, and note cells across realms. |
 | **`bulat`** | `Library / Binary` | Fast, lightweight text editor and side-by-side code diffing tool with custom themes and extensible syntax highlighting. |
 
 ---
