@@ -26,6 +26,7 @@ egui-file-dialog = { git = "https://github.com/alexkh/egui-file-dialog", branch 
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 directories = "6.0.0"
+ttf-parser = "0.25"
 thiserror = "2.0.18"
 secrecy = "0.10.3"
 # don't update keyring to 4.0.0!

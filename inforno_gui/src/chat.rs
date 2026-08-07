@@ -1103,7 +1103,7 @@ fn render_msg_content(
                             .fill(ui.visuals().extreme_bg_color)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label("📜 Rhai Script");
+                                    crate::emoji_render::emoji_label(ui, "📜 Rhai Script");
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
                                             ui.ctx().copy_text(code.to_string());
