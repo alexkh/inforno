@@ -4,8 +4,8 @@ use crate::split_button;
 use rust_i18n::t;
 use split_button::SplitButton;
 
-pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
-    egui::SidePanel::new(egui::panel::Side::Left, "panel").show(ctx, |ui| {
+pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
+    egui::Panel::left("panel").show(ui, |ui| {
         // Disable main UI if a modal/rename is open to force focus
         if state.is_modal_open || state.chat_to_rename.is_some() {
             ui.disable();
@@ -180,10 +180,13 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                         if let Some(left_resp) = btn_resp.left_response {
                             let popup_id = ui.make_persistent_id(format!("wrench_menu_{}", db_chat.id));
                             if btn_resp.left_clicked {
-                                ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                egui::Popup::toggle_id(ui.ctx(), popup_id);
                             }
 
-                            egui::popup_below_widget(ui, popup_id, &left_resp, egui::PopupCloseBehavior::CloseOnClick, |ui: &mut egui::Ui| {
+                            egui::Popup::from_response(&left_resp)
+                                .id(popup_id)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                .show(|ui: &mut egui::Ui| {
                                 ui.set_min_width(140.0); // Slightly wider to avoid squishing
 
                                 // Force top-down layout so buttons stretch horizontally
@@ -192,7 +195,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                     if ui.add(egui::Button::new(egui::RichText::new(t!("rename_chat_btn"))).frame(false)).on_hover_text(egui::RichText::new(t!("rename_chat_tooltip")).heading()).clicked() {
                                         state.chat_to_rename = Some(db_chat.id);
                                         state.chat_rename_buffer = db_chat.title.split('\n').next().unwrap_or(&db_chat.title).trim().to_string();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
 
                                     ui.separator();
@@ -209,10 +212,15 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                                             state.file_dialog = egui_file_dialog::FileDialog::new()
                                                 .default_file_name(&default_name) // <--- Pass it as a reference (&str)
-                                                .add_file_filter("Markdown", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "md")));
+                                                .add_file_filter(
+                                                    "Inforno Sandbox",
+                                                    egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                                        p.extension().is_some_and(|ext| ext == "md")
+                                                    })
+                                                );
                                             state.file_dialog.save_file();
                                         }
-                                        ui.close_menu();
+                                        ui.close();
                                     }
 
                                     if ui.add(egui::Button::new(egui::RichText::new("Export Notebook")).frame(false)).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
@@ -225,10 +233,15 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
                                             state.file_dialog = egui_file_dialog::FileDialog::new()
                                                 .default_file_name(&default_name)
-                                                .add_file_filter("Notebook (.ron)", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "ron")));
+                                                .add_file_filter(
+                                                    "Inforno Sandbox",
+                                                    egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                                        p.extension().is_some_and(|ext| ext == "rno")
+                                                    })
+                                                );
                                             state.file_dialog.save_file();
                                         }
-                                        ui.close_menu();
+                                        ui.close();
                                     }
 
                                     ui.separator();
@@ -242,7 +255,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
                                             }
                                             to_delete_chat_id = db_chat.id;
                                         }
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 });
                             });
@@ -278,7 +291,7 @@ pub fn ui_side_panel(ctx: &egui::Context, state: &mut State) {
 
     // --- RENAME POPUP WINDOW ---
     // This draws a small window on top of everything if a chat is being renamed
-    render_rename_window(ctx, state);
+    render_rename_window(ui, state);
 }
 
 // Helper function to extract prompts and re-attach files
@@ -354,7 +367,7 @@ fn extract_prompts(
 }
 
 // Helper function to handle the popup logic
-fn render_rename_window(ctx: &egui::Context, state: &mut State) {
+fn render_rename_window(ui: &mut egui::Ui, state: &mut State) {
     if let Some(chat_id) = state.chat_to_rename.clone() {
         let mut open = true;
 
@@ -364,7 +377,7 @@ fn render_rename_window(ctx: &egui::Context, state: &mut State) {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
 
                 ui.label("Enter new name:");
 

@@ -13,15 +13,16 @@ rand = "0.10.1"
 # walkers = "0.50.0"
 
 dotenv = "0.15.0"
-eframe = { version = "0.33.3", features = ["persistence"] }
-egui = "0.33.3"
+eframe = { version = "0.36.0", features = ["persistence"] }
+egui = "0.36.0"
 env_logger = "0.11.10"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["full"] }
-egui_commonmark = { version = "0.22.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
-egui_extras = { version = "0.33.3", features = ["all_loaders", "default", "svg", "image"] }
-egui_tiles = "0.14.0"
-egui-file-dialog = "0.12.0"
+egui_commonmark = { version = "0.25.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
+egui_extras = { version = "0.36.0", features = ["all_loaders", "default", "svg", "image"] }
+egui_tiles = "0.17.0"
+# egui-file-dialog = "0.14.1" // does not work with egui 0.36.0 yet
+egui-file-dialog = { git = "https://github.com/alexkh/egui-file-dialog", branch = "main" }
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 directories = "6.0.0"

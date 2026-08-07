@@ -39,16 +39,18 @@ impl Default for BottomPanelState {
     }
 }
 
-pub fn ui_bottom_panel(ctx: &egui::Context, state: &mut State) {
+pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
+    let ctx = ui.ctx().clone();
+
     // 1. Extract state values we might modify locally
     let mut col1_w = state.bottom_panel_state.col1_width;
     let mut col2_w = state.bottom_panel_state.col2_width;
     let mut panel_h = state.bottom_panel_state.height;
 
-    egui::TopBottomPanel::bottom("chat_input_panel")
+    egui::Panel::bottom("chat_input_panel")
         .resizable(false) // We implement custom resizing below
-        .exact_height(panel_h)
-        .show(ctx, |ui| {
+        .exact_size(panel_h)
+        .show(ui, |ui| {
 
             if state.is_modal_open {
                 ui.disable();
@@ -491,7 +493,7 @@ fn render_agent(
 // returns true if changed
 pub fn preset_combo_box(
     ui: &mut egui::Ui,
-    salt: impl std::hash::Hash, // Unique ID for egui memory
+    salt: impl std::hash::Hash + std::fmt::Debug, // Unique ID for egui memory
     selection: &mut PresetSelection,
     presets: &Presets,
 ) -> bool {

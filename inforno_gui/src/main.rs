@@ -113,7 +113,7 @@ fn main() -> eframe::Result {
                 }
             }
 
-            cc.egui_ctx.style_mut(|style| {
+            cc.egui_ctx.style_mut_of(cc.egui_ctx.theme(), |style| {
                 // Show the url of a hyperlink on hover
                 style.url_in_tooltip = true;
             });
@@ -269,7 +269,7 @@ fn configure_fonts(ctx: &egui::Context) {
     fonts.font_data.insert(
         "noto_emoji_regular".to_owned(),
         egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/NotoEmoji-Regular.ttf")).into(),
+                "../assets/fonts/NotoColorEmoji.ttf")).into(),
     );
 
     // 3. Add it to the font families

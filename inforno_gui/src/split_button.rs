@@ -1,5 +1,4 @@
 use eframe::egui::{self, Rect, Sense, Ui, Response};
-use rust_i18n::t;
 
 pub struct SplitButtonResponse {
     pub main_clicked: bool,
@@ -80,7 +79,7 @@ impl SplitButton {
     }
 
     /// Provide a unique ID salt, critical for lists of buttons
-    pub fn id_salt(mut self, salt: impl std::hash::Hash) -> Self {
+    pub fn id_salt<T: std::hash::Hash + std::fmt::Debug>(mut self, salt: T) -> Self {
         self.id_salt = egui::Id::new(salt);
         self
     }

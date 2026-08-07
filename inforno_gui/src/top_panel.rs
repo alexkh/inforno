@@ -5,8 +5,9 @@ use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_sandbox_db};
 use crate::state::{State, err_color};
 use crate::mybtn;
 
-pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
-    egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    egui::Panel::top("top_panel").show(ui, |ui| {
         if state.is_modal_open {
             ui.disable();
         }
@@ -89,7 +90,12 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                     state.pending_file_dialog_op = Some(FileOp::SaveAs);
                     state.file_dialog = egui_file_dialog::FileDialog::new()
                         .default_file_name("")
-                        .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno")));
+                        .add_file_filter(
+                            "Inforno Sandbox",
+                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                p.extension().is_some_and(|ext| ext == "rno")
+                            })
+                        );
                     state.file_dialog.save_file();
                 }
 
@@ -99,7 +105,12 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
                     state.pending_file_dialog_op = Some(FileOp::SaveCopy);
                     state.file_dialog = egui_file_dialog::FileDialog::new()
                         .default_file_name("")
-                        .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno")));
+                        .add_file_filter(
+                            "Inforno Sandbox",
+                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                p.extension().is_some_and(|ext| ext == "rno")
+                            })
+                        );
                     state.file_dialog.save_file();
                 }
 
@@ -139,7 +150,12 @@ pub fn ui_top_panel(ctx: &egui::Context, state: &mut State) {
 
                 state.pending_file_dialog_op = Some(FileOp::Open);
                 state.file_dialog = egui_file_dialog::FileDialog::new()
-                    .add_file_filter("Inforno Sandbox", std::sync::Arc::new(|p: &std::path::Path| p.extension().is_some_and(|ext| ext == "rno"))); // Fixed filter
+                    .add_file_filter(
+                        "Inforno Sandbox",
+                        egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                            p.extension().is_some_and(|ext| ext == "rno")
+                        })
+                    );
                 state.file_dialog.pick_file();
             }
 

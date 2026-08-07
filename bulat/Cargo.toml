@@ -20,8 +20,8 @@ gui = ["dep:egui", "dep:eframe"]
 
 [dependencies]
 # GUI (Optional)
-egui = { version = "0.33.3", optional = true }
-eframe = { version = "0.33.3", optional = true, features = ["persistence"] }
+egui = { version = "0.36.0", optional = true }
+eframe = { version = "0.36.0", optional = true, features = ["persistence"] }
 
 # Logic
 logos = "0.16.1"

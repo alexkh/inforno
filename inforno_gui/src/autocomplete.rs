@@ -113,7 +113,7 @@ where
 
         let completion_input = if multiple_words {
             if let Some(cursor_range) = text_edit_output.cursor_range {
-                let index = cursor_range.primary.index;
+                let index = cursor_range.primary.index.0;
                 let mut start = index;
                 let mut end = index;
                 while start > 0
@@ -257,9 +257,9 @@ where
                             job.append(output.as_ref(), 0.0, egui::TextFormat::default());
                             job
                         };
-                        
+
                         let response = ui.toggle_value(&mut selected, text);
-                        
+
                         if response.hovered() {
                             state.selected_index = Some(i);
                         }
@@ -282,7 +282,7 @@ where
         });
 
         state.store(ui.ctx(), id);
-        text_response
+        text_response.response
     }
 }
 

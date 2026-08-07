@@ -18,10 +18,10 @@ use inforno_core::{
 
 use crate::state::{State, ChatMsgUi};
 
-pub fn ui_chat(ctx: &egui::Context, state: &mut State) {
+pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
     egui::CentralPanel::default()
     //.stick_to_the_bottom(true)
-    .show(ctx, |ui| {
+    .show(ui, |ui| {
         if state.is_modal_open {
             ui.disable();
         }
@@ -307,9 +307,12 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                         let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
                                         let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
                                         if wrench_resp.clicked() {
-                                            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                                            egui::Popup::toggle_id(ui.ctx(), popup_id);
                                         }
-                                        egui::popup_below_widget(ui, popup_id, &wrench_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                        egui::Popup::from_response(&wrench_resp)
+                                            .id(popup_id)
+                                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                            .show(|ui| {
                                             ui.set_min_width(140.0); // Prevent text wrapping
                                             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                                                 if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
@@ -322,7 +325,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 )
                                                 .clicked() {
                                                     delete_requests.push(msg.id);
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             });
                                         });
@@ -568,24 +571,24 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                     // 1. Promote to a persistent chat if we are in the placeholder (temp IDs are <= 0)
                     if actual_chat_id <= 0 {
                         let mut new_chat = inforno_core::common::Chat::default();
-                        
+
                         // Derive the title from the first non-empty line of the draft
                         let title = draft_content.lines()
                             .find(|l| !l.trim().is_empty())
                             .unwrap_or("Notebook")
                             .trim();
-                            
+
                         // Truncate if it's too long
                         new_chat.title = if title.chars().count() > 40 {
                             format!("{}...", title.chars().take(37).collect::<String>())
                         } else {
                             title.to_string()
                         };
-                        
+
                         if let Ok(()) = inforno_core::db::mk_chat(&state.db_conn, &mut new_chat) {
                             actual_chat_id = new_chat.id;
-                            
-                            // We removed the manual 'Omnis' creation here because 
+
+                            // We removed the manual 'Omnis' creation here because
                             // Chat::default() and mk_chat() already handle it perfectly!
 
                             state.open_chats.insert(actual_chat_id, new_chat);
@@ -598,7 +601,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 upgrades.push((chat_id, actual_chat_id));
                                 d.insert_temp(egui::Id::new("tab_upgrades"), upgrades);
                             });
-                            
+
                             // Refresh sidebar
                             crate::state::reload_db_chats(&state.db_conn, &mut state.db_chats);
                         }
@@ -635,7 +638,11 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let mut slider_rect = clip_rect;
     slider_rect.max.y = slider_rect.min.y + 12.0;
 
-    let mut ui_top = ui.child_ui(slider_rect, egui::Layout::top_down(egui::Align::Center), None);
+    let mut ui_top = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(slider_rect)
+            .layout(egui::Layout::top_down(egui::Align::Center))
+    );
     ui_top.scope(|ui| {
         // Determine if the mouse is inside the slider's bounding box
         let pointer_pos = ui.input(|i| i.pointer.hover_pos());
@@ -946,9 +953,12 @@ fn render_msg_header(
         let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
         let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
         if wrench_resp.clicked() {
-            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+            egui::Popup::toggle_id(ui.ctx(), popup_id);
         }
-        egui::popup_below_widget(ui, popup_id, &wrench_resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        egui::Popup::from_response(&wrench_resp)
+            .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .show(|ui| {
             ui.set_min_width(140.0); // Prevent text wrapping
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                 if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
@@ -961,7 +971,7 @@ fn render_msg_header(
                 )
                 .clicked() {
                     delete_requests.push(msg.id);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
         });
@@ -1129,7 +1139,7 @@ fn render_msg_content(
                                         egui::TextEdit::multiline(&mut out_str)
                                             .font(egui::TextStyle::Monospace)
                                             .interactive(false)
-                                            .frame(false)
+                                            .frame(egui::Frame::new())
                                             .desired_width(f32::INFINITY)
                                     );
                                 }
@@ -1494,7 +1504,7 @@ fn render_msg_content(
 }
 
 fn render_reasoning_block(ui: &mut egui::Ui, text: &str,
-        id_salt: impl std::hash::Hash) {
+        id_salt: impl std::hash::Hash + std::fmt::Debug) {
     egui::CollapsingHeader::new(
         egui::RichText::new(t!("thought_process")).italics().weak()
     )

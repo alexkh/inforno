@@ -152,8 +152,8 @@ impl Completer {
             // let cursor_on_screen = editor_output.response.rect.left_top()
             // + cursor_pos_in_galley.left_bottom().to_vec2();
             let word_start = ccursor_previous_word(galley.text(), cursor);
-            if self.cursor != cursor.index {
-                self.cursor = cursor.index;
+            if self.cursor != usize::from(cursor.index) {
+                self.cursor = usize::from(cursor.index);
                 self.prefix.clear();
                 // self.completions.clear();
                 self.ignore_cursor = None;
@@ -168,7 +168,7 @@ impl Completer {
             }
             let next_char_allows = galley
                 .chars()
-                .nth(cursor.index)
+                .nth(usize::from(cursor.index))
                 .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
                 || (range.secondary.index > range.primary.index);
 
@@ -194,7 +194,7 @@ impl Completer {
                     cursor_rect,
                     editor_output.response.layer_id,
                 )
-                .frame(Frame::popup(&ctx.style()).fill(theme.bg()))
+                .frame(Frame::popup(&ctx.style_of(ctx.theme())).fill(theme.bg()))
                 .sense(Sense::empty())
                 .show(|ui| {
                     ui.response().sense = Sense::empty();

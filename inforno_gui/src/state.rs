@@ -505,10 +505,11 @@ impl eframe::App for MyApp {
     }
 
     #[tracing::instrument(skip_all, name = "MyApp::ui")]
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // --- SYNC GLOBAL COLORS ---
         {
-            let visuals = ctx.style().visuals.clone();
+            let visuals = ui.visuals().clone();
             let mut colors = THEME_COLORS.write().unwrap();
             colors.cloud = visuals.hyperlink_color;
             colors.local = visuals.strong_text_color();
@@ -728,24 +729,24 @@ impl eframe::App for MyApp {
             }
         }
 
-        ui_top_panel(ctx, state);
+        ui_top_panel(ui, state);
 
-        ui_side_panel(ctx, state);
+        ui_side_panel(ui, state);
 
-        ui_key_manager(ctx, state);
+        ui_key_manager(ui, state);
 
-        ui_preset_editor(ctx, state);
+        ui_preset_editor(ui, state);
 
-        ui_agent_config(ctx, state);
+        ui_agent_config(ui, state);
 
-        ui_realm_config(ctx, state);
+        ui_realm_config(ui, state);
 
-        ui_bottom_panel(ctx, state);
+        ui_bottom_panel(ui, state);
 
-        ui_chat(ctx, state);
+        ui_chat(ui, state);
 
         // File Dialog Start
-        state.file_dialog.update(ctx);
+        state.file_dialog.update(&ctx);
 
         // Handle single file selection (Open / Save) ---
         if let Some(path) = state.file_dialog.take_picked() {
@@ -920,7 +921,7 @@ impl eframe::App for MyApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]) // Center on screen
                 .open(&mut open) // Helper to handle the "X" close button
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.set_min_width(300.0); // Make it look substantial
 
                     ui.vertical_centered(|ui| {
@@ -952,7 +953,7 @@ impl eframe::App for MyApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.label("A project directory was provided, but no Sandbox was found.");
                     ui.label("Would you like to initialize an '.inforno' directory here?");
 

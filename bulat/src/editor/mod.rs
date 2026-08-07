@@ -426,7 +426,7 @@ impl CodeEditor {
                                 .id_source(format!("{}_numlines", self.id))
                                 .font(egui::TextStyle::Monospace)
                                 .interactive(false)
-                                .frame(false)
+                                .frame(egui::Frame::new())
                                 .desired_width(width)
 								.desired_rows(1)
                                 .layouter(&mut layouter),
@@ -529,7 +529,7 @@ impl CodeEditor {
                 });
 
                 if page_up || page_down {
-                    let height = ui.ctx().screen_rect().height() * 0.8;
+                    let height = ui.ctx().viewport_rect().height() * 0.8;
                     let shift = if page_up { -height } else { height };
                     let target_rect = ui.clip_rect().translate(egui::vec2(0.0, shift));
                     ui.scroll_to_rect(target_rect, None);
@@ -619,7 +619,7 @@ impl CodeEditor {
                                     .id_source(&self.id)
                                     .lock_focus(true)
                                     .desired_rows(self.rows)
-                                    .frame(false)
+                                    .frame(egui::Frame::new())
                                     .desired_width(self.desired_width)
                                     .layouter(&mut layouter)
                                     .show(ui);

@@ -107,13 +107,13 @@ impl Token {
 
 use egui::text::LayoutJob;
 
-impl<T: Editor> egui::util::cache::ComputerMut<(&T, &str), LayoutJob> for Token {
+impl<T: Editor> egui::cache::ComputerMut<(&T, &str), LayoutJob> for Token {
     fn compute(&mut self, (cache, text): (&T, &str)) -> LayoutJob {
         self.highlight(cache, text)
     }
 }
 
-pub type HighlightCache = egui::util::cache::FrameCache<LayoutJob, Token>;
+pub type HighlightCache = egui::cache::FrameCache<LayoutJob, Token>;
 
 pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> LayoutJob {
     let mut job = ctx.memory_mut(|mem| mem.caches.cache::<HighlightCache>().get((cache, text)).clone());
@@ -144,20 +144,20 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
                 let mut current_start = sec_start;
 
                 for range in &match_ranges {
-                    if range.end <= current_start { continue; }
-                    if range.start >= sec_end { break; }
+                    if range.end <= usize::from(current_start) { continue; }
+                    if range.start >= usize::from(sec_end) { break; }
 
-                    if current_start < range.start {
+                    if usize::from(current_start) < range.start {
                         let format = section.format.clone();
                         new_sections.push(egui::text::LayoutSection {
                             leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
-                            byte_range: current_start..range.start,
+                            byte_range: current_start..egui::text::ByteIndex(range.start),
                             format,
                         });
-                        current_start = range.start;
+                        current_start = egui::text::ByteIndex(range.start);
                     }
 
-                    let overlap_end = range.end.min(sec_end);
+                    let overlap_end = range.end.min(usize::from(sec_end));
                     let mut format = section.format.clone();
 
                     let is_active = active_match.as_ref().map_or(false, |active| active.start == range.start && active.end == range.end);
@@ -166,10 +166,10 @@ pub fn highlight<T: Editor>(ctx: &egui::Context, cache: &T, text: &str) -> Layou
 
                     new_sections.push(egui::text::LayoutSection {
                         leading_space: if current_start == sec_start { section.leading_space } else { 0.0 },
-                        byte_range: current_start..overlap_end,
+                        byte_range: current_start..egui::text::ByteIndex(overlap_end),
                         format,
                     });
-                    current_start = overlap_end;
+                    current_start = egui::text::ByteIndex(overlap_end);
                 }
 
                 if current_start < sec_end {

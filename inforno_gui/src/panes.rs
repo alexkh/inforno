@@ -1,5 +1,4 @@
 use egui_tiles::{Behavior, TileId, UiResponse};
-use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -104,7 +103,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     // Intercept clicks on the tab header
     fn on_tab_button(
         &mut self,
-        tiles: &egui_tiles::Tiles<Pane>,
+        tiles: &mut egui_tiles::Tiles<Pane>,
         tile_id: TileId,
         mut button_response: egui::response::Response,
     ) -> egui::response::Response {
