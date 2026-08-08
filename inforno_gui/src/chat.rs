@@ -306,27 +306,24 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     ui.horizontal(|ui| {
                                         let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
                                         let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
-                                        if wrench_resp.clicked() {
-                                            egui::Popup::toggle_id(ui.ctx(), popup_id);
-                                        }
-                                        egui::Popup::from_response(&wrench_resp)
-                                            .id(popup_id)
-                                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                                            .show(|ui| {
+                                        egui::Popup::from_toggle_button_response(&wrench_resp)
+                                        .id(popup_id)
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                        .show(|ui| {
                                             ui.set_min_width(140.0); // Prevent text wrapping
                                             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                                                if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
-                                                .color(ui.visuals().error_fg_color))
-                                                .frame(false))
-                                                .on_hover_text(
-                                                    egui::RichText::new(t!("delete_msg_tooltip"))
-                                                    .strong()
-                                                    .heading()
-                                                )
-                                                .clicked() {
-                                                    delete_requests.push(msg.id);
-                                                    ui.close();
-                                                }
+                                            if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))
+                                            .color(ui.visuals().error_fg_color))
+                                            .frame(false))
+                                            .on_hover_text(
+                                                egui::RichText::new(t!("delete_msg_tooltip"))
+                                            .strong()
+                                            .heading()
+                                            )
+                                            .clicked() {
+                                                delete_requests.push(msg.id);
+                                                ui.close();
+                                            }
                                             });
                                         });
 
@@ -952,13 +949,10 @@ fn render_msg_header(
     ui.horizontal(|ui| {
         let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg.id));
         let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
-        if wrench_resp.clicked() {
-            egui::Popup::toggle_id(ui.ctx(), popup_id);
-        }
-        egui::Popup::from_response(&wrench_resp)
-            .id(popup_id)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-            .show(|ui| {
+        egui::Popup::from_toggle_button_response(&wrench_resp)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
             ui.set_min_width(140.0); // Prevent text wrapping
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                 if ui.add(egui::Button::new(egui::RichText::new(t!("delete_msg_btn"))

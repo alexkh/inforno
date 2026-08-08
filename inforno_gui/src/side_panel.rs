@@ -179,14 +179,11 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                         // 3. Wrench Menu Logic (Bound perfectly to the left tool region)
                         if let Some(left_resp) = btn_resp.left_response {
                             let popup_id = ui.make_persistent_id(format!("wrench_menu_{}", db_chat.id));
-                            if btn_resp.left_clicked {
-                                egui::Popup::toggle_id(ui.ctx(), popup_id);
-                            }
 
-                            egui::Popup::from_response(&left_resp)
-                                .id(popup_id)
-                                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                                .show(|ui: &mut egui::Ui| {
+                            egui::Popup::from_toggle_button_response(&left_resp)
+                            .id(popup_id)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                            .show(|ui: &mut egui::Ui| {
                                 ui.set_min_width(140.0); // Slightly wider to avoid squishing
 
                                 // Force top-down layout so buttons stretch horizontally

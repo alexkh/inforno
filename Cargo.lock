@@ -3561,6 +3561,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
+ "ttf-parser",
  "typst",
  "typst-assets",
  "typst-svg",

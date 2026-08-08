@@ -390,7 +390,7 @@ fn render_agent(
     }
 
     // wrench menu here 🔧
-    if ui.button("🔧").on_hover_text("Modify this preset").clicked() {
+    if crate::emoji_render::emoji_button(ui, "🔧").on_hover_text("Modify this preset").clicked() {
         // A. Get the current preset data
         if let Some(_current_preset) = presets.get(agent.preset_selection.id) {
             if let Some(agent_preset) = agent.preset.as_ref() {

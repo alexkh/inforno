@@ -68,6 +68,32 @@ pub fn emoji_image(ui: &egui::Ui, ch: char) -> Option<egui::Image<'static>> {
     )
 }
 
+/// Drop-in replacement for `ui.button(text)` that renders a single leading
+/// emoji as an inline color image, e.g. "💾 Save" draws a real floppy-disk
+/// image followed by a "Save" text atom. This only inspects the *first*
+/// character - it's built around the "<emoji> Label" convention already
+/// used for every button in this file, not arbitrary multi-emoji strings.
+/// (`IntoAtoms` has a documented impl for 2-tuples of `Into<Atom>`, which is
+/// what `ui.button((image, "text"))` in the egui docs relies on - there's
+/// no equivalent impl for an arbitrary-length `Vec<Atom>`.)
+pub fn emoji_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let mut chars = text.chars();
+    if let Some(first) = chars.next() {
+        if let Some(img) = emoji_image(ui, first) {
+            let rest = chars.as_str().trim_start();
+            if rest.is_empty() {
+                // Icon-only button (e.g. "🗐" with no trailing label) - skip
+                // the text atom entirely so we don't reserve space/gap for
+                // an empty string, which was stretching the button out into
+                // a rectangle instead of keeping it square.
+                return ui.add(egui::Button::image(img));
+            }
+            return ui.add(egui::Button::new((img, rest)));
+        }
+    }
+    ui.button(text)
+}
+
 /// Draw a short, app-authored string that may contain emoji, replacing any
 /// codepoint we have a color bitmap for with an inline image and leaving
 /// everything else as normal text. Meant for buttons/headers/status lines -
