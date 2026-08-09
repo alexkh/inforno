@@ -309,6 +309,7 @@ impl State {
             Ok(mut value) => {
                 println!("Cache Local Database connection established");
 
+                /*
                 permanent.rt.block_on(async {
                     // Task A: Fetch OpenRouter Models if table is empty
                     if let Ok(is_empty) = is_table_empty(&value, "openr_model") {
@@ -340,6 +341,7 @@ impl State {
                         }
                     }
                 });
+                */
 
                 // Task C: Retrieve names from Cache DB (Sync operations)
                 if let Ok(names) = get_openr_model_names(&mut value) {
@@ -507,6 +509,7 @@ impl eframe::App for MyApp {
     #[tracing::instrument(skip_all, name = "MyApp::ui")]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
         // --- SYNC GLOBAL COLORS ---
         {
             let visuals = ui.visuals().clone();

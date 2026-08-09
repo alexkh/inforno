@@ -153,6 +153,8 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
 
 #[tracing::instrument(skip_all)]
 pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
+    let _render_span = tracing::info_span!("render_chat_messages", chat_id).entered();
+
     let mut max_msg_width = *state.chat_widths.entry(chat_id).or_insert(800.0);
 
     ui.input_mut(|i| {
@@ -203,6 +205,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let msg_pool = &chat.msg_pool;
 
         if msg_pool.is_empty() {
+            let _welcome_span = tracing::info_span!("render_welcome_message").entered();
             let mut welcome_text = t!("welcome_tour").to_string();
             let num_lines = welcome_text.lines().count().max(1);
             let note_margin_offset = 40.0;
@@ -249,8 +252,10 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let mut assistant_batch: Vec<i64> = Vec::new();
 
         if let Some(agent) = chat.agents.get(active_agent_ind) {
+            let _agent_span = tracing::info_span!("process_agent_messages", agent_id = agent.id).entered();
             for &msg_id in &agent.msg_ids {
                 if let Some(msg) = msg_pool.get(&msg_id) {
+                    let _msg_span = tracing::info_span!("process_message", msg_id = msg_id, role = %msg.msg_role).entered();
                     match msg.msg_role {
                         MsgRole::User | MsgRole::System => {
                             if !assistant_batch.is_empty() {
@@ -432,6 +437,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             }
 
             if !assistant_batch.is_empty() {
+                let _assistant_grid_span = tracing::info_span!("render_assistant_grid", count = assistant_batch.len()).entered();
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
@@ -439,6 +445,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
             }
 
             // --- NOTEBOOK APPENDER CELL ---
+            let _appender_span = tracing::info_span!("render_notebook_appender").entered();
             ui.add_space(1.0);
 
             let appender_offset = 40.0; // Adjust to account for the chat view's padding

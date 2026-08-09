@@ -46,7 +46,9 @@ struct Args {
     realm: Option<String>,
 }
 
-fn main() -> eframe::Result {
+// 1. Force a clean, multi-threaded Tokio runtime that wraps the whole process
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> eframe::Result {
     // Initialize Tracy profiling
     tracing_subscriber::registry()
         .with(tracing_tracy::TracyLayer::default())
@@ -54,15 +56,12 @@ fn main() -> eframe::Result {
 
     let args = Args::parse();
 
-    // create the tokio runtime
-    let rt = Runtime::new().expect("Unable to create Runtime");
-
-    // enter the runtime context
-    // this variable must live as long as the app runs!
-    let _enter = rt.enter();
+    // 2. Simply grab the handle of the macro-created runtime!
+    // No more manual `let rt = ...` and NO MORE `let _enter = ...`
+    let rt_handle = tokio::runtime::Handle::current();
 
     let native_options = eframe::NativeOptions {
-        viewport: ViewportBuilder {
+        viewport: egui::ViewportBuilder {
             icon: Some(std::sync::Arc::new(egui::IconData {
                 rgba: image::load_from_memory(
                         include_bytes!("../assets/inforno_icon.webp"))
@@ -78,8 +77,6 @@ fn main() -> eframe::Result {
     };
 
     // native_options.wgpu_options.present_mode = PresentMode::AutoVsync;
-
-    let rt_handle = rt.handle().clone();
 
     eframe::run_native(
         "inforno",
