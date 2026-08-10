@@ -68,6 +68,37 @@ pub fn emoji_image(ui: &egui::Ui, ch: char) -> Option<egui::Image<'static>> {
     )
 }
 
+/// Build (but don't add) a `Button` whose only content is `emoji`, drawn as
+/// a color image if this font has one, or as plain text otherwise. Lets the
+/// caller chain builder methods (`.small()`, `.selected(..)`, etc.) before
+/// calling `ui.add(...)`, same as `egui::Button::new(...)` would.
+pub fn emoji_button_widget(ui: &egui::Ui, emoji: char) -> egui::Button<'static> {
+    match emoji_image(ui, emoji) {
+        Some(img) => egui::Button::image(img),
+        None => egui::Button::new(emoji.to_string()),
+    }
+}
+
+/// Build (but don't yet show) a `MenuButton` whose opener is `emoji` drawn
+/// as a color image, with an optional trailing text/RichText atom (e.g. a
+/// live attachment count). Falls back to a plain-text opener if this font
+/// has no color glyph for `emoji`. Call `.ui(ui, |ui| { ... })` on the
+/// result the same way you would on `MenuButton::new(...)`.
+pub fn emoji_menu_button(
+    ui: &egui::Ui,
+    emoji: char,
+    trailing: Option<egui::WidgetText>,
+) -> egui::containers::menu::MenuButton<'static> {
+    use egui::containers::menu::MenuButton;
+
+    match (emoji_image(ui, emoji), trailing) {
+        (Some(img), Some(text)) => MenuButton::new((img, text)),
+        (Some(img), None) => MenuButton::new(img),
+        (None, Some(text)) => MenuButton::new(format!("{emoji} {}", text.text())),
+        (None, None) => MenuButton::new(emoji.to_string()),
+    }
+}
+
 /// Drop-in replacement for `ui.button(text)` that renders a single leading
 /// emoji as an inline color image, e.g. "💾 Save" draws a real floppy-disk
 /// image followed by a "Save" text atom. This only inspects the *first*

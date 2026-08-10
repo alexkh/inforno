@@ -68,7 +68,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                     ui.vertical(|ui| {
                         // Toggle Button (System prompt)
-                        if ui.add(egui::Button::new("💻").small().selected(
+                        if ui.add(crate::emoji_render::emoji_button_widget(ui, '💻').small().selected(
                                 state.bottom_panel_state.show_system_prompt))
                                 .on_hover_text(t!("toggle_system_prompt"))
                                 .clicked()
@@ -81,13 +81,13 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                         // Attachment Menu Button
                         let attach_count = state.bottom_panel_state.pending_attachments.len();
-                        let attach_text = if attach_count > 0 {
-                            egui::RichText::new(format!("📎 {}", attach_count)).color(egui::Color32::GREEN)
+                        let attach_trailing = if attach_count > 0 {
+                            Some(egui::RichText::new(format!("{}", attach_count)).color(egui::Color32::GREEN).into())
                         } else {
-                            egui::RichText::new("📎")
+                            None
                         };
 
-                        ui.menu_button(attach_text, |ui| {
+                        crate::emoji_render::emoji_menu_button(ui, '📎', attach_trailing).ui(ui, |ui| {
                             if ui.button("Attach Workspace / 'src/' (.rs)").clicked() {
                                 if let Some(root) = &state.project_root {
                                     let src_dirs = get_workspace_src_dirs(root);
@@ -166,7 +166,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                                     ui.close();
                                 }
                             }
-                        }).response.on_hover_text("Attachments");
+                        }).0.on_hover_text("Attachments");
                     });
 
                     // --- Column 1: System Prompt ---
@@ -832,10 +832,9 @@ fn get_workspace_src_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
 
-    // Fallback to standard root/src if no workspace members found
-    if dirs.is_empty() {
-        dirs.push(root.join("src"));
-    }
+    // Fallback to standard root/src if no workspace members found.
+    // Always include root/src if it exists.
+    dirs.push(root.join("src"));
 
     // Only return directories that actually exist in the filesystem
     dirs.into_iter().filter(|d| d.is_dir()).collect()
