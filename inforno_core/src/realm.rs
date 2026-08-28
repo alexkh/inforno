@@ -1,12 +1,66 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
-use std::sync::{Arc, RwLock, LazyLock};
+use std::sync::Arc;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobExpr {
+    Any(Vec<GlobExpr>),
+    All(Vec<GlobExpr>),
+    Not(Box<GlobExpr>),
+    Match(Vec<String>),
+}
+
+pub enum CompiledExpr {
+    Any(Vec<CompiledExpr>),
+    All(Vec<CompiledExpr>),
+    Not(Box<CompiledExpr>),
+    Match(globset::GlobSet),
+}
+
+impl CompiledExpr {
+    pub fn compile(expr: &GlobExpr) -> Result<Self, String> {
+        match expr {
+            GlobExpr::Any(exprs) => {
+                let compiled = exprs.iter().map(Self::compile).collect::<Result<Vec<_>, _>>()?;
+                Ok(CompiledExpr::Any(compiled))
+            }
+            GlobExpr::All(exprs) => {
+                let compiled = exprs.iter().map(Self::compile).collect::<Result<Vec<_>, _>>()?;
+                Ok(CompiledExpr::All(compiled))
+            }
+            GlobExpr::Not(expr) => {
+                Ok(CompiledExpr::Not(Box::new(Self::compile(expr)?)))
+            }
+            GlobExpr::Match(globs) => {
+                let mut builder = globset::GlobSetBuilder::new();
+                for g in globs {
+                    builder.add(globset::Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+                }
+                Ok(CompiledExpr::Match(builder.build().map_err(|e| e.to_string())?))
+            }
+        }
+    }
+
+    pub fn is_match(&self, path: &std::path::Path) -> bool {
+        match self {
+            CompiledExpr::Any(exprs) => exprs.iter().any(|e| e.is_match(path)),
+            CompiledExpr::All(exprs) => exprs.iter().all(|e| e.is_match(path)),
+            CompiledExpr::Not(expr) => !expr.is_match(path),
+            CompiledExpr::Match(set) => set.is_match(path),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmMountConfig {
     pub host: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+    pub hide_if: Option<GlobExpr>,
+    pub read_only_if: Option<GlobExpr>,
     #[serde(default)]
     pub wildcards: Vec<String>,
     #[serde(default)]
@@ -19,6 +73,8 @@ pub struct RealmMountConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
     pub default_workspace: Option<String>,
+    pub hide_if: Option<GlobExpr>,
+    pub read_only_if: Option<GlobExpr>,
     #[serde(default)]
     pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
@@ -29,7 +85,10 @@ pub struct RealmConfig {
 pub struct CompiledMount {
     pub virtual_path: String,
     pub host_path: PathBuf,
+    pub read_only: bool,
     pub ignore_set: Arc<GlobSet>,
+    pub hide_expr: Option<Arc<CompiledExpr>>,
+    pub ro_expr: Option<Arc<CompiledExpr>>,
     pub description: Option<String>,
     pub kind: String, // Defaults to "project", but can also be "workspace"
 }
@@ -38,6 +97,8 @@ pub struct CompiledMount {
 pub struct ActiveRealm {
     pub name: String,
     pub default_workspace: Option<String>,
+    pub global_hide_expr: Option<Arc<CompiledExpr>>,
+    pub global_ro_expr: Option<Arc<CompiledExpr>>,
     pub mounts: Vec<CompiledMount>,
     pub raw_config: RealmConfig,
 }
@@ -48,9 +109,33 @@ impl ActiveRealm {
 
         // Clone the config BEFORE the loop consumes it
         let raw_config = config.clone();
+        
+        let global_hide_expr = if let Some(ref expr) = raw_config.hide_if {
+            Some(Arc::new(CompiledExpr::compile(expr)?))
+        } else {
+            None
+        };
+        
+        let global_ro_expr = if let Some(ref expr) = raw_config.read_only_if {
+            Some(Arc::new(CompiledExpr::compile(expr)?))
+        } else {
+            None
+        };
 
         for (v_path, mount_cfg) in config.mounts {
             let mut builder = GlobSetBuilder::new();
+            
+            let hide_expr = if let Some(ref expr) = mount_cfg.hide_if {
+                Some(Arc::new(CompiledExpr::compile(expr)?))
+            } else {
+                None
+            };
+
+            let ro_expr = if let Some(ref expr) = mount_cfg.read_only_if {
+                Some(Arc::new(CompiledExpr::compile(expr)?))
+            } else {
+                None
+            };
 
             // Apply the reusable wildcard rules
             for wc_name in &mount_cfg.wildcards {
@@ -74,7 +159,10 @@ impl ActiveRealm {
             mounts.push(CompiledMount {
                 virtual_path: v_path,
                 host_path: mount_cfg.host,
+                read_only: mount_cfg.read_only,
                 ignore_set: ignore_set.into(),
+                hide_expr,
+                ro_expr,
                 description: mount_cfg.description,
                 kind,
             });
@@ -85,6 +173,8 @@ impl ActiveRealm {
         Ok(Self {
             name,
             default_workspace: raw_config.default_workspace.clone(),
+            global_hide_expr,
+            global_ro_expr,
             mounts,
             raw_config, 
         })
@@ -99,11 +189,56 @@ impl ActiveRealm {
                     .unwrap_or("")
                     .trim_start_matches('/');
                 let host_target = mount.host_path.join(relative);
+                
+                // Legacy ignore set matching
                 if mount.ignore_set.is_match(&host_target) { return None; }
+                
+                // Evaluate AST hide expressions against the relative path
+                let rel_path = Path::new(relative);
+                if let Some(ref expr) = self.global_hide_expr {
+                    if expr.is_match(rel_path) { return None; }
+                }
+                if let Some(ref expr) = mount.hide_expr {
+                    if expr.is_match(rel_path) { return None; }
+                }
+                
                 return Some(host_target);
             }
         }
         None
+    }
+
+    pub fn is_path_read_only(&self, virtual_path: &Path) -> bool {
+        let path_str = match virtual_path.to_str() {
+            Some(s) => s,
+            None => return true, // Safe fallback
+        };
+        
+        for mount in &self.mounts {
+            if path_str.starts_with(&mount.virtual_path) {
+                // 1. Check if the entire mount is read-only
+                if mount.read_only { return true; }
+                
+                let relative = path_str
+                    .strip_prefix(&mount.virtual_path)
+                    .unwrap_or("")
+                    .trim_start_matches('/');
+                let rel_path = Path::new(relative);
+                    
+                // 2. Check global read-only rules
+                if let Some(ref expr) = self.global_ro_expr {
+                    if expr.is_match(rel_path) { return true; }
+                }
+                
+                // 3. Check mount-specific read-only rules
+                if let Some(ref expr) = mount.ro_expr {
+                    if expr.is_match(rel_path) { return true; }
+                }
+                
+                return false;
+            }
+        }
+        true // If it's outside all mounts, treat as read-only to be safe
     }
 }
 

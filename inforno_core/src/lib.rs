@@ -3,5 +3,11 @@ pub mod db;
 pub mod ollama;
 pub mod openr;
 pub mod realm;
+
+#[cfg(target_os = "linux")]
+pub mod realm_vfs;
+#[cfg(target_os = "linux")]
+pub mod realm_jail;
+
 pub mod scripting;
 pub mod parsing;
