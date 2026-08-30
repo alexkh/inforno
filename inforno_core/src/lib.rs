@@ -7,7 +7,8 @@ pub mod realm;
 #[cfg(target_os = "linux")]
 pub mod realm_vfs;
 #[cfg(target_os = "linux")]
-pub mod realm_jail;
+pub mod realm_mount;
+pub mod realm_spawn;
 
 pub mod scripting;
 pub mod parsing;

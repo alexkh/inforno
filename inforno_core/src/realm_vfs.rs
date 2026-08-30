@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
 use libc::{EACCES, ENOENT, O_RDWR, O_WRONLY};
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
-use crate::realm::ActiveRealm;
+use crate::realm::{ActiveRealm, Actor, GrantKind};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -25,15 +25,20 @@ struct VNode {
 
 pub struct RealmFuseFS {
     realm: ActiveRealm,
+    /// The Actor this mounted view is served on behalf of. Fixed for the
+    /// lifetime of the mount — one FUSE session currently represents one
+    /// Actor's masked view, matching one `VfsMaskSession::spawn_vfs` call.
+    actor: Actor,
     inodes: HashMap<u64, VNode>,
     path_to_ino: HashMap<PathBuf, u64>,
     next_ino: u64,
 }
 
 impl RealmFuseFS {
-    pub fn new(realm: ActiveRealm) -> Self {
+    pub fn new(realm: ActiveRealm, actor: Actor) -> Self {
         let mut fs = Self {
             realm,
+            actor,
             inodes: HashMap::new(),
             path_to_ino: HashMap::new(),
             next_ino: 1,
@@ -122,7 +127,7 @@ impl Filesystem for RealmFuseFS {
         let child_vpath = parent_vpath.join(name_str);
 
         // Security check via ActiveRealm
-        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath) {
+        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.actor) {
             let is_dir = host_path.is_dir();
             let is_protected = self.realm.is_path_read_only(&child_vpath);
             let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), is_dir);
@@ -312,6 +317,66 @@ impl Filesystem for RealmFuseFS {
         reply.attr(&TTL, &attr);
     }
 
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = match parent_vpath {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let child_vpath = parent_vpath.join(name_str);
+
+        // Full agent-aware check: hard restrictions (hidden, mount read-only,
+        // create_rules) AND whether the agent's roles actually grant Create
+        // here. We can't relay the reason through the FUSE reply (errno-only),
+        // so it's logged here; `role_capabilities` is how the agent learns
+        // its actual capabilities up front, to avoid retry loops.
+        if let Err(reason) = self.realm.can_access(&child_vpath, GrantKind::Create, &self.actor) {
+            eprintln!("Realm VFS: denied creating '{}': {}", child_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.actor) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+
+        match OpenOptions::new().write(true).create_new(true).open(&host_path) {
+            Ok(_) => {
+                let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), false);
+                let attr = self.stat_to_attr(ino, &Some(host_path), false, false);
+                reply.created(&TTL, &attr, 0, ino, flags as u32);
+            }
+            Err(_) => {
+                reply.error(EACCES);
+            }
+        }
+    }
+
     fn readdir(
         &mut self,
         _req: &Request<'_>,
@@ -348,7 +413,7 @@ impl Filesystem for RealmFuseFS {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let child_vpath = parent_vpath.join(&file_name);
 
-                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath) {
+                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath, &self.actor) {
                         let is_dir = resolved_host.is_dir();
                         let child_ino = self.get_or_create_ino(&child_vpath, Some(resolved_host), is_dir);
                         let ftype = if is_dir { FileType::Directory } else { FileType::RegularFile };
