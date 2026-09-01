@@ -51,10 +51,11 @@ impl VfsMaskSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::realm::{ActiveRealm, Actor, RealmConfig, RealmMountConfig, GlobExpr};
+    use crate::realm::{ActiveRealm, Actor, RealmConfig, RealmMountConfig, GlobExpr, RoleConfig, Tier, Power, Cap};
     use indexmap::IndexMap;
     use std::fs::{self, File};
     use std::io::Write;
+    use std::os::unix::fs::FileExt;
 
     #[test]
     fn test_vfsmask_permissions() -> Result<(), Box<dyn std::error::Error>> {
@@ -64,10 +65,12 @@ mod tests {
         let normal_path = host_dir.path().join("normal.txt");
         let hidden_path = host_dir.path().join("hidden.txt");
         let ro_path = host_dir.path().join("readonly.txt");
+        let append_path = host_dir.path().join("append_only.txt");
 
         File::create(&normal_path)?.write_all(b"normal_data\n")?;
         File::create(&hidden_path)?.write_all(b"hidden_data\n")?;
         File::create(&ro_path)?.write_all(b"ro_data\n")?;
+        File::create(&append_path)?.write_all(b"log_start\n")?;
 
         // 2. Configure the Boolean AST Policy
         let mut mounts = IndexMap::new();
@@ -83,6 +86,35 @@ mod tests {
             create_rules: vec![],
         });
 
+        let mut roles = IndexMap::new();
+        roles.insert("tester".to_string(), RoleConfig {
+            tier: Tier(2),
+            description: "Test Role".to_string(),
+            powers: vec![],
+        });
+
+        let mut tiers = std::collections::BTreeMap::new();
+        tiers.insert(2, vec![
+            Power {
+                span: GlobExpr::Match(vec!["**".to_string()]),
+                caps: vec![Cap::Read],
+                memo: Some("Read everything".to_string()),
+                overrides: None,
+            },
+            Power {
+                span: GlobExpr::Match(vec!["normal.txt".to_string(), "readonly.txt".to_string(), "hidden.txt".to_string()]),
+                caps: vec![Cap::Write],
+                memo: Some("Write access to specific files".to_string()),
+                overrides: None,
+            },
+            Power {
+                span: GlobExpr::Match(vec!["append_only.txt".to_string()]),
+                caps: vec![Cap::Append],
+                memo: Some("Append access to logs".to_string()),
+                overrides: None,
+            }
+        ]);
+
         let config = RealmConfig {
             default_workspace: None,
             hide_if: None,
@@ -91,18 +123,16 @@ mod tests {
             wildcards: IndexMap::new(),
             mounts,
             create_rules: vec![],
-            roles: IndexMap::new(),
-            grants: vec![],
+            roles,
+            tiers,
         };
 
         // 3. Compile Realm and Spawn FUSE Driver
-        //
-        // This test exercises only the hard restrictions (hide/read-only),
-        // which are agent-independent, so an Agent with no roles is
-        // sufficient — role/grant enforcement (e.g. for `create`) is covered
-        // separately and isn't exercised by this test.
         let active_realm = ActiveRealm::from_config("test_realm".to_string(), config)?;
-        let vfsmask = VfsMaskSession::spawn_vfs(active_realm, Actor::default())?;
+        let actor = Actor {
+            roles: vec!["tester".to_string()],
+        };
+        let vfsmask = VfsMaskSession::spawn_vfs(active_realm, actor)?;
 
         // Give FUSE a moment to fully initialize in the background thread
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -111,6 +141,7 @@ mod tests {
         let normal_vpath = fuse_workspace.join("normal.txt");
         let hidden_vpath = fuse_workspace.join("hidden.txt");
         let ro_vpath = fuse_workspace.join("readonly.txt");
+        let append_vpath = fuse_workspace.join("append_only.txt");
 
         // --- Test 1: Hidden files return ENOENT to the host ---
         assert!(!hidden_vpath.exists(), "Hidden file should be completely invisible to VFS");
@@ -125,12 +156,36 @@ mod tests {
         assert_eq!(host_data, "modified\n");
 
         // --- Test 3: Read-only files are visible but reject writes via FUSE EACCES ---
+        // (Even though the Actor holds a Write grant for this file, the hard `read_only_if` on the mount overrides it)
         assert!(ro_vpath.exists(), "Read-only file should be visible to VFS");
         let read_ro_data = fs::read_to_string(&ro_vpath)?;
         assert_eq!(read_ro_data, "ro_data\n");
 
         let err = fs::write(&ro_vpath, "hack").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "Write should be denied by FUSE Layer");
+
+        // --- Test 4: Append-only enforcement ---
+        assert!(append_vpath.exists(), "Append file should be visible to VFS");
+        
+        // 4a. Read should work via the `**` global read grant
+        let read_app_data = fs::read_to_string(&append_vpath)?;
+        assert_eq!(read_app_data, "log_start\n");
+
+        // 4b. Truncate via File::create (O_TRUNC) should fail because we lack Write
+        let err_trunc = File::create(&append_vpath).unwrap_err();
+        assert_eq!(err_trunc.kind(), std::io::ErrorKind::PermissionDenied, "Truncation should be denied by FUSE Layer");
+
+        // 4c. Arbitrary offset write (e.g. overwriting the start of the file) should fail
+        let mut file_no_append = fs::OpenOptions::new().write(true).open(&append_vpath)?;
+        let err_over = file_no_append.write_at(b"hack", 0).unwrap_err();
+        assert_eq!(err_over.raw_os_error(), Some(libc::EINVAL), "Non-EOF write should be denied with EINVAL");
+
+        // 4d. Proper append (O_APPEND) should succeed
+        let mut app_file = fs::OpenOptions::new().append(true).open(&append_vpath)?;
+        app_file.write_all(b"new_log\n")?;
+
+        let final_host_data = fs::read_to_string(&append_path)?;
+        assert_eq!(final_host_data, "log_start\nnew_log\n");
 
         // Clean up FUSE session gracefully
         drop(vfsmask);

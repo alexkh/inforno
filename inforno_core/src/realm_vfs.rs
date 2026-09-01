@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
-use crate::realm::{ActiveRealm, Actor, GrantKind};
+use crate::realm::{ActiveRealm, Actor, Cap};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -139,7 +139,10 @@ impl Filesystem for RealmFuseFS {
         let vpath_str = child_vpath.to_str().unwrap_or("");
 
         // Synthetic OS Directories (required for bash/tools to not crash inside the jail)
-        let synthetic_dirs = ["/dev", "/proc", "/tmp"];
+        let synthetic_dirs = [
+            "/dev", "/proc", "/tmp", "/bin", "/usr", "/lib", "/lib64", "/etc",
+            "/.cargo", "/.rustup",
+        ];
         if synthetic_dirs.contains(&vpath_str) {
             let ino = self.get_or_create_ino(&child_vpath, None, true);
             let attr = self.stat_to_attr(ino, &None, true, false);
@@ -176,11 +179,21 @@ impl Filesystem for RealmFuseFS {
             let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
             
             if let Some(p) = vpath {
-                let is_protected = self.realm.is_path_read_only(&p);
                 let is_write_access = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
                 
-                // Block the process at the kernel level if they try to open a protected file for writing
-                if is_protected && is_write_access {
+                if is_write_access {
+                    let can_write = self.realm.can_access(&p, Cap::Write, &self.actor).is_ok();
+                    let can_append = self.realm.can_access(&p, Cap::Append, &self.actor).is_ok();
+                    
+                    if !can_write && !can_append {
+                        reply.error(EACCES);
+                        return;
+                    }
+                    if !can_write && can_append && (flags & libc::O_TRUNC) != 0 {
+                        reply.error(EACCES); // Append-only cannot truncate via open
+                        return;
+                    }
+                } else if self.realm.can_access(&p, Cap::Read, &self.actor).is_err() {
                     reply.error(EACCES);
                     return;
                 }
@@ -202,6 +215,14 @@ impl Filesystem for RealmFuseFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
+        let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+        if let Some(ref p) = vpath {
+            if self.realm.can_access(p, Cap::Read, &self.actor).is_err() {
+                reply.error(EACCES);
+                return;
+            }
+        }
+
         if let Some(node) = self.inodes.get(&ino) {
             if let Some(ref host_path) = node.host_path {
                 if let Ok(mut file) = File::open(host_path) {
@@ -230,11 +251,15 @@ impl Filesystem for RealmFuseFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        // Defense in depth: even though `open` already rejects O_WRONLY/O_RDWR
-        // on protected files, re-check here in case a writable fh was cached.
         let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+        let mut can_write = false;
+        let mut can_append = false;
+
         if let Some(ref p) = vpath {
-            if self.realm.is_path_read_only(p) {
+            can_write = self.realm.can_access(p, Cap::Write, &self.actor).is_ok();
+            can_append = self.realm.can_access(p, Cap::Append, &self.actor).is_ok();
+
+            if !can_write && !can_append {
                 reply.error(EACCES);
                 return;
             }
@@ -242,18 +267,34 @@ impl Filesystem for RealmFuseFS {
 
         if let Some(node) = self.inodes.get(&ino) {
             if let Some(ref host_path) = node.host_path {
-                match OpenOptions::new().write(true).open(host_path) {
-                    Ok(mut file) => {
-                        if file.seek(SeekFrom::Start(offset as u64)).is_ok() {
+                if can_write {
+                    match OpenOptions::new().write(true).open(host_path) {
+                        Ok(mut file) => {
+                            if file.seek(SeekFrom::Start(offset as u64)).is_ok() {
+                                if let Ok(written) = file.write(data) {
+                                    reply.written(written as u32);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => { reply.error(EACCES); return; }
+                    }
+                } else if can_append {
+                    match OpenOptions::new().append(true).open(host_path) {
+                        Ok(mut file) => {
+                            // Enforce append: deny arbitrary backward seeks by apps ignoring O_APPEND
+                            if let Ok(meta) = file.metadata() {
+                                if offset as u64 != meta.len() {
+                                    reply.error(libc::EINVAL);
+                                    return;
+                                }
+                            }
                             if let Ok(written) = file.write(data) {
                                 reply.written(written as u32);
                                 return;
                             }
                         }
-                    }
-                    Err(_) => {
-                        reply.error(EACCES);
-                        return;
+                        Err(_) => { reply.error(EACCES); return; }
                     }
                 }
             }
@@ -293,10 +334,17 @@ impl Filesystem for RealmFuseFS {
 
         // Only actually mutate the host file if a size change (e.g. truncate) was requested.
         if let Some(new_size) = size {
-            if is_protected {
+            if let Some(ref p) = vpath {
+                // Truncation STRICTLY requires Write. Append is intentionally insufficient.
+                if self.realm.can_access(p, Cap::Write, &self.actor).is_err() {
+                    reply.error(EACCES);
+                    return;
+                }
+            } else {
                 reply.error(EACCES);
                 return;
             }
+            
             if let Some(ref host_path) = node.host_path {
                 match OpenOptions::new().write(true).open(host_path) {
                     Ok(file) => {
@@ -351,7 +399,7 @@ impl Filesystem for RealmFuseFS {
         // here. We can't relay the reason through the FUSE reply (errno-only),
         // so it's logged here; `role_capabilities` is how the agent learns
         // its actual capabilities up front, to avoid retry loops.
-        if let Err(reason) = self.realm.can_access(&child_vpath, GrantKind::Create, &self.actor) {
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.actor) {
             eprintln!("Realm VFS: denied creating '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
@@ -440,7 +488,10 @@ impl Filesystem for RealmFuseFS {
             
             // Populate synthetic OS directories in root
             if parent_vpath == Path::new("/") {
-                for &sys_dir in &["dev", "proc", "tmp"] {
+                for &sys_dir in &[
+                    "dev", "proc", "tmp", "bin", "usr", "lib", "lib64", "etc",
+                    ".cargo", ".rustup",
+                ] {
                     let child_vpath = PathBuf::from("/").join(sys_dir);
                     let child_ino = self.get_or_create_ino(&child_vpath, None, true);
                     entries.push((child_ino, FileType::Directory, sys_dir.to_string()));
