@@ -18,6 +18,14 @@ use inforno_core::{
 
 use crate::state::{State, ChatMsgUi};
 
+/// Role the GUI itself assumes when resolving Realm-mapped paths referenced
+/// in chat (e.g. "open in editor" / autocorrect links on code blocks). This
+/// must match a `gui:` role in the user's realm.yml. If they haven't defined
+/// one, `resolve_filepath` treats the Realm as contributing nothing and we
+/// fall back to `project_root` — no special-casing needed here, the GUI just
+/// has no Realm access, which is the correct default.
+pub const GUI_ROLE: &str = "gui";
+
 pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
     egui::CentralPanel::default()
     //.stick_to_the_bottom(true)
@@ -1159,7 +1167,7 @@ fn render_msg_content(
 
                     if let Some(path) = &filepath {
                         display_path = path.clone();
-                        if let Some((resolved, corrected)) = inforno_core::realm::resolve_filepath(active_realm, project_root, path) {
+                        if let Some((resolved, corrected)) = inforno_core::realm::resolve_filepath(active_realm, GUI_ROLE, project_root, path) {
                             actual_path = Some(resolved);
                             autocorrected = corrected;
                         }

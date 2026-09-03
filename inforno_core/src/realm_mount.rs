@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::path::Path;
-use crate::realm::{ActiveRealm, Actor};
+use crate::realm::ActiveRealm;
 use crate::realm_vfs::RealmFuseFS;
 
 // real_mount.rs mounts the vfs, realm_process.rs runs a chrooted process in vfs
@@ -25,12 +25,11 @@ pub struct VfsMaskSession {
 
 impl VfsMaskSession {
     /// Spawns the background FUSE mount representing the Realm's masked view,
-    /// as seen by the given Actor. The mount enforces that Actor's roles for
-    /// the lifetime of the session — a different Actor needs its own
-    /// `spawn_vfs` call and its own mount.
-    pub fn spawn_vfs(realm: ActiveRealm, actor: Actor) -> Result<Self, Box<dyn std::error::Error>> {
+    /// as enforced for the given Role for the lifetime of the session — a
+    /// different Role needs its own `spawn_vfs` call and its own mount.
+    pub fn spawn_vfs(realm: ActiveRealm, role: String) -> Result<Self, Box<dyn std::error::Error>> {
         let mount_dir = tempfile::TempDir::new()?;
-        let fs = RealmFuseFS::new(realm, actor);
+        let fs = RealmFuseFS::new(realm, role);
 
         // Intentionally omitting MountOption::RO to allow FUSE to selectively handle write operations.
         let session = fuser::spawn_mount2(fs, mount_dir.path(), &[
@@ -51,7 +50,7 @@ impl VfsMaskSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::realm::{ActiveRealm, Actor, RealmConfig, RealmMountConfig, GlobExpr, RoleConfig, Tier, Power, Cap};
+    use crate::realm::{ActiveRealm, RealmConfig, RealmMountConfig, GlobExpr, RoleConfig, Tier, Power, Cap};
     use indexmap::IndexMap;
     use std::fs::{self, File};
     use std::io::Write;
@@ -82,7 +81,7 @@ mod tests {
             wildcards: vec![],
             ignore: vec![],
             description: None,
-            kind: None,
+            buckets: None,
             create_rules: vec![],
         });
 
@@ -122,6 +121,8 @@ mod tests {
             expressions: IndexMap::new(),
             wildcards: IndexMap::new(),
             mounts,
+            sandboxes: IndexMap::new(),
+            default_sandbox: None,
             create_rules: vec![],
             roles,
             tiers,
@@ -129,10 +130,7 @@ mod tests {
 
         // 3. Compile Realm and Spawn FUSE Driver
         let active_realm = ActiveRealm::from_config("test_realm".to_string(), config)?;
-        let actor = Actor {
-            roles: vec!["tester".to_string()],
-        };
-        let vfsmask = VfsMaskSession::spawn_vfs(active_realm, actor)?;
+        let vfsmask = VfsMaskSession::spawn_vfs(active_realm, "tester".to_string())?;
 
         // Give FUSE a moment to fully initialize in the background thread
         std::thread::sleep(std::time::Duration::from_millis(200));

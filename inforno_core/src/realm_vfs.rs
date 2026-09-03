@@ -12,7 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
-use crate::realm::{ActiveRealm, Actor, Cap};
+use crate::realm::{ActiveRealm, Cap};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -25,20 +25,20 @@ struct VNode {
 
 pub struct RealmFuseFS {
     realm: ActiveRealm,
-    /// The Actor this mounted view is served on behalf of. Fixed for the
+    /// The Role this mounted view is served on behalf of. Fixed for the
     /// lifetime of the mount — one FUSE session currently represents one
-    /// Actor's masked view, matching one `VfsMaskSession::spawn_vfs` call.
-    actor: Actor,
+    /// Role's masked view, matching one `VfsMaskSession::spawn_vfs` call.
+    role: String,
     inodes: HashMap<u64, VNode>,
     path_to_ino: HashMap<PathBuf, u64>,
     next_ino: u64,
 }
 
 impl RealmFuseFS {
-    pub fn new(realm: ActiveRealm, actor: Actor) -> Self {
+    pub fn new(realm: ActiveRealm, role: String) -> Self {
         let mut fs = Self {
             realm,
-            actor,
+            role,
             inodes: HashMap::new(),
             path_to_ino: HashMap::new(),
             next_ino: 1,
@@ -127,7 +127,7 @@ impl Filesystem for RealmFuseFS {
         let child_vpath = parent_vpath.join(name_str);
 
         // Security check via ActiveRealm
-        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.actor) {
+        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.role) {
             let is_dir = host_path.is_dir();
             let is_protected = self.realm.is_path_read_only(&child_vpath);
             let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), is_dir);
@@ -182,8 +182,8 @@ impl Filesystem for RealmFuseFS {
                 let is_write_access = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
                 
                 if is_write_access {
-                    let can_write = self.realm.can_access(&p, Cap::Write, &self.actor).is_ok();
-                    let can_append = self.realm.can_access(&p, Cap::Append, &self.actor).is_ok();
+                    let can_write = self.realm.can_access(&p, Cap::Write, &self.role).is_ok();
+                    let can_append = self.realm.can_access(&p, Cap::Append, &self.role).is_ok();
                     
                     if !can_write && !can_append {
                         reply.error(EACCES);
@@ -193,7 +193,7 @@ impl Filesystem for RealmFuseFS {
                         reply.error(EACCES); // Append-only cannot truncate via open
                         return;
                     }
-                } else if self.realm.can_access(&p, Cap::Read, &self.actor).is_err() {
+                } else if self.realm.can_access(&p, Cap::Read, &self.role).is_err() {
                     reply.error(EACCES);
                     return;
                 }
@@ -217,7 +217,7 @@ impl Filesystem for RealmFuseFS {
     ) {
         let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
         if let Some(ref p) = vpath {
-            if self.realm.can_access(p, Cap::Read, &self.actor).is_err() {
+            if self.realm.can_access(p, Cap::Read, &self.role).is_err() {
                 reply.error(EACCES);
                 return;
             }
@@ -256,8 +256,8 @@ impl Filesystem for RealmFuseFS {
         let mut can_append = false;
 
         if let Some(ref p) = vpath {
-            can_write = self.realm.can_access(p, Cap::Write, &self.actor).is_ok();
-            can_append = self.realm.can_access(p, Cap::Append, &self.actor).is_ok();
+            can_write = self.realm.can_access(p, Cap::Write, &self.role).is_ok();
+            can_append = self.realm.can_access(p, Cap::Append, &self.role).is_ok();
 
             if !can_write && !can_append {
                 reply.error(EACCES);
@@ -336,7 +336,7 @@ impl Filesystem for RealmFuseFS {
         if let Some(new_size) = size {
             if let Some(ref p) = vpath {
                 // Truncation STRICTLY requires Write. Append is intentionally insufficient.
-                if self.realm.can_access(p, Cap::Write, &self.actor).is_err() {
+                if self.realm.can_access(p, Cap::Write, &self.role).is_err() {
                     reply.error(EACCES);
                     return;
                 }
@@ -399,13 +399,13 @@ impl Filesystem for RealmFuseFS {
         // here. We can't relay the reason through the FUSE reply (errno-only),
         // so it's logged here; `role_capabilities` is how the agent learns
         // its actual capabilities up front, to avoid retry loops.
-        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.actor) {
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.role) {
             eprintln!("Realm VFS: denied creating '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.actor) {
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -461,7 +461,7 @@ impl Filesystem for RealmFuseFS {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let child_vpath = parent_vpath.join(&file_name);
 
-                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath, &self.actor) {
+                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath, &self.role) {
                         let is_dir = resolved_host.is_dir();
                         let child_ino = self.get_or_create_ino(&child_vpath, Some(resolved_host), is_dir);
                         let ftype = if is_dir { FileType::Directory } else { FileType::RegularFile };

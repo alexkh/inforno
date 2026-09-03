@@ -212,36 +212,39 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                 state.active_workspace_name.as_ref() == Some(&m.virtual_path)
                             });
 
-                            // --- PART 3: 📁 The Sub-Project (Only if kind == workspace) ---
+                            // --- PART 3: 📁 The Bucket (only if this mount declares any) ---
                             if let Some(mount) = active_mount {
-                                if mount.kind.to_lowercase() == "workspace" {
+                                if let Some(bucket_cfg) = &mount.buckets {
 
-                                    // Safely cache the TOML parsed members so the GUI doesn't stutter
-                                    let cache_id = egui::Id::new("ws_members").with(&mount.host_path);
-                                    let members: Vec<String> = ctx.data_mut(|d| {
+                                    // Safely cache the discovered bucket list so the GUI doesn't stutter
+                                    let cache_id = egui::Id::new("buckets").with(&mount.host_path);
+                                    let buckets: Vec<String> = ctx.data_mut(|d| {
                                         d.get_temp_mut_or_insert_with(cache_id, || {
                                             let mut parsed = vec![".".to_string()];
-                                            let cargo_path = mount.host_path.join("Cargo.toml");
+                                            parsed.extend(bucket_cfg.paths.iter().cloned());
 
-                                            if let Ok(content) = std::fs::read_to_string(&cargo_path) {
-                                                if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
-                                                    if let Some(arr) = toml_val.get("workspace").and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
-                                                        for item in arr {
-                                                            if let Some(s) = item.as_str() {
-                                                                if s.ends_with("/*") {
-                                                                    // Expand globs like "crates/*"
-                                                                    let base = s.trim_end_matches("/*");
-                                                                    if let Ok(entries) = std::fs::read_dir(mount.host_path.join(base)) {
-                                                                        for e in entries.flatten() {
-                                                                            if e.path().is_dir() && e.path().join("Cargo.toml").exists() {
-                                                                                if let Some(name) = e.file_name().to_str() {
-                                                                                    parsed.push(format!("{}/{}", base, name));
+                                            if bucket_cfg.cargo_workspace {
+                                                let cargo_path = mount.host_path.join("Cargo.toml");
+                                                if let Ok(content) = std::fs::read_to_string(&cargo_path) {
+                                                    if let Ok(toml_val) = toml::from_str::<toml::Value>(&content) {
+                                                        if let Some(arr) = toml_val.get("workspace").and_then(|w| w.get("members")).and_then(|m| m.as_array()) {
+                                                            for item in arr {
+                                                                if let Some(s) = item.as_str() {
+                                                                    if s.ends_with("/*") {
+                                                                        // Expand globs like "crates/*"
+                                                                        let base = s.trim_end_matches("/*");
+                                                                        if let Ok(entries) = std::fs::read_dir(mount.host_path.join(base)) {
+                                                                            for e in entries.flatten() {
+                                                                                if e.path().is_dir() && e.path().join("Cargo.toml").exists() {
+                                                                                    if let Some(name) = e.file_name().to_str() {
+                                                                                        parsed.push(format!("{}/{}", base, name));
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }
+                                                                    } else {
+                                                                        parsed.push(s.to_string());
                                                                     }
-                                                                } else {
-                                                                    parsed.push(s.to_string());
                                                                 }
                                                             }
                                                         }
@@ -252,32 +255,32 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         }).clone()
                                     });
 
-                                    // Retrieve selected sub-project from cache
-                                    let active_sub = ctx.data_mut(|d| {
-                                        d.get_temp::<String>(egui::Id::new("sub_project")).unwrap_or_else(|| ".".to_string())
+                                    // Retrieve selected bucket from cache
+                                    let active_bucket = ctx.data_mut(|d| {
+                                        d.get_temp::<String>(egui::Id::new("active_bucket")).unwrap_or_else(|| ".".to_string())
                                     });
 
-                                    let mut sub_job = egui::text::LayoutJob::default();
-                                    sub_job.append(&format!("📁 {}", active_sub), 0.0, egui::text::TextFormat {
+                                    let mut bucket_job = egui::text::LayoutJob::default();
+                                    bucket_job.append(&format!("📁 {}", active_bucket), 0.0, egui::text::TextFormat {
                                         color: orange,
                                         ..Default::default()
                                     });
 
-                                    egui::ComboBox::from_id_salt("sub_project_selector")
+                                    egui::ComboBox::from_id_salt("bucket_selector")
                                         .width(0.0)
-                                        .selected_text(sub_job)
+                                        .selected_text(bucket_job)
                                         .show_ui(ui, |ui| {
-                                            for member in members {
-                                                let is_selected = member == active_sub;
-                                                if ui.selectable_label(is_selected, format!("📁 {}", member)).clicked() {
+                                            for bucket in buckets {
+                                                let is_selected = bucket == active_bucket;
+                                                if ui.selectable_label(is_selected, format!("📁 {}", bucket)).clicked() {
                                                     // Save selection state
-                                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("sub_project"), member.clone()));
+                                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("active_bucket"), bucket.clone()));
 
                                                     // Update actual project root so IDE/chat targets the new path!
-                                                    if member == "." {
+                                                    if bucket == "." {
                                                         state.project_root = Some(mount.host_path.clone());
                                                     } else {
-                                                        state.project_root = Some(mount.host_path.join(&member));
+                                                        state.project_root = Some(mount.host_path.join(&bucket));
                                                     }
                                                 }
                                             }
@@ -286,16 +289,10 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                 }
                             }
 
-                            // --- PART 2: 🗄 The Mount Point (Workspace) ---
+                            // --- PART 2: 📁 The Mount Point ---
                             let mut mount_job = egui::text::LayoutJob::default();
                             if let Some(mount) = active_mount {
-                                let icon = match mount.kind.to_lowercase().as_str() {
-                                    "workspace" => "🗄",
-                                    "docs" => "📚",
-                                    "static" => "🌐",
-                                    _ => "📁",
-                                };
-                                mount_job.append(&format!("{} {}", icon, mount.virtual_path), 0.0, egui::text::TextFormat {
+                                mount_job.append(&format!("📁 {}", mount.virtual_path), 0.0, egui::text::TextFormat {
                                     color: orange,
                                     ..Default::default()
                                 });
@@ -313,16 +310,9 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                     for mount in &realm.mounts {
                                         let is_selected = active_mount.map_or(false, |m| m.virtual_path == mount.virtual_path);
 
-                                        let icon = match mount.kind.to_lowercase().as_str() {
-                                            "workspace" => "🗄",
-                                            "docs" => "📚",
-                                            "static" => "🌐",
-                                            _ => "📁",
-                                        };
-
                                         // Rich text row with descriptions for the dropdown
                                         let mut item_job = egui::text::LayoutJob::default();
-                                        item_job.append(&format!("{} {}  ", icon, mount.virtual_path), 0.0, egui::text::TextFormat {
+                                        item_job.append(&format!("📁 {}  ", mount.virtual_path), 0.0, egui::text::TextFormat {
                                             color: ui.visuals().text_color(),
                                             ..Default::default()
                                         });
@@ -339,8 +329,8 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                             state.active_workspace_name = Some(mount.virtual_path.clone());
                                             state.project_root = Some(mount.host_path.clone());
 
-                                            // Reset the sub-project cache state when mount changes
-                                            ctx.data_mut(|d| d.insert_temp(egui::Id::new("sub_project"), String::from(".")));
+                                            // Reset the bucket cache state when mount changes
+                                            ctx.data_mut(|d| d.insert_temp(egui::Id::new("active_bucket"), String::from(".")));
                                         }
                                     }
                                 });

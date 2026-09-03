@@ -49,6 +49,58 @@ pub fn init_project_sandbox(proj_dir: &PathBuf, copy_presets: bool) -> Result<()
     Ok(())
 }
 
+/// Creates (if needed) a Study directory under `studies_dir` and a sandbox
+/// database file inside it, optionally copying presets from the home
+/// sandbox. Mirrors `init_project_sandbox` above, except:
+/// - the sandbox lives under the managed Studies root, not a `.inforno`
+///   directory next to project files;
+/// - a Study directory can hold more than one sandbox file side by side, so
+///   the caller names which one via `file` (pass `"info.rno"`, or
+///   `realm::DEFAULT_SANDBOX_FILE`, for the conventional default).
+/// Returns the full path to the created/opened sandbox file, since (unlike
+/// `init_project_sandbox`) the caller doesn't already know the fixed
+/// `.inforno/info.rno` suffix to reconstruct it themselves.
+pub fn init_study_sandbox(
+    studies_dir: &PathBuf,
+    study: &str,
+    file: &str,
+    copy_presets: bool,
+) -> Result<PathBuf, MyError> {
+    let file = if file.trim().is_empty() { "info.rno" } else { file };
+
+    if !crate::realm::is_safe_path_component(study) || !crate::realm::is_safe_path_component(file) {
+        return Err(MyError::StudyDir);
+    }
+
+    let study_dir = studies_dir.join(study);
+
+    // Create the directory if it doesn't exist
+    if let Err(_) = fs::create_dir_all(&study_dir) {
+        return Err(MyError::StudyDir);
+    }
+
+    let db_path = study_dir.join(file);
+
+    // Open/create the new sandbox database
+    let new_conn = connect_sandbox_db(&db_path)?;
+
+    // If the user wants presets, fetch them from the home DB
+    if copy_presets {
+        if let Some(home_path) = get_home_sandbox_path() {
+            if let Ok(home_conn) = connect_sandbox_db(&home_path) {
+                if let Ok(presets) = load_presets_vec(&home_conn) {
+                    for mut preset in presets {
+                        preset.id = 0; // Set to 0 so `save_preset` treats it as a brand new insert!
+                        let _ = save_preset(&new_conn, &mut preset);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(db_path)
+}
+
 pub fn get_sandbox_db_conn(sandbox: &Option<PathBuf>) ->
             Result<(Connection, PathBuf), MyError> {
     if let Some(sandbox) = sandbox {

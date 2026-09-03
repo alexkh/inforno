@@ -87,6 +87,8 @@ pub struct ApiKey {
 pub enum MyError {
     #[error("Project Directory Error: could not get project directory")]
     ProjectDir, // project dir path error
+    #[error("Study Directory Error: could not create or access the Study directory")]
+    StudyDir,
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
     #[error("Sandbox Version Mismatch: expected {0}, found: {1}")]

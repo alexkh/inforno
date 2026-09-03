@@ -95,6 +95,10 @@ pub struct MyAppPermanent {
     pub sandbox: Option<PathBuf>,
     pub pending_project_init: Mutex<Option<PathBuf>>,
     pub active_realm_name: Mutex<Option<String>>,
+    /// Set at boot when `--realm <name>` was given but the Realm has no
+    /// resolvable default sandbox yet. Consumed once by `State::new`, which
+    /// turns it into a modal prompt rather than creating a sandbox unasked.
+    pub realm_awaiting_sandbox: Mutex<Option<String>>,
     pub app_language: Mutex<String>,
 }
 
@@ -161,6 +165,10 @@ pub struct State {
     pub show_project_init_modal: bool,
     pub project_dir_to_init: Option<PathBuf>,
     pub copy_presets_checked: bool,
+    pub show_realm_sandbox_init_modal: bool,
+    pub realm_awaiting_sandbox: Option<String>,
+    pub study_name_buffer: String,
+    pub sandbox_file_buffer: String,
     pub project_root: Option<PathBuf>,
     pub active_realm: Option<inforno_core::realm::ActiveRealm>,
     pub active_workspace_name: Option<String>,
@@ -211,9 +219,24 @@ impl State {
 
         let realm_name_lock = permanent.active_realm_name.lock().unwrap().clone();
 
+        if let Some(realms_dir) = directories::ProjectDirs::from("", "", "inforno").map(|d| d.config_dir().join("realms")) {
+            if !inforno_core::realm::sandbox_path_is_valid(&sandbox, &realms_dir) {
+                eprintln!(
+                    "Warning: Sandbox at {:?} lives inside the Realms directory ({:?}). \
+                     Sandboxes must stay outside .config/inforno/realms.",
+                    sandbox, realms_dir
+                );
+            }
+        }
+
         if let Some(realm_name) = realm_name_lock {
-            // We are in a Realm! Load config and access rights.
-            if let Some(realm_dir) = sandbox.parent() {
+            // We are in a Realm! Realms always live under the fixed realms
+            // directory now — never derived from the Sandbox's location,
+            // since a Sandbox can live anywhere.
+            let realm_dir = directories::ProjectDirs::from("", "", "inforno")
+                .map(|d| d.config_dir().join("realms").join(&realm_name));
+
+            if let Some(realm_dir) = realm_dir {
                 let yaml_path = realm_dir.join("realm.yml");
                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
                     if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
@@ -249,6 +272,13 @@ impl State {
                 }
             }
         }
+
+        // Did main.rs ask for a Realm whose default sandbox doesn't resolve
+        // to anything yet? If so, we're sitting in the home sandbox for now
+        // and need to prompt rather than silently create one.
+        let realm_awaiting_sandbox = permanent.realm_awaiting_sandbox.lock().unwrap().take();
+        let show_realm_sandbox_init = realm_awaiting_sandbox.is_some();
+        let study_name_default = realm_awaiting_sandbox.clone().unwrap_or_default();
 
         // 2. Load Initial Data (using the valid 'conn')
         load_presets(&conn, &mut presets);
@@ -456,6 +486,10 @@ impl State {
             show_project_init_modal: show_project_init,
             project_dir_to_init: pending_init,
             copy_presets_checked: true,
+            show_realm_sandbox_init_modal: show_realm_sandbox_init,
+            realm_awaiting_sandbox,
+            study_name_buffer: study_name_default,
+            sandbox_file_buffer: inforno_core::realm::DEFAULT_SANDBOX_FILE.to_string(),
             project_root,
             active_realm,
             active_workspace_name,
@@ -992,6 +1026,79 @@ impl eframe::App for MyApp {
             // If the user closes the window via the 'X'
             if !open {
                 state.show_project_init_modal = false;
+            }
+        }
+
+        // Realm Sandbox Initialization Modal — Study-backed by default.
+        // Only ever shown, never triggered automatically: a Realm with no
+        // resolvable `sandboxes:` entry is *asked* about, not repaired for you.
+        if state.show_realm_sandbox_init_modal {
+            let mut open = true;
+
+            egui::Window::new("Create Sandbox for Realm")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ui, |ui| {
+                    let realm_label = state.realm_awaiting_sandbox.clone().unwrap_or_default();
+                    ui.label(format!("Realm '{}' has no default sandbox to open yet.", realm_label));
+                    ui.label("Create one inside a Study (~/.local/share/inforno/studies/<study>/):");
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Study:");
+                        ui.text_edit_singleline(&mut state.study_name_buffer);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Sandbox file:");
+                        ui.text_edit_singleline(&mut state.sandbox_file_buffer);
+                    });
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut state.copy_presets_checked, "Copy Presets from Home Sandbox");
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Create Sandbox").clicked() {
+                            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                                let studies_dir = proj_dirs.data_dir().join("studies");
+                                match inforno_core::db::init_study_sandbox(
+                                    &studies_dir,
+                                    &state.study_name_buffer,
+                                    &state.sandbox_file_buffer,
+                                    state.copy_presets_checked,
+                                ) {
+                                    Ok(db_path) => {
+                                        // We're in the GUI and the user just built this
+                                        // sandbox specifically to open the Realm they
+                                        // asked for — re-enter it on reload instead of
+                                        // landing back in a bare, realm-less sandbox.
+                                        // `perma` is the same Arc `reload` hands to the
+                                        // fresh `State::new`, so this write is visible
+                                        // to it.
+                                        if let Some(realm_name) = state.realm_awaiting_sandbox.clone() {
+                                            *state.perma.active_realm_name.lock().unwrap() = Some(realm_name);
+                                        }
+                                        state.reload(Some(db_path));
+                                    }
+                                    Err(e) => {
+                                        state.error_msg = Some(format!("Failed to create sandbox: {}", e));
+                                        state.is_modal_open = true;
+                                    }
+                                }
+                            }
+                            state.show_realm_sandbox_init_modal = false;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            // Stay in the home sandbox; don't enter the Realm.
+                            state.show_realm_sandbox_init_modal = false;
+                        }
+                    });
+                });
+
+            if !open {
+                state.show_realm_sandbox_init_modal = false;
             }
         }
     }

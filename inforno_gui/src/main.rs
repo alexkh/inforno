@@ -152,32 +152,51 @@ async fn main() -> eframe::Result {
                 }
             }
 
+            let mut realm_awaiting_sandbox: Option<String> = None;
+
             if let Some(realm_name) = target_realm {
-                // 1. Booting into a Realm Environment
+                // Booting into a Realm Environment. Realms and Sandboxes are fully
+                // decoupled: the Sandbox is whatever this Realm's config resolves
+                // it to (a Study-backed file, or an explicit path), never
+                // something implied by realm_dir.
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                     let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
+                    let yaml_path = realm_dir.join("realm.yml");
 
-                    if realm_dir.exists() {
-                        sandbox = Some(realm_dir.join("info.rno"));
-                        active_realm_name = Some(realm_name);
-                    } else {
-                        eprintln!("Warning: Realm '{}' not found at {:?}", realm_name, realm_dir);
-                    }
-                }
-            } else if let Some(proj_str) = positional_path {
-                // 2. Standard single-project mode (Fallback)
-                let proj_path = PathBuf::from(proj_str);
-                if proj_path.is_dir() {
-                    let db_path = proj_path.join(".inforno").join("info.rno");
-                    if db_path.exists() {
-                        // Project sandbox exists, load it directly
-                        sandbox = Some(db_path);
-                    } else {
-                        // Directory exists, but no sandbox yet. Flag for UI modal.
-                        pending_project_init = Some(proj_path);
+                    match std::fs::read_to_string(&yaml_path) {
+                        Ok(config_str) => match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
+                            Ok(realm_config) => {
+                                let studies_dir = proj_dirs.data_dir().join("studies");
+                                match inforno_core::realm::resolve_default_sandbox_path(&realm_config, &studies_dir) {
+                                    Ok(resolved) => {
+                                        sandbox = Some(resolved);
+                                        active_realm_name = Some(realm_name);
+                                    }
+                                    Err(reason) => {
+                                        // No default sandbox to open. We do NOT create
+                                        // one automatically — fall back to the home
+                                        // sandbox and let the GUI ask the user.
+                                        eprintln!(
+                                            "Realm '{}' has no default sandbox yet ({}); will prompt to create one.",
+                                            realm_name, reason
+                                        );
+                                        realm_awaiting_sandbox = Some(realm_name);
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("Warning: Realm '{}' has an invalid realm.yml: {}", realm_name, e),
+                        },
+                        Err(_) => eprintln!("Warning: Realm '{}' not found at {:?}", realm_name, realm_dir),
                     }
                 }
             }
+            // NOTE: `inforno <directory>` no longer auto-opens or offers to
+            // create a bare `.inforno/info.rno` Project sandbox. A
+            // directory-rooted sandbox is still supported, but only by
+            // pointing a Realm's `sandboxes:` entry at it, or by opening it
+            // explicitly via the in-app "Open Sandbox" dialog. `_positional_path`
+            // is intentionally unused for this purpose now.
+            let _ = positional_path;
 
             configure_fonts(&cc.egui_ctx);
 
@@ -186,6 +205,7 @@ async fn main() -> eframe::Result {
                 sandbox,
                 pending_project_init: std::sync::Mutex::new(pending_project_init),
                 active_realm_name: std::sync::Mutex::new(active_realm_name),
+                realm_awaiting_sandbox: std::sync::Mutex::new(realm_awaiting_sandbox),
                 app_language: std::sync::Mutex::new(app_language),
             })))
         }),

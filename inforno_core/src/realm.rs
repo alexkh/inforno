@@ -156,16 +156,20 @@ pub struct RoleConfig {
     pub description: String,
 }
 
-/// An Actor presents one or more role names when acting within a Realm.
-/// Each held role's powers are evaluated strictly against that role's own
-/// Tier — there is no blending of tiers across roles held simultaneously.
-/// An Actor's net access is the union of what each individually held role
-/// independently permits. An Actor holding no roles is equivalent to
-/// holding a single implicit `Tier::NONE` role: no filesystem access at
-/// all, and no Realm lookup is required to determine that.
-#[derive(Debug, Clone, Default)]
-pub struct Actor {
-    pub roles: Vec<String>,
+/// Declares that a mount contains more than one selectable root — e.g. a
+/// Cargo workspace with several member crates, or a handful of sibling
+/// checkouts a Sandbox might focus on one at a time. Each resolved root is
+/// called a "Bucket". A mount with no `BucketConfig` has exactly one
+/// implicit bucket: its own root, and the GUI shows no sub-selector.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct BucketConfig {
+    /// Explicit bucket roots, relative to the mount's host path.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Auto-discover buckets from this mount's `Cargo.toml` `[workspace]
+    /// members` (including `dir/*` glob members), same as before.
+    #[serde(default)]
+    pub cargo_workspace: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -180,11 +184,47 @@ pub struct RealmMountConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
     pub description: Option<String>,
-    // E.g., "project", "workspace", "docs", "static"
-    pub kind: Option<String>,
+    /// If set, this mount exposes more than one selectable root (see `BucketConfig`).
+    #[serde(default)]
+    pub buckets: Option<BucketConfig>,
     /// Rules constraining what new files may be created under this mount.
     #[serde(default)]
     pub create_rules: Vec<CreateRule>,
+}
+
+/// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
+/// should be set:
+/// - `study` names a directory under the managed studies root
+///   (`~/.local/share/inforno/studies/<study>/`). A Study can hold more than
+///   one sandbox file side by side (e.g. `info.rno` and `another.rno`),
+///   plus whatever sidecar files a sandbox later accumulates (layout,
+///   cache) — all sharing that one directory instead of inventing
+///   parallel-named sidecar files per sandbox. `file` picks which sandbox
+///   inside the Study; defaults to `info.rno` if omitted.
+/// - `path` is an explicit host path to a sandbox file anywhere on the
+///   filesystem — the escape hatch for sandboxes that predate Studies, or
+///   are deliberately kept outside the managed studies root.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct SandboxRef {
+    #[serde(default)]
+    pub study: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+pub const DEFAULT_SANDBOX_FILE: &str = "info.rno";
+
+/// A single filesystem-path component: no separators, no `.`/`..`. Used to
+/// keep `study`/`file` from ever being joined into a traversal outside
+/// `studies_dir` (`study: "../../etc"` or `file: "../secrets"`). `pub(crate)`
+/// so `db::init_study_sandbox` can apply the exact same rule when it creates
+/// the directory/file this module later resolves.
+pub(crate) fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\\')
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -196,6 +236,14 @@ pub struct RealmConfig {
     pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
+    /// Sandboxes permitted to open this Realm, name -> ref. The first entry
+    /// (or `default_sandbox` if set) is what a bare `--realm <name>` launch opens.
+    #[serde(default)]
+    pub sandboxes: IndexMap<String, SandboxRef>,
+    /// Key into `sandboxes` opened by default. Falls back to the first entry
+    /// in `sandboxes` (in declaration order) if unset.
+    #[serde(default)]
+    pub default_sandbox: Option<String>,
     /// Rules constraining what new files may be created anywhere in the Realm.
     #[serde(default)]
     pub create_rules: Vec<CreateRule>,
@@ -212,6 +260,59 @@ pub struct RealmConfig {
     /// at load time. Purely a config-authoring convenience.
     #[serde(default)]
     pub expressions: IndexMap<String, GlobExpr>,
+}
+
+/// Resolves the on-disk path for `key` in `config.sandboxes`. `studies_dir`
+/// is the managed studies root (e.g. `~/.local/share/inforno/studies`),
+/// supplied by the caller since this crate doesn't own XDG path resolution.
+pub fn resolve_sandbox_path(
+    key: &str,
+    config: &RealmConfig,
+    studies_dir: &Path,
+) -> Result<PathBuf, String> {
+    let sref = config.sandboxes.get(key)
+        .ok_or_else(|| format!("No sandbox named '{}' declared in this Realm", key))?;
+
+    match (&sref.study, &sref.path) {
+        (Some(_), Some(_)) => Err(format!(
+            "Sandbox '{}' sets both `study` and `path` — only one is allowed", key
+        )),
+        (Some(study), None) => {
+            let file = sref.file.clone().unwrap_or_else(|| DEFAULT_SANDBOX_FILE.to_string());
+            if !is_safe_path_component(study) || !is_safe_path_component(&file) {
+                return Err(format!(
+                    "Sandbox '{}': `study` and `file` must be plain names, not paths ('{}', '{}')",
+                    key, study, file
+                ));
+            }
+            Ok(studies_dir.join(study).join(file))
+        }
+        (None, Some(path)) => Ok(path.clone()),
+        (None, None) => Err(format!("Sandbox '{}' sets neither `study` nor `path`", key)),
+    }
+}
+
+/// Resolves `config.default_sandbox`, falling back to the first declared
+/// entry. Returns `Err` if `sandboxes` is empty or resolution fails — the
+/// caller treats that as "this Realm has no sandbox yet" and should prompt
+/// the user to create one rather than silently materializing one.
+pub fn resolve_default_sandbox_path(
+    config: &RealmConfig,
+    studies_dir: &Path,
+) -> Result<PathBuf, String> {
+    let key = config.default_sandbox.clone()
+        .or_else(|| config.sandboxes.keys().next().cloned())
+        .ok_or_else(|| "This Realm declares no `sandboxes:` at all".to_string())?;
+    resolve_sandbox_path(&key, config, studies_dir)
+}
+
+/// Guards the Realm/Sandbox split: a sandbox must never live inside the
+/// realms directory. `realms_dir` is `~/.config/inforno/realms`.
+pub fn sandbox_path_is_valid(path: &Path, realms_dir: &Path) -> bool {
+    let canon_realms = std::fs::canonicalize(realms_dir).unwrap_or_else(|_| realms_dir.to_path_buf());
+    let parent = path.parent().unwrap_or(path);
+    let canon_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    !canon_parent.starts_with(&canon_realms)
 }
 
 /// A compiled `CreateRule`, ready to be matched against relative paths.
@@ -324,7 +425,7 @@ pub struct CompiledMount {
     pub hide_expr: Option<Arc<CompiledExpr>>,
     pub ro_expr: Option<Arc<CompiledExpr>>,
     pub description: Option<String>,
-    pub kind: String, // Defaults to "project", but can also be "workspace"
+    pub buckets: Option<BucketConfig>,
     pub create_rules: Vec<CompiledCreateRule>,
 }
 
@@ -420,7 +521,6 @@ impl ActiveRealm {
             }
 
             let ignore_set = builder.build().map_err(|e| e.to_string())?;
-            let kind = mount_cfg.kind.unwrap_or_else(|| "project".to_string());
 
             let create_rules = mount_cfg
                 .create_rules
@@ -436,7 +536,7 @@ impl ActiveRealm {
                 hide_expr,
                 ro_expr,
                 description: mount_cfg.description,
-                kind,
+                buckets: mount_cfg.buckets,
                 create_rules,
             });
         }
@@ -553,13 +653,11 @@ impl ActiveRealm {
     /// for this path. Deliberately role-only: unhiding a Realm's own
     /// config directory must be a per-role decision, never an incidental
     /// side effect of a broad tier-level power.
-    fn dotfile_override_applies(&self, rel_path: &Path, actor: &Actor) -> bool {
-        actor.roles.iter().any(|role_name| {
-            let Some(role) = self.roles.get(role_name) else { return false };
-            role.powers.iter().any(|p| {
-                p.overrides.as_deref() == Some("dotfiles")
-                    && p.matches_path(rel_path)
-            })
+    fn dotfile_override_applies(&self, rel_path: &Path, role_name: &str) -> bool {
+        let Some(role) = self.roles.get(role_name) else { return false };
+        role.powers.iter().any(|p| {
+            p.overrides.as_deref() == Some("dotfiles")
+                && p.matches_path(rel_path)
         })
     }
 
@@ -567,7 +665,7 @@ impl ActiveRealm {
     /// by both visibility checks (lookup/readdir) and creation checks, so
     /// there is no blind-create gap where a hidden path can still be created
     /// just because it can't be seen first.
-    pub fn is_path_hidden(&self, virtual_path: &Path, actor: &Actor) -> bool {
+    pub fn is_path_hidden(&self, virtual_path: &Path, role_name: &str) -> bool {
         let path_str = match virtual_path.to_str() {
             Some(s) => s,
             None => return true, // Safe fallback
@@ -582,7 +680,7 @@ impl ActiveRealm {
                 let rel_path = Path::new(relative);
 
                 if Self::is_builtin_dotfile_path(rel_path) {
-                    return !self.dotfile_override_applies(rel_path, actor);
+                    return !self.dotfile_override_applies(rel_path, role_name);
                 }
 
                 if let Some(ref expr) = self.global_hide_expr {
@@ -598,7 +696,16 @@ impl ActiveRealm {
         false // Outside all mounts: not this function's concern; secure_resolve_path returns None anyway.
     }
 
-    pub fn secure_resolve_path(&self, virtual_path: &Path, actor: &Actor) -> Option<PathBuf> {
+    /// Whether `role_name` is actually defined in this Realm's `roles:` map.
+    /// Callers that assume a fixed role (e.g. the GUI's own "gui" role) use
+    /// this to treat an undefined role as zero access, rather than letting
+    /// `secure_resolve_path`'s visibility-only check silently let paths
+    /// through for a role the Realm has never heard of.
+    pub fn has_role(&self, role_name: &str) -> bool {
+        self.roles.contains_key(role_name)
+    }
+
+    pub fn secure_resolve_path(&self, virtual_path: &Path, role_name: &str) -> Option<PathBuf> {
         let path_str = virtual_path.to_str()?;
         for mount in &self.mounts {
             if path_str.starts_with(&mount.virtual_path) {
@@ -611,7 +718,7 @@ impl ActiveRealm {
                 // Legacy ignore set matching
                 if mount.ignore_set.is_match(&host_target) { return None; }
 
-                if self.is_path_hidden(virtual_path, actor) { return None; }
+                if self.is_path_hidden(virtual_path, role_name) { return None; }
 
                 return Some(host_target);
             }
@@ -660,12 +767,12 @@ impl ActiveRealm {
     /// it's intended for logging and for `describe_create_rules` below.
     /// Use `can_access` for the full actor-aware check (hard restrictions AND
     /// whether the actor's roles actually grant Create here).
-    pub fn check_create_allowed(&self, virtual_path: &Path, actor: &Actor) -> Result<(), String> {
+    pub fn check_create_allowed(&self, virtual_path: &Path, role_name: &str) -> Result<(), String> {
         let path_str = virtual_path
             .to_str()
             .ok_or_else(|| "Path is not valid UTF-8".to_string())?;
 
-        if self.is_path_hidden(virtual_path, actor) {
+        if self.is_path_hidden(virtual_path, role_name) {
             return Err("Path is hidden (e.g. a dotfile/dot-directory) and cannot be created".to_string());
         }
 
@@ -699,11 +806,11 @@ impl ActiveRealm {
     /// this path (via tier cascade or the role's own powers). An actor
     /// holding no roles (or none the Realm recognizes) is denied
     /// everything, without needing any power lookup.
-    pub fn can_access(&self, virtual_path: &Path, cap: Cap, actor: &Actor) -> Result<(), String> {
+    pub fn can_access(&self, virtual_path: &Path, cap: Cap, role_name: &str) -> Result<(), String> {
         match cap {
-            Cap::Create => self.check_create_allowed(virtual_path, actor)?,
+            Cap::Create => self.check_create_allowed(virtual_path, role_name)?,
             Cap::Write | Cap::Append => {
-                if self.is_path_hidden(virtual_path, actor) {
+                if self.is_path_hidden(virtual_path, role_name) {
                     return Err("Path is hidden and cannot be written".to_string());
                 }
                 if self.is_path_read_only(virtual_path) {
@@ -711,15 +818,15 @@ impl ActiveRealm {
                 }
             }
             Cap::Read => {
-                if self.is_path_hidden(virtual_path, actor) {
+                if self.is_path_hidden(virtual_path, role_name) {
                     return Err("Path is hidden".to_string());
                 }
             }
         }
 
-        if actor.roles.is_empty() {
-            return Err("Actor holds no roles; no filesystem access is possible".to_string());
-        }
+        let Some(role) = self.roles.get(role_name) else {
+            return Err(format!("Role '{}' is not defined in this Realm; no filesystem access is possible", role_name));
+        };
 
         let path_str = virtual_path
             .to_str()
@@ -739,17 +846,14 @@ impl ActiveRealm {
             .ok_or_else(|| "Path is outside all configured mounts".to_string())?;
         let rel_path = Path::new(&rel_path_owned);
 
-        let granted = actor.roles.iter().any(|role_name| {
-            let Some(role) = self.roles.get(role_name) else { return false };
-            self.effective_powers(role)
-                .iter()
-                .any(|p| p.grants(cap) && p.matches_path(rel_path))
-        });
+        let granted = self.effective_powers(role)
+            .iter()
+            .any(|p| p.grants(cap) && p.matches_path(rel_path));
 
         if granted {
             Ok(())
         } else {
-            Err(format!("No role held by this actor grants {:?} access to '{}'", cap, virtual_path.display()))
+            Err(format!("Role '{}' does not grant {:?} access to '{}'", role_name, cap, virtual_path.display()))
         }
     }
 
@@ -899,18 +1003,22 @@ pub fn get_relative_path(
 
 pub fn resolve_filepath(
     realm: &Option<ActiveRealm>,
-    actor: &Actor,
+    role_name: &str,
     project_root: &Option<std::path::PathBuf>,
     requested_path: &str
 ) -> Option<(std::path::PathBuf, bool)> {
     let mut target_root = None;
     let mut relative_path_str = requested_path.trim();
 
-    // 1. Attempt VFS Translation if we are in a Realm
-    if let Some(active_realm) = realm {
+    // 1. Attempt VFS Translation if we are in a Realm AND `role_name` is
+    // actually defined there. An undefined role (e.g. no `gui:` entry in
+    // realm.yml) means zero Realm access, full stop — we deliberately don't
+    // fall through and let `secure_resolve_path` decide, since that only
+    // checks visibility, not whether this role is even recognized.
+    if let Some(active_realm) = realm.as_ref().filter(|r| r.has_role(role_name)) {
         let req_path = std::path::Path::new(relative_path_str);
 
-        if let Some(secure_host_path) = active_realm.secure_resolve_path(req_path, actor) {
+        if let Some(secure_host_path) = active_realm.secure_resolve_path(req_path, role_name) {
             // Perfect match found and permitted by the ignore list
             if secure_host_path.exists() && secure_host_path.is_file() {
                 return Some((secure_host_path, false));
