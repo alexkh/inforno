@@ -1,0 +1,82 @@
+mounts:
+  /workspace:
+    host: /home/dev/projects/my_rust_app
+    read_only: false
+    create_rules:
+      - scope: ["src/**"]
+        allow_if: { ref: "rust_source" }
+        description: "Only .rs files may be created under src/."
+
+spans:
+  rust_source:
+    match: ["src/**/*.rs"]
+  markdown_docs:
+    match: ["doc/**/*.md"]
+  # Mixing ref and match under `any`: manifest + everything rust_source covers.
+  readable_baseline:
+    any:
+      - ref: "rust_source"
+      - match: ["Cargo.toml"]
+
+tiers:
+  2:
+    powers:
+      # One merged power instead of two separate [read] entries.
+      - span: { ref: "readable_baseline" }
+        caps: [read]
+
+  3:
+    powers:
+      - span: { ref: "rust_source" }
+        caps: [write]
+
+  # 4-6 are not defined — they carry same caps as tier 3.
+
+  7:
+    powers:
+      - span: { match: ["target/release/**"] }
+        caps: [read]
+
+roles:
+  viewer:
+    tier: 2
+    cv: "Read-only access to source and manifest."
+    boss: developer
+
+  developer:
+    tier: 3          # cascades: tier 2's read power + tier 3's write power
+    cv: "May modify Rust source files."
+    boss: gui
+
+  ci_inspector:
+    tier: 7          # cascades: tier 2 + tier 7 (gap 4-6 contributes nothing, no error)
+    cv: "May read source, manifest, and release build output."
+    boss: gui
+
+  gui:
+	tier: 7
+    cv: "Default role that Inforno GUI assumes if no other is selected"
+
+  doc_writer:
+    tier: 2           # tier 2 baseline (read source + manifest)...
+    powers:            # ...plus role-specific additions on top
+      - span: { ref: "markdown_docs" }
+        caps: [read, write, create]
+      # Dotfile override: this role may see one specific hidden path.
+      # Role-only by design — dotfile overrides never cascade from a tier.
+      - span: { match: [".doc-style-guide"] }
+        caps: [read]
+        overrides: "dotfiles"
+        memo: "This is an internal style guide, kept as a dotfile so other roles can't see it."
+
+  logger:
+    tier: 1            # hardcoded role-only tier — never cascades from `tiers:`
+    powers:
+      - span: { match: ["dev.log"] }
+        caps: [append]
+        memo: "Log lines are appended, never rewritten — this cap physically cannot truncate or seek within the file."
+
+  telemetry_only:
+    tier: 0            # hardcoded — no powers possible; load-time error if any are listed
+    cv: "No filesystem access whatsoever, guaranteed by the engine."
+    boss: ci_inspector

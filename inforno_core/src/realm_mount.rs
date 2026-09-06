@@ -81,8 +81,7 @@ mod tests {
             wildcards: vec![],
             ignore: vec![],
             description: None,
-            buckets: None,
-            create_rules: vec![],
+            places: IndexMap::new(),
         });
 
         let mut roles = IndexMap::new();
@@ -122,8 +121,6 @@ mod tests {
             wildcards: IndexMap::new(),
             mounts,
             sandboxes: IndexMap::new(),
-            default_sandbox: None,
-            create_rules: vec![],
             roles,
             tiers,
         };

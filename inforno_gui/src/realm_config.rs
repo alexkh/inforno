@@ -41,7 +41,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
                 // --- RIGHT COLUMN: YAML & VFS Tree ---
                 columns[1].vertical(|ui| {
-                    ui.heading("realm.yml");
+                    ui.heading("realm2.yml");
                     ui.separator();
 
                     let substate = &mut state.realm_config_state;

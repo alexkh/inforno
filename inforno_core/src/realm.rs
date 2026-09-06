@@ -184,12 +184,10 @@ pub struct RealmMountConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
     pub description: Option<String>,
-    /// If set, this mount exposes more than one selectable root (see `BucketConfig`).
+    /// Places (bookmarks) for quick switching directories in the GUI.
+    /// The first one listed is the default.
     #[serde(default)]
-    pub buckets: Option<BucketConfig>,
-    /// Rules constraining what new files may be created under this mount.
-    #[serde(default)]
-    pub create_rules: Vec<CreateRule>,
+    pub places: IndexMap<String, String>,
 }
 
 /// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
@@ -244,9 +242,6 @@ pub struct RealmConfig {
     /// `path` to a self-contained `.rno` file.
     #[serde(default)]
     pub sandboxes: IndexMap<String, SandboxRef>,
-    /// Rules constraining what new files may be created anywhere in the Realm.
-    #[serde(default)]
-    pub create_rules: Vec<CreateRule>,
     /// Role name -> Tier/description/role-specific powers.
     #[serde(default)]
     pub roles: IndexMap<String, RoleConfig>,
@@ -289,14 +284,16 @@ pub fn resolve_sandbox_path(
     Ok(sref.path.clone())
 }
 
-/// Resolves `config.default_sandbox`, falling back to the first declared
-/// entry. Returns `Err` if `sandboxes` is empty or resolution fails — the
+/// Resolves the default sandbox, which is the first declared entry.
+/// Returns `Err` if `sandboxes` is empty or resolution fails — the
 /// caller treats that as "this Realm has no sandbox yet" and should prompt
 /// the user to create one rather than silently materializing one.
 pub fn resolve_default_sandbox_path(
     config: &RealmConfig,
 ) -> Result<PathBuf, String> {
-    resolve_sandbox_path("default", config)
+    let (key, _) = config.sandboxes.first()
+        .ok_or_else(|| "This Realm declares no sandboxes".to_string())?;
+    resolve_sandbox_path(key, config)
 }
 
 /// Guards the Realm/Sandbox split: a sandbox must never live inside the
@@ -418,8 +415,7 @@ pub struct CompiledMount {
     pub hide_expr: Option<Arc<CompiledExpr>>,
     pub ro_expr: Option<Arc<CompiledExpr>>,
     pub description: Option<String>,
-    pub buckets: Option<BucketConfig>,
-    pub create_rules: Vec<CompiledCreateRule>,
+    pub places: IndexMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -435,7 +431,6 @@ pub struct ActiveRealm {
     pub default_workspace: Option<String>,
     pub global_hide_expr: Option<Arc<CompiledExpr>>,
     pub global_ro_expr: Option<Arc<CompiledExpr>>,
-    pub global_create_rules: Vec<CompiledCreateRule>,
     pub mounts: Vec<CompiledMount>,
     pub raw_config: RealmConfig,
     pub roles: HashMap<String, CompiledRole>,
@@ -444,7 +439,7 @@ pub struct ActiveRealm {
     pub tiers: BTreeMap<u32, Vec<CompiledPower>>,
     /// Plain-English capability descriptions per role name, computed once at
     /// construction time. Correctness depends on `ActiveRealm` always being
-    /// rebuilt fresh via `from_config` when realm.yml changes, rather than
+    /// rebuilt fresh via `from_config` when realm2.yml changes, rather than
     /// mutated in place — if that assumption ever changes, this cache needs
     /// explicit invalidation.
     pub role_capabilities: HashMap<String, Arc<Vec<String>>>,
@@ -475,12 +470,6 @@ impl ActiveRealm {
         } else {
             None
         };
-
-        let global_create_rules = raw_config
-            .create_rules
-            .iter()
-            .map(|r| CompiledCreateRule::compile(r, &raw_config.expressions))
-            .collect::<Result<Vec<_>, _>>()?;
 
         for (v_path, mount_cfg) in config.mounts {
             let mut builder = GlobSetBuilder::new();
@@ -515,12 +504,6 @@ impl ActiveRealm {
 
             let ignore_set = builder.build().map_err(|e| e.to_string())?;
 
-            let create_rules = mount_cfg
-                .create_rules
-                .iter()
-                .map(|r| CompiledCreateRule::compile(r, &raw_config.expressions))
-                .collect::<Result<Vec<_>, _>>()?;
-
             mounts.push(CompiledMount {
                 virtual_path: v_path,
                 host_path: mount_cfg.host,
@@ -529,8 +512,7 @@ impl ActiveRealm {
                 hide_expr,
                 ro_expr,
                 description: mount_cfg.description,
-                buckets: mount_cfg.buckets,
-                create_rules,
+                places: mount_cfg.places,
             });
         }
 
@@ -586,8 +568,13 @@ impl ActiveRealm {
         }
 
         // --- Sandboxes: validate required absolute .rno paths and allowed role names. ---
-        if !raw_config.sandboxes.is_empty() && !raw_config.sandboxes.contains_key("default") {
-            return Err("A Realm with `sandboxes:` must declare a sandbox named `default`; that sandbox is opened when the Realm itself is opened directly.".to_string());
+        if let Some((sname, sref)) = raw_config.sandboxes.first() {
+            if !sref.path.exists() {
+                return Err(format!("Default sandbox '{}' points to a non-existent path: {}", sname, sref.path.display()));
+            }
+            if sref.roles.is_empty() {
+                return Err(format!("The default sandbox '{}' must authorize at least one Realm role; otherwise the Realm cannot be opened through it.", sname));
+            }
         }
 
         for (sname, sref) in &raw_config.sandboxes {
@@ -613,10 +600,6 @@ impl ActiveRealm {
                     ));
                 }
             }
-
-            if sname == "default" && sref.roles.is_empty() {
-                return Err("The `default` sandbox must authorize at least one Realm role; otherwise the Realm cannot be opened through it.".to_string());
-            }
         }
 
         let mut realm = Self {
@@ -624,7 +607,6 @@ impl ActiveRealm {
             default_workspace: raw_config.default_workspace.clone(),
             global_hide_expr,
             global_ro_expr,
-            global_create_rules,
             mounts,
             raw_config,
             roles,
@@ -786,59 +768,16 @@ impl ActiveRealm {
         true // If it's outside all mounts, treat as read-only to be safe
     }
 
-    /// Checks whether a *new* file may be created at `virtual_path`, ignoring
-    /// role/power permission entirely — this only evaluates the hard,
-    /// Realm-wide restrictions (dotfile hiding, mount read-only, create_rules).
-    /// On denial, returns the description of the first rule that forbids it —
-    /// note this description cannot be relayed through the FUSE errno reply itself;
-    /// it's intended for logging and for `describe_create_rules` below.
-    /// Use `can_access` for the full actor-aware check (hard restrictions AND
-    /// whether the actor's roles actually grant Create here).
-    pub fn check_create_allowed(&self, virtual_path: &Path, role_name: &str) -> Result<(), String> {
-        let path_str = virtual_path
-            .to_str()
-            .ok_or_else(|| "Path is not valid UTF-8".to_string())?;
-
-        if self.is_path_hidden(virtual_path, role_name) {
-            return Err("Path is hidden (e.g. a dotfile/dot-directory) and cannot be created".to_string());
-        }
-
-        for mount in &self.mounts {
-            if path_str.starts_with(&mount.virtual_path) {
-                if mount.read_only {
-                    return Err(format!("Mount '{}' is entirely read-only", mount.virtual_path));
-                }
-
-                let relative = path_str
-                    .strip_prefix(&mount.virtual_path)
-                    .unwrap_or("")
-                    .trim_start_matches('/');
-                let rel_path = Path::new(relative);
-
-                for rule in self.global_create_rules.iter().chain(mount.create_rules.iter()) {
-                    if rule.in_scope(rel_path) && rule.forbids(rel_path) {
-                        return Err(rule.description.to_string());
-                    }
-                }
-                return Ok(());
-            }
-        }
-
-        Err("Path is outside all configured mounts".to_string())
-    }
-
-    /// The full actor-aware access check: hard restrictions (hidden, create
-    /// rules, read-only for Write/Append) MUST pass, AND at least one role
-    /// the actor holds must carry a power granting the requested `cap` for
-    /// this path (via tier cascade or the role's own powers). An actor
-    /// holding no roles (or none the Realm recognizes) is denied
-    /// everything, without needing any power lookup.
+    /// The full actor-aware access check: hard restrictions (hidden, mount
+    /// read-only) MUST pass, AND at least one role the actor holds must carry
+    /// a power granting the requested `cap` for this path (via tier cascade or
+    /// the role's own powers). An actor holding no roles (or none the Realm
+    /// recognizes) is denied everything, without needing any power lookup.
     pub fn can_access(&self, virtual_path: &Path, cap: Cap, role_name: &str) -> Result<(), String> {
         match cap {
-            Cap::Create => self.check_create_allowed(virtual_path, role_name)?,
-            Cap::Write | Cap::Append => {
+            Cap::Create | Cap::Write | Cap::Append => {
                 if self.is_path_hidden(virtual_path, role_name) {
-                    return Err("Path is hidden and cannot be written".to_string());
+                    return Err("Path is hidden and cannot be modified".to_string());
                 }
                 if self.is_path_read_only(virtual_path) {
                     return Err("Path is read-only".to_string());
@@ -882,24 +821,6 @@ impl ActiveRealm {
         } else {
             Err(format!("Role '{}' does not grant {:?} access to '{}'", role_name, cap, virtual_path.display()))
         }
-    }
-
-    /// Lists the description of every create-rule active in this Realm, so they
-    /// can be surfaced up front (e.g. injected into an actor's system prompt or
-    /// shown in a Realm-config UI), independent of any specific denial.
-    pub fn describe_create_rules(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .global_create_rules
-            .iter()
-            .map(|r| r.description.to_string())
-            .collect();
-
-        for mount in &self.mounts {
-            for rule in &mount.create_rules {
-                out.push(format!("[{}] {}", mount.virtual_path, rule.description));
-            }
-        }
-        out
     }
 
     /// Renders a role's actual, resolved capabilities as plain-English,
@@ -1039,7 +960,7 @@ pub fn resolve_filepath(
 
     // 1. Attempt VFS Translation if we are in a Realm AND `role_name` is
     // actually defined there. An undefined role (e.g. no `gui:` entry in
-    // realm.yml) means zero Realm access, full stop — we deliberately don't
+    // realm2.yml) means zero Realm access, full stop — we deliberately don't
     // fall through and let `secure_resolve_path` decide, since that only
     // checks visibility, not whether this role is even recognized.
     if let Some(active_realm) = realm.as_ref().filter(|r| r.has_role(role_name)) {
