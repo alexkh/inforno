@@ -166,8 +166,7 @@ async fn main() -> eframe::Result {
                     match std::fs::read_to_string(&yaml_path) {
                         Ok(config_str) => match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
                             Ok(realm_config) => {
-                                let studies_dir = proj_dirs.data_dir().join("studies");
-                                match inforno_core::realm::resolve_default_sandbox_path(&realm_config, &studies_dir) {
+                                match inforno_core::realm::resolve_default_sandbox_path(&realm_config) {
                                     Ok(resolved) => {
                                         sandbox = Some(resolved);
                                         active_realm_name = Some(realm_name);

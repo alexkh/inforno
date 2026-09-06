@@ -489,7 +489,7 @@ impl State {
             show_realm_sandbox_init_modal: show_realm_sandbox_init,
             realm_awaiting_sandbox,
             study_name_buffer: study_name_default,
-            sandbox_file_buffer: inforno_core::realm::DEFAULT_SANDBOX_FILE.to_string(),
+            sandbox_file_buffer: "info.rno".to_string(),
             project_root,
             active_realm,
             active_workspace_name,

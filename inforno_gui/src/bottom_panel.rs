@@ -681,7 +681,12 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
     }
 
-    let shared_chat = std::sync::Arc::new(chat.clone());
+    let mut chat_for_llm = chat.clone();
+    for msg in chat_for_llm.msg_pool.values_mut() {
+        msg.reasoning = None;
+    }
+
+    let shared_chat = std::sync::Arc::new(chat_for_llm);
 
     for index in 1..chat.agents.len() {
         if chat.agents[index].deleted || chat.agents[index].muted {

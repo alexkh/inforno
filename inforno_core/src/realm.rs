@@ -204,19 +204,21 @@ pub struct RealmMountConfig {
 /// - `path` is an explicit host path to a sandbox file anywhere on the
 ///   filesystem — the escape hatch for sandboxes that predate Studies, or
 ///   are deliberately kept outside the managed studies root.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SandboxRef {
+    /// Absolute host path to the self-contained `.rno` sandbox file.
+    /// Required on purpose: a Realm must name the exact sandbox file it
+    /// authorizes, and must not rely on a resolver reconstructing a path
+    /// from a short name.
+    pub path: PathBuf,
+    /// Realm roles this sandbox is allowed to use.
+    /// Empty means the sandbox is known but not authorized to open
+    /// this Realm under any role.
     #[serde(default)]
-    pub study: Option<String>,
-    #[serde(default)]
-    pub file: Option<String>,
-    #[serde(default)]
-    pub path: Option<PathBuf>,
+    pub roles: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
 }
-
-pub const DEFAULT_SANDBOX_FILE: &str = "info.rno";
 
 /// A single filesystem-path component: no separators, no `.`/`..`. Used to
 /// keep `study`/`file` from ever being joined into a traversal outside
@@ -236,14 +238,12 @@ pub struct RealmConfig {
     pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
-    /// Sandboxes permitted to open this Realm, name -> ref. The first entry
-    /// (or `default_sandbox` if set) is what a bare `--realm <name>` launch opens.
+    /// Sandboxes permitted to open this Realm, keyed by local name. The key
+    /// `"default"` is reserved and names the sandbox opened when the Realm
+    /// itself is opened directly. Each sandbox must provide an absolute
+    /// `path` to a self-contained `.rno` file.
     #[serde(default)]
     pub sandboxes: IndexMap<String, SandboxRef>,
-    /// Key into `sandboxes` opened by default. Falls back to the first entry
-    /// in `sandboxes` (in declaration order) if unset.
-    #[serde(default)]
-    pub default_sandbox: Option<String>,
     /// Rules constraining what new files may be created anywhere in the Realm.
     #[serde(default)]
     pub create_rules: Vec<CreateRule>,
@@ -268,28 +268,25 @@ pub struct RealmConfig {
 pub fn resolve_sandbox_path(
     key: &str,
     config: &RealmConfig,
-    studies_dir: &Path,
 ) -> Result<PathBuf, String> {
     let sref = config.sandboxes.get(key)
         .ok_or_else(|| format!("No sandbox named '{}' declared in this Realm", key))?;
 
-    match (&sref.study, &sref.path) {
-        (Some(_), Some(_)) => Err(format!(
-            "Sandbox '{}' sets both `study` and `path` — only one is allowed", key
-        )),
-        (Some(study), None) => {
-            let file = sref.file.clone().unwrap_or_else(|| DEFAULT_SANDBOX_FILE.to_string());
-            if !is_safe_path_component(study) || !is_safe_path_component(&file) {
-                return Err(format!(
-                    "Sandbox '{}': `study` and `file` must be plain names, not paths ('{}', '{}')",
-                    key, study, file
-                ));
-            }
-            Ok(studies_dir.join(study).join(file))
-        }
-        (None, Some(path)) => Ok(path.clone()),
-        (None, None) => Err(format!("Sandbox '{}' sets neither `study` nor `path`", key)),
+    if !sref.path.is_absolute() {
+        return Err(format!(
+            "Sandbox '{}' path must be an absolute host path, got '{}'",
+            key, sref.path.display()
+        ));
     }
+
+    if sref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
+        return Err(format!(
+            "Sandbox '{}' path must point to a `.rno` file, got '{}'",
+            key, sref.path.display()
+        ));
+    }
+
+    Ok(sref.path.clone())
 }
 
 /// Resolves `config.default_sandbox`, falling back to the first declared
@@ -298,12 +295,8 @@ pub fn resolve_sandbox_path(
 /// the user to create one rather than silently materializing one.
 pub fn resolve_default_sandbox_path(
     config: &RealmConfig,
-    studies_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let key = config.default_sandbox.clone()
-        .or_else(|| config.sandboxes.keys().next().cloned())
-        .ok_or_else(|| "This Realm declares no `sandboxes:` at all".to_string())?;
-    resolve_sandbox_path(&key, config, studies_dir)
+    resolve_sandbox_path("default", config)
 }
 
 /// Guards the Realm/Sandbox split: a sandbox must never live inside the
@@ -590,6 +583,40 @@ impl ActiveRealm {
                     powers: compiled_powers,
                 },
             );
+        }
+
+        // --- Sandboxes: validate required absolute .rno paths and allowed role names. ---
+        if !raw_config.sandboxes.is_empty() && !raw_config.sandboxes.contains_key("default") {
+            return Err("A Realm with `sandboxes:` must declare a sandbox named `default`; that sandbox is opened when the Realm itself is opened directly.".to_string());
+        }
+
+        for (sname, sref) in &raw_config.sandboxes {
+            if !sref.path.is_absolute() {
+                return Err(format!(
+                    "Sandbox '{}' path must be absolute, got '{}'",
+                    sname, sref.path.display()
+                ));
+            }
+
+            if sref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
+                return Err(format!(
+                    "Sandbox '{}' path must point to a `.rno` file, got '{}'",
+                    sname, sref.path.display()
+                ));
+            }
+
+            for role_name in &sref.roles {
+                if !roles.contains_key(role_name) {
+                    return Err(format!(
+                        "Sandbox '{}' lists role '{}', but that role is not defined in this Realm",
+                        sname, role_name
+                    ));
+                }
+            }
+
+            if sname == "default" && sref.roles.is_empty() {
+                return Err("The `default` sandbox must authorize at least one Realm role; otherwise the Realm cannot be opened through it.".to_string());
+            }
         }
 
         let mut realm = Self {
