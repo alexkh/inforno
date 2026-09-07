@@ -25,15 +25,15 @@ impl Tier {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum GlobExpr {
-    Any(Vec<GlobExpr>),
-    All(Vec<GlobExpr>),
-    Not(Box<GlobExpr>),
-    Match(Vec<String>),
-    /// References a named expression in `RealmConfig::expressions`, e.g.
+    Any { any: Vec<GlobExpr> },
+    All { all: Vec<GlobExpr> },
+    Not { not: Box<GlobExpr> },
+    Match { #[serde(rename = "match")] match_globs: Vec<String> },
+    /// References a named expression in `RealmConfig::spans`, e.g.
     /// `{ ref: "rust_source" }`. Resolved and cycle-checked at compile time.
-    Ref(String),
+    Ref { #[serde(rename = "ref")] ref_name: String },
 }
 
 pub enum CompiledExpr {
@@ -52,25 +52,25 @@ impl CompiledExpr {
 
     fn compile_inner(expr: &GlobExpr, defs: &IndexMap<String, GlobExpr>, stack: &mut Vec<String>) -> Result<Self, String> {
         match expr {
-            GlobExpr::Any(exprs) => {
+            GlobExpr::Any { any: exprs } => {
                 let compiled = exprs.iter().map(|e| Self::compile_inner(e, defs, stack)).collect::<Result<Vec<_>, _>>()?;
                 Ok(CompiledExpr::Any(compiled))
             }
-            GlobExpr::All(exprs) => {
+            GlobExpr::All { all: exprs } => {
                 let compiled = exprs.iter().map(|e| Self::compile_inner(e, defs, stack)).collect::<Result<Vec<_>, _>>()?;
                 Ok(CompiledExpr::All(compiled))
             }
-            GlobExpr::Not(inner) => {
+            GlobExpr::Not { not: inner } => {
                 Ok(CompiledExpr::Not(Box::new(Self::compile_inner(inner, defs, stack)?)))
             }
-            GlobExpr::Match(globs) => {
+            GlobExpr::Match { match_globs: globs } => {
                 let mut builder = globset::GlobSetBuilder::new();
                 for g in globs {
                     builder.add(globset::Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
                 }
                 Ok(CompiledExpr::Match(builder.build().map_err(|e| e.to_string())?))
             }
-            GlobExpr::Ref(name) => {
+            GlobExpr::Ref { ref_name: name } => {
                 if stack.contains(name) {
                     let mut cycle = stack.clone();
                     cycle.push(name.clone());
@@ -153,7 +153,9 @@ pub struct RoleConfig {
     pub tier: Tier,
     #[serde(default)]
     pub powers: Vec<Power>,
-    pub description: String,
+    pub cv: String,
+    #[serde(default)]
+    pub boss: Option<String>,
 }
 
 /// Declares that a mount contains more than one selectable root — e.g. a
@@ -184,10 +186,6 @@ pub struct RealmMountConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
     pub description: Option<String>,
-    /// Places (bookmarks) for quick switching directories in the GUI.
-    /// The first one listed is the default.
-    #[serde(default)]
-    pub places: IndexMap<String, String>,
 }
 
 /// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
@@ -215,6 +213,8 @@ pub struct SandboxRef {
     #[serde(default)]
     pub roles: Vec<String>,
     #[serde(default)]
+    pub default_role: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -228,6 +228,12 @@ pub(crate) fn is_safe_path_component(s: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TierConfig {
+    #[serde(default)]
+    pub powers: Vec<Power>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
     pub default_workspace: Option<String>,
     pub hide_if: Option<GlobExpr>,
@@ -236,6 +242,9 @@ pub struct RealmConfig {
     pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
+    /// Global bookmarks resolving to virtual paths (or host paths) across the VFS.
+    #[serde(default)]
+    pub places: IndexMap<String, String>,
     /// Sandboxes permitted to open this Realm, keyed by local name. The key
     /// `"default"` is reserved and names the sandbox opened when the Realm
     /// itself is opened directly. Each sandbox must provide an absolute
@@ -249,11 +258,11 @@ pub struct RealmConfig {
     /// tier. Sparse: a tier number with no entry contributes nothing, no
     /// contiguity required. 0 and 1 are reserved and may not appear here.
     #[serde(default)]
-    pub tiers: BTreeMap<u32, Vec<Power>>,
+    pub tiers: BTreeMap<u32, TierConfig>,
     /// Named, reusable `GlobExpr` definitions, referenced via
     /// `GlobExpr::Ref(name)`. May reference each other; cycles are rejected
     /// at load time. Purely a config-authoring convenience.
-    #[serde(default)]
+    #[serde(default, rename = "spans")]
     pub expressions: IndexMap<String, GlobExpr>,
 }
 
@@ -415,13 +424,13 @@ pub struct CompiledMount {
     pub hide_expr: Option<Arc<CompiledExpr>>,
     pub ro_expr: Option<Arc<CompiledExpr>>,
     pub description: Option<String>,
-    pub places: IndexMap<String, String>,
 }
 
 #[derive(Clone)]
 pub struct CompiledRole {
     pub tier: Tier,
-    pub description: Option<Arc<str>>,
+    pub cv: Arc<str>,
+    pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
 }
 
@@ -512,7 +521,6 @@ impl ActiveRealm {
                 hide_expr,
                 ro_expr,
                 description: mount_cfg.description,
-                places: mount_cfg.places,
             });
         }
 
@@ -529,8 +537,8 @@ impl ActiveRealm {
         }
 
         let mut tiers: BTreeMap<u32, Vec<CompiledPower>> = BTreeMap::new();
-        for (&tier_num, powers) in &raw_config.tiers {
-            let compiled = powers
+        for (&tier_num, tier_cfg) in &raw_config.tiers {
+            let compiled = tier_cfg.powers
                 .iter()
                 .map(|p| CompiledPower::compile(p, &raw_config.expressions))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -561,7 +569,8 @@ impl ActiveRealm {
                 rname.clone(),
                 CompiledRole {
                     tier: rcfg.tier,
-                    description: Some(rcfg.description.as_str().into()),
+                    cv: rcfg.cv.as_str().into(),
+                    boss: rcfg.boss.clone(),
                     powers: compiled_powers,
                 },
             );
@@ -597,6 +606,15 @@ impl ActiveRealm {
                     return Err(format!(
                         "Sandbox '{}' lists role '{}', but that role is not defined in this Realm",
                         sname, role_name
+                    ));
+                }
+            }
+
+            if let Some(def_role) = &sref.default_role {
+                if !roles.contains_key(def_role) {
+                    return Err(format!(
+                        "Sandbox '{}' specifies default_role '{}', but that role is not defined in this Realm",
+                        sname, def_role
                     ));
                 }
             }
@@ -888,23 +906,23 @@ impl ActiveRealm {
 /// cycles); the fallback below is defensive, not expected in practice.
 pub fn describe_expr(expr: &GlobExpr, defs: &IndexMap<String, GlobExpr>) -> String {
     match expr {
-        GlobExpr::Match(globs) => {
+        GlobExpr::Match { match_globs: globs } => {
             if globs.len() == 1 {
                 format!("matching `{}`", globs[0])
             } else {
                 format!("matching any of: {}", globs.iter().map(|g| format!("`{}`", g)).collect::<Vec<_>>().join(", "))
             }
         }
-        GlobExpr::Any(exprs) => {
+        GlobExpr::Any { any: exprs } => {
             let parts: Vec<String> = exprs.iter().map(|e| describe_expr(e, defs)).collect();
             format!("any of ({})", parts.join("; or "))
         }
-        GlobExpr::All(exprs) => {
+        GlobExpr::All { all: exprs } => {
             let parts: Vec<String> = exprs.iter().map(|e| describe_expr(e, defs)).collect();
             format!("all of ({})", parts.join("; and "))
         }
-        GlobExpr::Not(inner) => format!("anything except {}", describe_expr(inner, defs)),
-        GlobExpr::Ref(name) => match defs.get(name) {
+        GlobExpr::Not { not: inner } => format!("anything except {}", describe_expr(inner, defs)),
+        GlobExpr::Ref { ref_name: name } => match defs.get(name) {
             Some(target) => describe_expr(target, defs),
             None => format!("matching an undefined pattern '{}'", name),
         },

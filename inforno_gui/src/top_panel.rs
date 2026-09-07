@@ -7,6 +7,13 @@ use crate::mybtn;
 
 pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
+    
+    // Intercept any startup errors and show them as a modal popup
+    if let Some(err) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("startup_error"))) {
+        state.error_msg = Some(err);
+        state.is_modal_open = true;
+    }
+
     egui::Panel::top("top_panel").show(ui, |ui| {
         if state.is_modal_open {
             ui.disable();
@@ -207,51 +214,64 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                             let orange = ui.visuals().warn_fg_color;
                             let slash_color = ui.visuals().weak_text_color();
 
-                            // Find the currently active mount
-                            let active_mount = realm.mounts.iter().find(|m| {
-                                state.active_workspace_name.as_ref() == Some(&m.virtual_path)
-                            });
+                            // --- PART 3: 🔖 Places (Global to Realm) ---
+                            if !realm.raw_config.places.is_empty() {
+                                let cache_id = egui::Id::new("active_place").with(&realm.name);
+                                
+                                // Retrieve selected place from cache, default to the FIRST place in the IndexMap
+                                let first_place_name = realm.raw_config.places.keys().next().unwrap().clone();
+                                let active_place_name = ctx.data_mut(|d| {
+                                    d.get_temp::<String>(cache_id).unwrap_or_else(|| first_place_name.clone())
+                                });
 
-                            // --- PART 3: 🔖 Places (only if this mount declares any) ---
-                            if let Some(mount) = active_mount {
-                                if !mount.places.is_empty() {
-                                    let cache_id = egui::Id::new("active_place").with(&mount.virtual_path);
-                                    
-                                    // Retrieve selected place from cache, default to the FIRST place in the IndexMap
-                                    let first_place_name = mount.places.keys().next().unwrap().clone();
-                                    let active_place_name = ctx.data_mut(|d| {
-                                        d.get_temp::<String>(cache_id).unwrap_or_else(|| first_place_name.clone())
-                                    });
+                                let mut place_job = egui::text::LayoutJob::default();
+                                place_job.append(&format!("🔖 {}", active_place_name), 0.0, egui::text::TextFormat {
+                                    color: orange,
+                                    ..Default::default()
+                                });
 
-                                    let mut place_job = egui::text::LayoutJob::default();
-                                    place_job.append(&format!("🔖 {}", active_place_name), 0.0, egui::text::TextFormat {
-                                        color: orange,
-                                        ..Default::default()
-                                    });
+                                egui::ComboBox::from_id_salt("place_selector")
+                                    .width(0.0)
+                                    .selected_text(place_job)
+                                    .show_ui(ui, |ui| {
+                                        for (place_name, place_vpath) in &realm.raw_config.places {
+                                            let is_selected = *place_name == active_place_name;
+                                            if ui.selectable_label(is_selected, format!("🔖 {}", place_name)).clicked() {
+                                                // Save selection state
+                                                ctx.data_mut(|d| d.insert_temp(cache_id, place_name.clone()));
 
-                                    egui::ComboBox::from_id_salt("place_selector")
-                                        .width(0.0)
-                                        .selected_text(place_job)
-                                        .show_ui(ui, |ui| {
-                                            for (place_name, place_path) in &mount.places {
-                                                let is_selected = *place_name == active_place_name;
-                                                if ui.selectable_label(is_selected, format!("🔖 {}", place_name)).clicked() {
-                                                    // Save selection state
-                                                    ctx.data_mut(|d| d.insert_temp(cache_id, place_name.clone()));
+                                                state.active_workspace_name = Some(place_vpath.clone());
 
-                                                    // Update actual project root so IDE/chat targets the new path!
-                                                    if place_path == "." || place_path.is_empty() {
-                                                        state.project_root = Some(mount.host_path.clone());
-                                                    } else {
-                                                        state.project_root = Some(mount.host_path.join(place_path));
+                                                // Resolve virtual path to host path for the IDE
+                                                let mut found = false;
+                                                for mount in &realm.mounts {
+                                                    if place_vpath.starts_with(&mount.virtual_path) {
+                                                        let relative = place_vpath.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
+                                                        state.project_root = Some(mount.host_path.join(relative));
+                                                        found = true;
+                                                        break;
                                                     }
                                                 }
+                                                // Fallback for raw host paths
+                                                if !found {
+                                                    state.project_root = Some(std::path::PathBuf::from(place_vpath));
+                                                }
                                             }
-                                        });
-                                    ui.label(egui::RichText::new("/").color(orange).strong());
-                                }
+                                        }
+                                    });
+                                ui.label(egui::RichText::new("/").color(orange).strong());
                             }
+
                             // --- PART 2: 📁 The Mount Point ---
+                            // Find the currently active mount based on the workspace path matching the mount prefix
+                            let active_mount = realm.mounts.iter().find(|m| {
+                                if let Some(ws) = &state.active_workspace_name {
+                                    ws.starts_with(&m.virtual_path)
+                                } else {
+                                    false
+                                }
+                            });
+
                             let mut mount_job = egui::text::LayoutJob::default();
                             if let Some(mount) = active_mount {
                                 mount_job.append(&format!("📁 {}", mount.virtual_path), 0.0, egui::text::TextFormat {
@@ -272,7 +292,6 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                     for mount in &realm.mounts {
                                         let is_selected = active_mount.map_or(false, |m| m.virtual_path == mount.virtual_path);
 
-                                        // Rich text row with descriptions for the dropdown
                                         let mut item_job = egui::text::LayoutJob::default();
                                         item_job.append(&format!("📁 {}  ", mount.virtual_path), 0.0, egui::text::TextFormat {
                                             color: ui.visuals().text_color(),
@@ -290,6 +309,9 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         if ui.selectable_label(is_selected, item_job).clicked() {
                                             state.active_workspace_name = Some(mount.virtual_path.clone());
                                             state.project_root = Some(mount.host_path.clone());
+                                            
+                                            // Reset the places cache so it doesn't show a mismatched place label
+                                            ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("active_place").with(&realm.name)));
                                         }
                                     }
                                 });

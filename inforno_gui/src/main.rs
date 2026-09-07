@@ -161,7 +161,7 @@ async fn main() -> eframe::Result {
                 // something implied by realm_dir.
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                     let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
-                    let yaml_path = realm_dir.join("realm.yml");
+                    let yaml_path = realm_dir.join("realm2.yml");
 
                     match std::fs::read_to_string(&yaml_path) {
                         Ok(config_str) => match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
@@ -169,23 +169,27 @@ async fn main() -> eframe::Result {
                                 match inforno_core::realm::resolve_default_sandbox_path(&realm_config) {
                                     Ok(resolved) => {
                                         sandbox = Some(resolved);
-                                        active_realm_name = Some(realm_name);
+                                        active_realm_name = Some(realm_name.clone());
                                     }
                                     Err(reason) => {
-                                        // No default sandbox to open. We do NOT create
-                                        // one automatically — fall back to the home
-                                        // sandbox and let the GUI ask the user.
-                                        eprintln!(
-                                            "Realm '{}' has no default sandbox yet ({}); will prompt to create one.",
-                                            realm_name, reason
-                                        );
-                                        realm_awaiting_sandbox = Some(realm_name);
+                                        let err_msg = format!("Realm '{}' has no default sandbox yet ({}); will prompt to create one.", realm_name, reason);
+                                        eprintln!("{}", err_msg);
+                                        cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                                        realm_awaiting_sandbox = Some(realm_name.clone());
                                     }
                                 }
                             }
-                            Err(e) => eprintln!("Warning: Realm '{}' has an invalid realm.yml: {}", realm_name, e),
+                            Err(e) => {
+                                let err_msg = format!("Failed to parse realm2.yml for realm '{}':\n{}", realm_name, e);
+                                eprintln!("{}", err_msg);
+                                cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                            }
                         },
-                        Err(_) => eprintln!("Warning: Realm '{}' not found at {:?}", realm_name, realm_dir),
+                        Err(e) => {
+                            let err_msg = format!("Realm '{}' not found or could not be read at {:?}\nError: {}", realm_name, yaml_path, e);
+                            eprintln!("{}", err_msg);
+                            cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                        }
                     }
                 }
             }

@@ -76,42 +76,42 @@ mod tests {
         mounts.insert("/workspace".to_string(), RealmMountConfig {
             host: host_dir.path().to_path_buf(),
             read_only: false,
-            hide_if: Some(GlobExpr::Match(vec!["hidden.txt".to_string()])),
-            read_only_if: Some(GlobExpr::Match(vec!["readonly.txt".to_string()])),
+            hide_if: Some(GlobExpr::Match { match_globs: vec!["hidden.txt".to_string()] }),
+            read_only_if: Some(GlobExpr::Match { match_globs: vec!["readonly.txt".to_string()] }),
             wildcards: vec![],
             ignore: vec![],
             description: None,
-            places: IndexMap::new(),
         });
 
         let mut roles = IndexMap::new();
         roles.insert("tester".to_string(), RoleConfig {
             tier: Tier(2),
-            description: "Test Role".to_string(),
+            cv: "Test Role".to_string(),
+            boss: None,
             powers: vec![],
         });
 
         let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert(2, vec![
+        tiers.insert(2, crate::realm::TierConfig { powers: vec![
             Power {
-                span: GlobExpr::Match(vec!["**".to_string()]),
+                span: GlobExpr::Match { match_globs: vec!["**".to_string()] },
                 caps: vec![Cap::Read],
                 memo: Some("Read everything".to_string()),
                 overrides: None,
             },
             Power {
-                span: GlobExpr::Match(vec!["normal.txt".to_string(), "readonly.txt".to_string(), "hidden.txt".to_string()]),
+                span: GlobExpr::Match { match_globs: vec!["normal.txt".to_string(), "readonly.txt".to_string(), "hidden.txt".to_string()] },
                 caps: vec![Cap::Write],
                 memo: Some("Write access to specific files".to_string()),
                 overrides: None,
             },
             Power {
-                span: GlobExpr::Match(vec!["append_only.txt".to_string()]),
+                span: GlobExpr::Match { match_globs: vec!["append_only.txt".to_string()] },
                 caps: vec![Cap::Append],
                 memo: Some("Append access to logs".to_string()),
                 overrides: None,
             }
-        ]);
+        ]});
 
         let config = RealmConfig {
             default_workspace: None,
@@ -120,6 +120,7 @@ mod tests {
             expressions: IndexMap::new(),
             wildcards: IndexMap::new(),
             mounts,
+            places: IndexMap::new(),
             sandboxes: IndexMap::new(),
             roles,
             tiers,
