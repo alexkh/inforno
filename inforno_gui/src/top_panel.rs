@@ -212,10 +212,10 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                         // even if the parent toolbar is drawing Right-to-Left!
                         ui.horizontal(|ui| {
                             let orange = ui.visuals().warn_fg_color;
-                            let slash_color = ui.visuals().weak_text_color();
 
-                            // --- PART 3: 🔖 Places (Global to Realm) ---
+                            // --- 🔖 The Place (Workspace) ---
                             if !realm.raw_config.places.is_empty() {
+                                
                                 let cache_id = egui::Id::new("active_place").with(&realm.name);
                                 
                                 // Retrieve selected place from cache, default to the FIRST place in the IndexMap
@@ -243,82 +243,38 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                 state.active_workspace_name = Some(place_vpath.clone());
 
                                                 // Resolve virtual path to host path for the IDE
-                                                let mut found = false;
                                                 for mount in &realm.mounts {
-                                                    if place_vpath.starts_with(&mount.virtual_path) {
-                                                        let relative = place_vpath.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
+                                                    let p_clean = place_vpath.trim_matches('/');
+                                                    let m_clean = mount.virtual_path.trim_matches('/');
+
+                                                    let is_match = if m_clean.is_empty() {
+                                                        true
+                                                    } else if p_clean == m_clean {
+                                                        true
+                                                    } else if p_clean.starts_with(&format!("{}/", m_clean)) {
+                                                        true
+                                                    } else {
+                                                        false
+                                                    };
+
+                                                    if is_match {
+                                                        let relative = if m_clean.is_empty() {
+                                                            p_clean
+                                                        } else {
+                                                            p_clean.strip_prefix(m_clean).unwrap_or("").trim_start_matches('/')
+                                                        };
                                                         state.project_root = Some(mount.host_path.join(relative));
-                                                        found = true;
                                                         break;
                                                     }
-                                                }
-                                                // Fallback for raw host paths
-                                                if !found {
-                                                    state.project_root = Some(std::path::PathBuf::from(place_vpath));
                                                 }
                                             }
                                         }
                                     });
-                                ui.label(egui::RichText::new("/").color(orange).strong());
                             }
 
-                            // --- PART 2: 📁 The Mount Point ---
-                            // Find the currently active mount based on the workspace path matching the mount prefix
-                            let active_mount = realm.mounts.iter().find(|m| {
-                                if let Some(ws) = &state.active_workspace_name {
-                                    ws.starts_with(&m.virtual_path)
-                                } else {
-                                    false
-                                }
-                            });
-
-                            let mut mount_job = egui::text::LayoutJob::default();
-                            if let Some(mount) = active_mount {
-                                mount_job.append(&format!("📁 {}", mount.virtual_path), 0.0, egui::text::TextFormat {
-                                    color: orange,
-                                    ..Default::default()
-                                });
-                            } else {
-                                mount_job.append("Select Mount...", 0.0, egui::text::TextFormat {
-                                    color: orange,
-                                    ..Default::default()
-                                });
-                            }
-
-                            egui::ComboBox::from_id_salt("mount_selector")
-                                .width(0.0)
-                                .selected_text(mount_job)
-                                .show_ui(ui, |ui| {
-                                    for mount in &realm.mounts {
-                                        let is_selected = active_mount.map_or(false, |m| m.virtual_path == mount.virtual_path);
-
-                                        let mut item_job = egui::text::LayoutJob::default();
-                                        item_job.append(&format!("📁 {}  ", mount.virtual_path), 0.0, egui::text::TextFormat {
-                                            color: ui.visuals().text_color(),
-                                            ..Default::default()
-                                        });
-
-                                        if let Some(desc) = &mount.description {
-                                            item_job.append(desc, 0.0, egui::text::TextFormat {
-                                                color: ui.visuals().weak_text_color(),
-                                                font_id: egui::FontId::proportional(12.0),
-                                                ..Default::default()
-                                            });
-                                        }
-
-                                        if ui.selectable_label(is_selected, item_job).clicked() {
-                                            state.active_workspace_name = Some(mount.virtual_path.clone());
-                                            state.project_root = Some(mount.host_path.clone());
-                                            
-                                            // Reset the places cache so it doesn't show a mismatched place label
-                                            ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("active_place").with(&realm.name)));
-                                        }
-                                    }
-                                });
-
-                            // --- PART 1: 🏰 The Realm ---
                             ui.label(egui::RichText::new("/").color(orange).strong());
 
+                            // --- 🏰 The Realm ---
                             if ui.button(
                                 egui::RichText::new(format!("🏰 {} ⚙", realm.name))
                                         .color(orange)

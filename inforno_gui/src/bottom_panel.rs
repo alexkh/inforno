@@ -88,21 +88,61 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                         };
 
                         crate::emoji_render::emoji_menu_button(ui, '📎', attach_trailing).ui(ui, |ui| {
+                            // Dynamically resolve the currently selected place to a local filesystem path
+                            let mut current_root = state.project_root.clone();
+                            
+                            if let Some(realm) = &state.active_realm {
+                                if !realm.raw_config.places.is_empty() {
+                                    let cache_id = egui::Id::new("active_place").with(&realm.name);
+                                    let active_place_name = ctx.data_mut(|d| {
+                                        let first = realm.raw_config.places.keys().next().unwrap().clone();
+                                        d.get_temp::<String>(cache_id).unwrap_or(first)
+                                    });
+                                    
+                                    if let Some(place_vpath) = realm.raw_config.places.get(&active_place_name) {
+                                        for mount in &realm.mounts {
+                                            let p_clean = place_vpath.trim_matches('/');
+                                            let m_clean = mount.virtual_path.trim_matches('/');
+
+                                            let is_match = if m_clean.is_empty() {
+                                                true
+                                            } else if p_clean == m_clean {
+                                                true
+                                            } else if p_clean.starts_with(&format!("{}/", m_clean)) {
+                                                true
+                                            } else {
+                                                false
+                                            };
+
+                                            if is_match {
+                                                let relative = if m_clean.is_empty() {
+                                                    p_clean
+                                                } else {
+                                                    p_clean.strip_prefix(m_clean).unwrap_or("").trim_start_matches('/')
+                                                };
+                                                current_root = Some(mount.host_path.join(relative));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             if ui.button("Attach Workspace / 'src/' (.rs)").clicked() {
-                                if let Some(root) = &state.project_root {
+                                if let Some(root) = &current_root {
                                     let src_dirs = get_workspace_src_dirs(root);
 
                                     // Recursive helper to read .rs files into Attachments
-                                    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path) {
+                                    fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<Attachment>, root_path: &std::path::Path, realm: &Option<inforno_core::realm::ActiveRealm>) {
                                         if let Ok(entries) = std::fs::read_dir(dir) {
                                             for entry in entries.flatten() {
                                                 let path = entry.path();
                                                 if path.is_dir() {
-                                                    read_dir_recursive(&path, out, root_path);
+                                                    read_dir_recursive(&path, out, root_path, realm);
                                                 } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                                                     if let Ok(content) = std::fs::read_to_string(&path) {
-                                                        // Get relative path for cleaner display
-                                                        let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
+                                                        // Get VFS path for LLM alignment
+                                                        let relative_path = inforno_core::realm::get_relative_path(realm, &Some(root_path.to_path_buf()), &path);
                                                         out.push(Attachment {
                                                             filename: relative_path,
                                                             mime_type: "text/rust".to_string(),
@@ -115,7 +155,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                                     }
 
                                     for src_path in src_dirs {
-                                        read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root);
+                                        read_dir_recursive(&src_path, &mut state.bottom_panel_state.pending_attachments, root, &state.active_realm);
                                     }
                                 }
                                 ui.close();
@@ -123,12 +163,12 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                             // Generate and insert TOC
                             if ui.button("Attach TOC of Workspace / 'src/' (.rs)").clicked() {
-                                if let Some(root) = &state.project_root {
+                                if let Some(root) = &current_root {
                                     let src_dirs = get_workspace_src_dirs(root);
                                     let mut toc = String::new();
 
                                     for src_path in src_dirs {
-                                        generate_rust_toc(&src_path, root, &mut toc);
+                                        generate_rust_toc(&src_path, root, &mut toc, &state.active_realm);
                                     }
 
                                     if !toc.is_empty() {
@@ -148,7 +188,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                             // Attach Multiple Files and or Folders
                             if ui.button("📄 Attach Files/Folders...").clicked() {
                                 // 1. Reconfigure the dialog with the project root (if active)
-                                if let Some(root) = &state.project_root {
+                                if let Some(root) = &current_root {
                                     state.file_dialog = egui_file_dialog::FileDialog::new()
                                         .initial_directory(root.clone());
                                 } else {
@@ -847,7 +887,7 @@ fn get_workspace_src_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 /// Parses Rust source code and extracts high-level declarations
 /// into a structured Markdown Table of Contents with line numbers.
-fn generate_rust_toc(dir: &std::path::Path, root_path: &std::path::Path, toc: &mut String) {
+fn generate_rust_toc(dir: &std::path::Path, root_path: &std::path::Path, toc: &mut String, realm: &Option<inforno_core::realm::ActiveRealm>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         let syntax = Syntax::rust();
         let mut tokenizer = Token::default();
@@ -857,11 +897,11 @@ fn generate_rust_toc(dir: &std::path::Path, root_path: &std::path::Path, toc: &m
 
             if path.is_dir() {
                 // Recurse into subdirectories
-                generate_rust_toc(&path, root_path, toc);
+                generate_rust_toc(&path, root_path, toc, realm);
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     // Create the large title for the file
-                    let relative_path = path.strip_prefix(root_path).unwrap_or(&path).display().to_string();
+                    let relative_path = inforno_core::realm::get_relative_path(realm, &Some(root_path.to_path_buf()), &path);
                     toc.push_str(&format!("# {}\n\n", relative_path));
 
                     // Tokenize the file

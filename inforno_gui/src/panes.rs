@@ -117,7 +117,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     egui::RichText::new(tooltip_text)
                     .strong()
                     .heading()
-                )
+                );
             }
         }
 

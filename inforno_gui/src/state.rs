@@ -237,27 +237,46 @@ impl State {
                 .map(|d| d.config_dir().join("realms").join(&realm_name));
 
             if let Some(realm_dir) = realm_dir {
-                let yaml_path = realm_dir.join("realm.yml");
+                let yaml_path = realm_dir.join("realm2.yml");
                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
                     if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
 
                         // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
                         if let Ok(realm) = inforno_core::realm::ActiveRealm::from_config(realm_name, raw_config) {
-                            // Resolve the default workspace (Fallback to the longest mount point)
-                            let explicit_default = realm.default_workspace.clone().and_then(|def| {
-                                realm.mounts.iter()
-                                    .find(|m| m.virtual_path == def)
-                                    .map(|m| (m.virtual_path.clone(), m.host_path.clone()))
-                            });
+                            // Resolve the default place (Fallback to the first mount point)
+                            let mut selected_workspace_name = None;
+                            let mut selected_project_root = None;
 
-                            let selected = explicit_default.or_else(|| {
-                                realm.mounts.first()
-                                    .map(|m| (m.virtual_path.clone(), m.host_path.clone()))
-                            });
+                            // 1. Try to grab the first globally defined Place
+                            if let Some(first_place_vpath) = realm.raw_config.places.values().next() {
+                                selected_workspace_name = Some(first_place_vpath.clone());
+                                
+                                let mut found = false;
+                                for mount in &realm.mounts {
+                                    if first_place_vpath.starts_with(&mount.virtual_path) {
+                                        let relative = first_place_vpath.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
+                                        selected_project_root = Some(mount.host_path.join(relative));
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                // Fallback for raw host paths
+                                if !found {
+                                    selected_project_root = Some(std::path::PathBuf::from(first_place_vpath));
+                                }
+                            }
 
-                            if let Some((name, path)) = selected {
-                                project_root = Some(path);
-                                active_workspace_name = Some(name);
+                            // 2. Fallback to the first Mount if there are no Places
+                            if selected_workspace_name.is_none() {
+                                if let Some(first_mount) = realm.mounts.first() {
+                                    selected_workspace_name = Some(first_mount.virtual_path.clone());
+                                    selected_project_root = Some(first_mount.host_path.clone());
+                                }
+                            }
+
+                            if selected_workspace_name.is_some() {
+                                active_workspace_name = selected_workspace_name;
+                                project_root = selected_project_root;
                             }
                             active_realm = Some(realm);
                         }
@@ -812,10 +831,7 @@ impl eframe::App for MyApp {
             let tx_clone = state.op_tx.clone();
             let ctx_clone = ctx.clone();
             let project_root_clone = state.project_root.clone();
-
-
-            // Extract JUST the mounts we need so we don't capture `state` into the async thread
-            let realm_mounts_clone = state.active_realm.as_ref().map(|r| r.mounts.clone());
+            let active_realm_clone = state.active_realm.clone();
 
             tokio::spawn(async move {
                 let mut attachments = Vec::new();
@@ -835,15 +851,15 @@ impl eframe::App for MyApp {
                     if path.is_dir() {
                         // Recursively read directory (we can leave this for text only as before,
                         // or you could expand it to images. Let's keep it safe and just do text for folders)
-                        fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<inforno_core::common::Attachment>, root_path: &std::path::Path) {
+                        fn read_dir_recursive(dir: &std::path::Path, out: &mut Vec<inforno_core::common::Attachment>, realm: &Option<inforno_core::realm::ActiveRealm>, proj_root: &Option<std::path::PathBuf>) {
                             if let Ok(entries) = std::fs::read_dir(dir) {
                                 for entry in entries.flatten() {
                                     let p = entry.path();
                                     if p.is_dir() {
-                                        read_dir_recursive(&p, out, root_path);
+                                        read_dir_recursive(&p, out, realm, proj_root);
                                     } else {
                                         if let Ok(content) = std::fs::read_to_string(&p) {
-                                            let relative_path = p.strip_prefix(root_path).unwrap_or(&p).display().to_string();
+                                            let relative_path = inforno_core::realm::get_relative_path(realm, proj_root, &p);
                                             out.push(inforno_core::common::Attachment {
                                                 filename: relative_path,
                                                 mime_type: "text/plain".to_string(),
@@ -854,60 +870,13 @@ impl eframe::App for MyApp {
                                 }
                             }
                         }
-                        read_dir_recursive(&path, &mut attachments, &path);
+                        read_dir_recursive(&path, &mut attachments, &active_realm_clone, &project_root_clone);
                     } else {
                         // Read single file: Check if it's an image!
                         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
 
                         // 1. Try to get the relative path robustly
-                        let mut relative_name = path.display().to_string();
-                        let mut mapped_to_realm = false;
-
-                        // Check if the file belongs to an active Realm first
-                        if let Some(realm_mounts) = &realm_mounts_clone {
-                            let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-
-                            // Since mounts are sorted longest-first, the first match is our deepest nested point
-                            for mount in realm_mounts {
-                                let c_root = std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
-                                if let Ok(stripped) = c_path.strip_prefix(&c_root) {
-                                    // Format as "/virtual_path/path/to/file"
-                                    let v_path_clean = mount.virtual_path.trim_end_matches('/');
-                                    relative_name = format!("{}/{}", v_path_clean, stripped.display());
-                                    mapped_to_realm = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Fallback to standard project root if not in a realm
-                        if !mapped_to_realm {
-                            if let Some(root) = &project_root_clone {
-                                let c_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                                let c_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-
-                                relative_name = c_path.strip_prefix(&c_root)
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|_| {
-                                        // Fallback 1: chop at "/src/" if strip_prefix still fails
-                                        let path_str = path.display().to_string();
-                                        if let Some(idx) = path_str.find("/src/") {
-                                            path_str[idx + 1..].to_string()
-                                        } else {
-                                            // Fallback 2: just the file name (avoid exposing full system path)
-                                            path.file_name().unwrap_or_default().to_string_lossy().into_owned()
-                                        }
-                                    });
-                            } else {
-                                // If no project root, look for "/src/" or just use file name
-                                let path_str = path.display().to_string();
-                                if let Some(idx) = path_str.find("/src/") {
-                                    relative_name = path_str[idx + 1..].to_string();
-                                } else {
-                                    relative_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                                }
-                            }
-                        }
+                        let relative_name = inforno_core::realm::get_relative_path(&active_realm_clone, &project_root_clone, &path);
 
                         if let Some(mime) = get_image_mime(ext) {
                             // It's an image, read as binary and base64 encode

@@ -128,7 +128,7 @@ pub enum Cap {
 }
 
 /// A single grant of access: a path pattern (`span`), the cap(s) it confers,
-/// and optionally a `memo` — guidance shown to an actor regardless of
+/// and optionally an `intro` — guidance shown to an actor regardless of
 /// whether this power's outcome is permissive, e.g. steering it toward a
 /// tool ("use `cargo add`") instead of a direct filesystem write, even when
 /// direct writes are technically absent or present. `overrides` names a
@@ -138,7 +138,7 @@ pub struct Power {
     pub span: GlobExpr,
     pub caps: Vec<Cap>,
     #[serde(default)]
-    pub memo: Option<String>,
+    pub intro: Option<String>,
     #[serde(default)]
     pub overrides: Option<String>,
 }
@@ -153,7 +153,7 @@ pub struct RoleConfig {
     pub tier: Tier,
     #[serde(default)]
     pub powers: Vec<Power>,
-    pub cv: String,
+    pub intro: String,
     #[serde(default)]
     pub boss: Option<String>,
 }
@@ -179,13 +179,7 @@ pub struct RealmMountConfig {
     pub host: PathBuf,
     #[serde(default)]
     pub read_only: bool,
-    pub hide_if: Option<GlobExpr>,
-    pub read_only_if: Option<GlobExpr>,
-    #[serde(default)]
-    pub wildcards: Vec<String>,
-    #[serde(default)]
-    pub ignore: Vec<String>,
-    pub description: Option<String>,
+    pub intro: Option<String>,
 }
 
 /// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
@@ -235,11 +229,6 @@ pub struct TierConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
-    pub default_workspace: Option<String>,
-    pub hide_if: Option<GlobExpr>,
-    pub read_only_if: Option<GlobExpr>,
-    #[serde(default)]
-    pub wildcards: IndexMap<String, Vec<String>>,
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
     /// Global bookmarks resolving to virtual paths (or host paths) across the VFS.
@@ -382,7 +371,7 @@ pub struct CompiledPower {
     pub span_source: GlobExpr,
     span: Arc<CompiledExpr>,
     pub caps: Vec<Cap>,
-    pub memo: Option<Arc<str>>,
+    pub intro: Option<Arc<str>>,
     pub overrides: Option<String>,
 }
 
@@ -393,7 +382,7 @@ impl CompiledPower {
             span_source: power.span.clone(),
             span,
             caps: power.caps.clone(),
-            memo: power.memo.as_deref().map(Into::into),
+            intro: power.intro.as_deref().map(Into::into),
             overrides: power.overrides.clone(),
         })
     }
@@ -420,16 +409,13 @@ pub struct CompiledMount {
     pub virtual_path: String,
     pub host_path: PathBuf,
     pub read_only: bool,
-    pub ignore_set: Arc<GlobSet>,
-    pub hide_expr: Option<Arc<CompiledExpr>>,
-    pub ro_expr: Option<Arc<CompiledExpr>>,
-    pub description: Option<String>,
+    pub intro: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct CompiledRole {
     pub tier: Tier,
-    pub cv: Arc<str>,
+    pub intro: Arc<str>,
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
 }
@@ -437,9 +423,6 @@ pub struct CompiledRole {
 #[derive(Clone)]
 pub struct ActiveRealm {
     pub name: String,
-    pub default_workspace: Option<String>,
-    pub global_hide_expr: Option<Arc<CompiledExpr>>,
-    pub global_ro_expr: Option<Arc<CompiledExpr>>,
     pub mounts: Vec<CompiledMount>,
     pub raw_config: RealmConfig,
     pub roles: HashMap<String, CompiledRole>,
@@ -468,59 +451,12 @@ impl ActiveRealm {
                 .map_err(|e| format!("In named expression '{}': {}", ename, e))?;
         }
 
-        let global_hide_expr = if let Some(ref expr) = raw_config.hide_if {
-            Some(Arc::new(CompiledExpr::compile(expr, &raw_config.expressions)?))
-        } else {
-            None
-        };
-
-        let global_ro_expr = if let Some(ref expr) = raw_config.read_only_if {
-            Some(Arc::new(CompiledExpr::compile(expr, &raw_config.expressions)?))
-        } else {
-            None
-        };
-
         for (v_path, mount_cfg) in config.mounts {
-            let mut builder = GlobSetBuilder::new();
-
-            let hide_expr = if let Some(ref expr) = mount_cfg.hide_if {
-                Some(Arc::new(CompiledExpr::compile(expr, &raw_config.expressions)?))
-            } else {
-                None
-            };
-
-            let ro_expr = if let Some(ref expr) = mount_cfg.read_only_if {
-                Some(Arc::new(CompiledExpr::compile(expr, &raw_config.expressions)?))
-            } else {
-                None
-            };
-
-            // Apply the reusable wildcard rules
-            for wc_name in &mount_cfg.wildcards {
-                if let Some(wc_globs) = raw_config.wildcards.get(wc_name) {
-                    for g in wc_globs {
-                        builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
-                    }
-                } else {
-                    return Err(format!("Wildcard '{}' not found for mount '{}'", wc_name, v_path));
-                }
-            }
-
-            // Apply mount-specific ignores
-            for g in &mount_cfg.ignore {
-                builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
-            }
-
-            let ignore_set = builder.build().map_err(|e| e.to_string())?;
-
             mounts.push(CompiledMount {
                 virtual_path: v_path,
                 host_path: mount_cfg.host,
                 read_only: mount_cfg.read_only,
-                ignore_set: ignore_set.into(),
-                hide_expr,
-                ro_expr,
-                description: mount_cfg.description,
+                intro: mount_cfg.intro,
             });
         }
 
@@ -569,7 +505,7 @@ impl ActiveRealm {
                 rname.clone(),
                 CompiledRole {
                     tier: rcfg.tier,
-                    cv: rcfg.cv.as_str().into(),
+                    intro: rcfg.intro.as_str().into(),
                     boss: rcfg.boss.clone(),
                     powers: compiled_powers,
                 },
@@ -622,9 +558,6 @@ impl ActiveRealm {
 
         let mut realm = Self {
             name,
-            default_workspace: raw_config.default_workspace.clone(),
-            global_hide_expr,
-            global_ro_expr,
             mounts,
             raw_config,
             roles,
@@ -710,13 +643,6 @@ impl ActiveRealm {
                     return !self.dotfile_override_applies(rel_path, role_name);
                 }
 
-                if let Some(ref expr) = self.global_hide_expr {
-                    if expr.is_match(rel_path) { return true; }
-                }
-                if let Some(ref expr) = mount.hide_expr {
-                    if expr.is_match(rel_path) { return true; }
-                }
-
                 return false;
             }
         }
@@ -742,9 +668,6 @@ impl ActiveRealm {
                     .trim_start_matches('/');
                 let host_target = mount.host_path.join(relative);
 
-                // Legacy ignore set matching
-                if mount.ignore_set.is_match(&host_target) { return None; }
-
                 if self.is_path_hidden(virtual_path, role_name) { return None; }
 
                 return Some(host_target);
@@ -761,26 +684,8 @@ impl ActiveRealm {
         
         for mount in &self.mounts {
             if path_str.starts_with(&mount.virtual_path) {
-                // 1. Check if the entire mount is read-only
-                if mount.read_only { return true; }
-                
-                let relative = path_str
-                    .strip_prefix(&mount.virtual_path)
-                    .unwrap_or("")
-                    .trim_start_matches('/');
-                let rel_path = Path::new(relative);
-                    
-                // 2. Check global read-only rules
-                if let Some(ref expr) = self.global_ro_expr {
-                    if expr.is_match(rel_path) { return true; }
-                }
-                
-                // 3. Check mount-specific read-only rules
-                if let Some(ref expr) = mount.ro_expr {
-                    if expr.is_match(rel_path) { return true; }
-                }
-                
-                return false;
+                // Check if the entire mount is read-only
+                return mount.read_only;
             }
         }
         true // If it's outside all mounts, treat as read-only to be safe
@@ -881,9 +786,9 @@ impl ActiveRealm {
                 verbs.join(", "),
                 describe_expr(&power.span_source, &self.raw_config.expressions)
             );
-            if let Some(ref memo) = power.memo {
+            if let Some(ref intro) = power.intro {
                 line.push(' ');
-                line.push_str(memo);
+                line.push_str(intro);
             }
             lines.push(line);
         }
@@ -976,31 +881,22 @@ pub fn resolve_filepath(
     let mut target_root = None;
     let mut relative_path_str = requested_path.trim();
 
-    // 1. Attempt VFS Translation if we are in a Realm AND `role_name` is
-    // actually defined there. An undefined role (e.g. no `gui:` entry in
-    // realm2.yml) means zero Realm access, full stop — we deliberately don't
-    // fall through and let `secure_resolve_path` decide, since that only
-    // checks visibility, not whether this role is even recognized.
-    if let Some(active_realm) = realm.as_ref().filter(|r| r.has_role(role_name)) {
-        let req_path = std::path::Path::new(relative_path_str);
+    // 0. Direct Absolute Path Match (e.g. LLM hallucinates full host path)
+    let raw_path = std::path::Path::new(relative_path_str);
+    if raw_path.is_absolute() && raw_path.exists() && raw_path.is_file() {
+        return Some((raw_path.to_path_buf(), false));
+    }
 
-        if let Some(secure_host_path) = active_realm.secure_resolve_path(req_path, role_name) {
-            // Perfect match found and permitted by the ignore list
-            if secure_host_path.exists() && secure_host_path.is_file() {
-                return Some((secure_host_path, false));
-            }
-
-            // If the exact match fails (e.g., a typo in the file name), prepare for the fuzzy fallback.
-            // We need to extract the specific mount root this path belonged to.
-            for mount in &active_realm.mounts {
-                if relative_path_str.starts_with(&mount.virtual_path) {
-                    target_root = Some(mount.host_path.clone());
-                    relative_path_str = relative_path_str
-                        .strip_prefix(&mount.virtual_path)
-                        .unwrap_or(relative_path_str)
-                        .trim_start_matches('/');
-                    break;
-                }
+    // 1. Attempt VFS Translation if we are in a Realm
+    if let Some(active_realm) = realm.as_ref() {
+        for mount in &active_realm.mounts {
+            if relative_path_str.starts_with(&mount.virtual_path) {
+                target_root = Some(mount.host_path.clone());
+                relative_path_str = relative_path_str
+                    .strip_prefix(&mount.virtual_path)
+                    .unwrap_or(relative_path_str)
+                    .trim_start_matches('/');
+                break;
             }
         }
     }
@@ -1008,11 +904,17 @@ pub fn resolve_filepath(
     // 2. Fallback to standard project_root if no valid Realm VFS match was found
     let root_to_search = target_root.or_else(|| project_root.clone())?;
 
+    // Strip leading slashes so `Path::join` doesn't discard the root_to_search!
+    let safe_rel_path = relative_path_str.trim_start_matches('/');
+    let req_path = std::path::Path::new(safe_rel_path);
+
     // 3. Standard Exact Match Check
-    let req_path = std::path::Path::new(relative_path_str);
     let full_path = root_to_search.join(req_path);
-    if full_path.exists() && full_path.is_file() {
-        return Some((full_path, false));
+    
+    // We return the path even if it doesn't exist yet, because the LLM might be creating a new file.
+    // The `is_file()` check is removed because a non-existent path isn't a file or a directory yet.
+    if !full_path.is_dir() {
+         return Some((full_path, false));
     }
 
     let target_name = req_path.file_name()?;

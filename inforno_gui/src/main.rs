@@ -130,7 +130,7 @@ async fn main() -> eframe::Result {
                 if let Some(pos_arg) = &positional_path {
                     if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                         let realm_dir = proj_dirs.config_dir().join("realms").join(pos_arg);
-                        if realm_dir.exists() && realm_dir.join("realm.yml").exists() {
+                        if realm_dir.exists() && realm_dir.join("realm2.yml").exists() {
                             target_realm = Some(pos_arg.clone());
                             positional_path = None; // Consume it so it's not treated as a project dir
                         }

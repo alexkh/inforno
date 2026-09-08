@@ -57,7 +57,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
                         // If user types in the right pane, we try to parse it
                         if response.changed() {
-                            match serde_yaml::from_str::<inforno_core::common::RealmConfig>(&substate.yaml_buffer) {
+                            match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&substate.yaml_buffer) {
                                 Ok(new_config) => {
                                     substate.parse_error = None;
                                     // Optionally: sync `new_config` back to the live Form variables here
@@ -102,15 +102,6 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
             // Loop through state.active_realm.raw_config.mounts to render editable text fields
             ui.label("Mount form elements go here...");
             ui.button("+ Add Mount");
-        });
-
-    ui.add_space(10.0);
-
-    // CHANGED: Terminology reflects "Wildcards" instead of "Glob Selections"
-    egui::CollapsingHeader::new("🔍 Wildcards")
-        .default_open(true)
-        .show(ui, |ui| {
-             ui.label("Wildcard form elements go here...");
         });
 
     ui.add_space(10.0);

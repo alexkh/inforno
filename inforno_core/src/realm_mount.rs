@@ -62,7 +62,8 @@ mod tests {
         let host_dir = tempfile::tempdir()?;
 
         let normal_path = host_dir.path().join("normal.txt");
-        let hidden_path = host_dir.path().join("hidden.txt");
+        // Dotfile automatically tests the `is_builtin_dotfile_path` hiding mechanism
+        let hidden_path = host_dir.path().join(".hidden.txt");
         let ro_path = host_dir.path().join("readonly.txt");
         let append_path = host_dir.path().join("append_only.txt");
 
@@ -71,22 +72,18 @@ mod tests {
         File::create(&ro_path)?.write_all(b"ro_data\n")?;
         File::create(&append_path)?.write_all(b"log_start\n")?;
 
-        // 2. Configure the Boolean AST Policy
+        // 2. Configure the Powers Policy
         let mut mounts = IndexMap::new();
         mounts.insert("/workspace".to_string(), RealmMountConfig {
             host: host_dir.path().to_path_buf(),
             read_only: false,
-            hide_if: Some(GlobExpr::Match { match_globs: vec!["hidden.txt".to_string()] }),
-            read_only_if: Some(GlobExpr::Match { match_globs: vec!["readonly.txt".to_string()] }),
-            wildcards: vec![],
-            ignore: vec![],
-            description: None,
+            intro: None,
         });
 
         let mut roles = IndexMap::new();
         roles.insert("tester".to_string(), RoleConfig {
             tier: Tier(2),
-            cv: "Test Role".to_string(),
+            intro: "Test Role".to_string(),
             boss: None,
             powers: vec![],
         });
@@ -96,29 +93,26 @@ mod tests {
             Power {
                 span: GlobExpr::Match { match_globs: vec!["**".to_string()] },
                 caps: vec![Cap::Read],
-                memo: Some("Read everything".to_string()),
+                intro: Some("Read everything".to_string()),
                 overrides: None,
             },
             Power {
-                span: GlobExpr::Match { match_globs: vec!["normal.txt".to_string(), "readonly.txt".to_string(), "hidden.txt".to_string()] },
+                // Intentionally exclude readonly.txt and .hidden.txt from having Write power
+                span: GlobExpr::Match { match_globs: vec!["normal.txt".to_string()] },
                 caps: vec![Cap::Write],
-                memo: Some("Write access to specific files".to_string()),
+                intro: Some("Write access to normal files".to_string()),
                 overrides: None,
             },
             Power {
                 span: GlobExpr::Match { match_globs: vec!["append_only.txt".to_string()] },
                 caps: vec![Cap::Append],
-                memo: Some("Append access to logs".to_string()),
+                intro: Some("Append access to logs".to_string()),
                 overrides: None,
             }
         ]});
 
         let config = RealmConfig {
-            default_workspace: None,
-            hide_if: None,
-            read_only_if: None,
             expressions: IndexMap::new(),
-            wildcards: IndexMap::new(),
             mounts,
             places: IndexMap::new(),
             sandboxes: IndexMap::new(),
