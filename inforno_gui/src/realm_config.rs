@@ -1,5 +1,6 @@
 use egui::{Color32, RichText, ScrollArea};
 use crate::state::State;
+use bulat::editor::{CodeEditor, Syntax, ColorTheme};
 
 #[derive(Default)]
 pub struct RealmConfigState {
@@ -47,27 +48,37 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                     let substate = &mut state.realm_config_state;
 
                     // 1. Live YAML Editor
-                    ScrollArea::vertical().id_salt("realm_yaml_scroll").max_height(350.0).show(ui, |ui| {
-                        let response = ui.add_sized(
-                            ui.available_size(),
-                            egui::TextEdit::multiline(&mut substate.yaml_buffer)
-                                .font(egui::TextStyle::Monospace) // Looks like code
-                                .code_editor() // Turns off word wrapping, adds line numbers if configured
-                        );
+                    let mut yaml_changed = false;
+                    
+                    // Let the outer egui layout strict-bound the height and handle scrolling natively
+                    ScrollArea::both().id_salt("realm_yaml_scroll").max_height(350.0).show(ui, |ui| {
+                        let num_lines = substate.yaml_buffer.lines().count().max(1);
+                        
+                        let out = CodeEditor::default()
+                            .id_source("realm_yaml_editor")
+                            .with_theme(ColorTheme::SV)
+                            .with_syntax(Syntax::yaml())
+                            .with_numlines(true)
+                            .with_rows(num_lines + 1)
+                            .vscroll(false) // Disable internal scrolling
+                            .v_auto_shrink(true) // Uncap internal height so the parent handles the bounds
+                            .show(ui, &mut substate.yaml_buffer);
+                            
+                        yaml_changed = out.output.response.changed();
+                    });
 
-                        // If user types in the right pane, we try to parse it
-                        if response.changed() {
-                            match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&substate.yaml_buffer) {
-                                Ok(_new_config) => {
-                                    substate.parse_error = None;
-                                    // Optionally: sync `new_config` back to the live Form variables here
-                                },
-                                Err(e) => {
-                                    substate.parse_error = Some(e.to_string());
-                                }
+                    // If user types in the right pane, we try to parse it
+                    if yaml_changed {
+                        match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&substate.yaml_buffer) {
+                            Ok(_new_config) => {
+                                substate.parse_error = None;
+                                // Optionally: sync `new_config` back to the live Form variables here
+                            },
+                            Err(e) => {
+                                substate.parse_error = Some(e.to_string());
                             }
                         }
-                    });
+                    }
 
                     if let Some(err) = &substate.parse_error {
                         ui.colored_label(ui.visuals().error_fg_color, format!("YAML Error: {}", err));

@@ -207,8 +207,6 @@ pub struct SandboxRef {
     #[serde(default)]
     pub roles: Vec<String>,
     #[serde(default)]
-    pub default_role: Option<String>,
-    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -542,15 +540,6 @@ impl ActiveRealm {
                     return Err(format!(
                         "Sandbox '{}' lists role '{}', but that role is not defined in this Realm",
                         sname, role_name
-                    ));
-                }
-            }
-
-            if let Some(def_role) = &sref.default_role {
-                if !roles.contains_key(def_role) {
-                    return Err(format!(
-                        "Sandbox '{}' specifies default_role '{}', but that role is not defined in this Realm",
-                        sname, def_role
                     ));
                 }
             }
