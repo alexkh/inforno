@@ -58,7 +58,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                         // If user types in the right pane, we try to parse it
                         if response.changed() {
                             match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&substate.yaml_buffer) {
-                                Ok(new_config) => {
+                                Ok(_new_config) => {
                                     substate.parse_error = None;
                                     // Optionally: sync `new_config` back to the live Form variables here
                                 },
@@ -70,7 +70,9 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                     });
 
                     if let Some(err) = &substate.parse_error {
-                        ui.colored_label(Color32::RED, format!("YAML Error: {}", err));
+                        ui.colored_label(ui.visuals().error_fg_color, format!("YAML Error: {}", err));
+                    } else if !substate.yaml_buffer.is_empty() {
+                       ui.colored_label(Color32::GREEN, "✔ YAML is valid");
                     }
 
                     ui.add_space(20.0);
@@ -95,17 +97,116 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 // --- Helper Functions ---
 
 fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
-    // Here you build the UI for your mounts, globs, roles, and actors.
-    egui::CollapsingHeader::new("🗄 Mounts")
+    let Some(realm) = &state.active_realm else {
+        ui.label(egui::RichText::new("No active realm loaded to configure.").weak().italics());
+        return;
+    };
+
+    let config = &realm.raw_config;
+
+    egui::CollapsingHeader::new(format!("🗄 Mounts ({})", config.mounts.len()))
         .default_open(true)
         .show(ui, |ui| {
-            // Loop through state.active_realm.raw_config.mounts to render editable text fields
-            ui.label("Mount form elements go here...");
+            for (name, mount) in &config.mounts {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Host:");
+                        ui.label(mount.host.display().to_string());
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Read Only:");
+                        ui.label(mount.read_only.to_string());
+                    });
+                    if let Some(intro) = &mount.intro {
+                        ui.label(format!("Intro: {}", intro));
+                    }
+                });
+            }
             ui.button("+ Add Mount");
         });
 
     ui.add_space(10.0);
-    // ... Roles and Actors
+
+    egui::CollapsingHeader::new(format!("🔖 Places ({})", config.places.len()))
+        .show(ui, |ui| {
+            for (name, path) in &config.places {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.label("->");
+                    ui.label(path);
+                });
+            }
+            ui.button("+ Add Place");
+        });
+
+    ui.add_space(10.0);
+
+    egui::CollapsingHeader::new(format!("🎯 Spans ({})", config.expressions.len()))
+        .show(ui, |ui| {
+            for (name, _expr) in &config.expressions {
+                ui.label(egui::RichText::new(name).strong());
+            }
+            ui.button("+ Add Span");
+        });
+
+    ui.add_space(10.0);
+
+    egui::CollapsingHeader::new(format!("📶 Tiers ({})", config.tiers.len()))
+        .show(ui, |ui| {
+            for (tier_num, tier_cfg) in &config.tiers {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new(format!("Tier {}", tier_num)).strong());
+                    ui.label(format!("Powers: {} defined", tier_cfg.powers.len()));
+                });
+            }
+            ui.button("+ Add Tier");
+        });
+
+    ui.add_space(10.0);
+
+    egui::CollapsingHeader::new(format!("🎭 Roles ({})", config.roles.len()))
+        .show(ui, |ui| {
+            for (name, role) in &config.roles {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Tier:");
+                        ui.label(role.tier.0.to_string());
+                    });
+                    if let Some(boss) = &role.boss {
+                        ui.horizontal(|ui| {
+                            ui.label("Boss:");
+                            ui.label(boss);
+                        });
+                    }
+                    ui.label(format!("Intro: {}", role.intro));
+                    if !role.powers.is_empty() {
+                        ui.label(format!("Powers: {} defined", role.powers.len()));
+                    }
+                });
+            }
+            ui.button("+ Add Role");
+        });
+
+    ui.add_space(10.0);
+
+    egui::CollapsingHeader::new(format!("📦 Sandboxes ({})", config.sandboxes.len()))
+        .show(ui, |ui| {
+            for (name, sandbox) in &config.sandboxes {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.label(format!("Path: {}", sandbox.path.display()));
+                    if !sandbox.roles.is_empty() {
+                        ui.label(format!("Roles: {}", sandbox.roles.join(", ")));
+                    }
+                    if let Some(desc) = &sandbox.description {
+                        ui.label(format!("Description: {}", desc));
+                    }
+                });
+            }
+            ui.button("+ Add Sandbox");
+        });
 }
 
 fn render_vfs_tree(ui: &mut egui::Ui, realm: &inforno_core::realm::ActiveRealm) {
