@@ -289,7 +289,8 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         if let Some(active_realm) = &state.active_realm {
                                             // Assuming ActiveRealm can be serialized back to RealmConfig
                                             if let Ok(yaml) = serde_yaml::to_string(&active_realm.raw_config) {
-                                                state.realm_config_state.yaml_buffer = yaml;
+                                                state.realm_config_state.yaml_buffer = yaml.clone();
+                                                state.realm_config_state.original_yaml = yaml;
                                             }
                                         }
                                     }

@@ -6,6 +6,8 @@ use bulat::editor::{CodeEditor, Syntax, ColorTheme};
 pub struct RealmConfigState {
     // The raw text being edited on the right side
     pub yaml_buffer: String,
+    // The original loaded text to track unsaved changes
+    pub original_yaml: String,
     // If the user made a typo in the YAML, we store the error here
     pub parse_error: Option<String>,
     // Tracks if changes in the form need to be serialized back to the text buffer
@@ -42,8 +44,44 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
                 // --- RIGHT COLUMN: YAML & VFS Tree ---
                 columns[1].vertical(|ui| {
-                    ui.heading("realm2.yml");
+                    let is_dirty = state.realm_config_state.yaml_buffer != state.realm_config_state.original_yaml;
+                    let can_save = is_dirty && state.realm_config_state.parse_error.is_none();
+                    let mut trigger_save = false;
+
+                    ui.horizontal(|ui| {
+                        ui.heading("realm2.yml");
+                        if is_dirty {
+                            ui.label(egui::RichText::new("●").color(ui.visuals().warn_fg_color))
+                                .on_hover_text("Unsaved changes");
+                        }
+                        
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add_enabled(can_save, egui::Button::new("💾 Save")).clicked() {
+                                trigger_save = true;
+                            }
+                        });
+                    });
                     ui.separator();
+
+                    if trigger_save {
+                        if let Some(realm) = &state.active_realm {
+                            if let Some(realm_dir) = directories::ProjectDirs::from("", "", "inforno")
+                                .map(|d| d.config_dir().join("realms").join(&realm.name)) {
+                                
+                                let yaml_path = realm_dir.join("realm2.yml");
+                                match std::fs::write(&yaml_path, &state.realm_config_state.yaml_buffer) {
+                                    Ok(_) => {
+                                        // Update the baseline tracking upon success
+                                        state.realm_config_state.original_yaml = state.realm_config_state.yaml_buffer.clone();
+                                    }
+                                    Err(e) => {
+                                        state.error_msg = Some(format!("Failed to save realm2.yml: {}", e));
+                                        state.is_modal_open = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let substate = &mut state.realm_config_state;
 
