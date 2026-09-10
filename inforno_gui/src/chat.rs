@@ -889,7 +889,7 @@ fn render_user_msg(
                                                                     egui::TextEdit::multiline(&mut code)
                                                                         .desired_width(f32::INFINITY)
                                                                         .font(egui::TextStyle::Monospace)
-                                                                        .interactive(false)
+                                                                        // Removed .interactive(false) so it can be selected and copied
                                                                 );
                                                             });
                                                     }
@@ -1143,11 +1143,12 @@ fn render_msg_content(
                                 if let Some(vol_out) = &msg.volatile_output {
                                     ui.separator();
                                     ui.label(egui::RichText::new("Output:").weak().small());
-                                    let mut out_str = vol_out.clone();
+                                    // Use as_str() instead of clone() to make it natively read-only to egui
+                                    let mut out_str = vol_out.as_str();
                                     ui.add(
                                         egui::TextEdit::multiline(&mut out_str)
-                                            .font(egui::TextStyle::Monospace)
-                                            .interactive(false)
+                                            .font(egui::FontId::monospace(10.0))
+                                            // Removed .interactive(false) to allow mouse selection and copying
                                             .frame(egui::Frame::new())
                                             .desired_width(f32::INFINITY)
                                     );

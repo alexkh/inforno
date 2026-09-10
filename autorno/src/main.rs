@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub enum DaemonCommand {
     Start { id: String, realm: String, role: String, cmd: String },
     Stop { id: String },
+    Run { realm: String, role: String, cmd: String },
     Ping,
 }
 
@@ -109,6 +110,12 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
                 DaemonResponse::Error(format!("Harness '{}' not found", id))
             }
         }
+        DaemonCommand::Run { realm, role, cmd } => {
+            match run_harness(&realm, &role, &cmd) {
+                Ok(output) => DaemonResponse::Ok(output),
+                Err(e) => DaemonResponse::Error(e.to_string()),
+            }
+        }
         DaemonCommand::Ping => DaemonResponse::Ok("Pong".to_string()),
     }
 }
@@ -130,4 +137,39 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness
     let child = spawn_masked_command(vfs_session.mount_path(), cmd)?;
 
     Ok(Harness { vfs_session, child })
+}
+
+fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
+        .ok_or("Could not find project directories")?;
+    let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
+
+    let config_str = std::fs::read_to_string(&yaml_path)?;
+    let config = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str)?;
+
+    let active_realm = inforno_core::realm::ActiveRealm::from_config(realm_name.to_string(), config)?;
+    if !active_realm.has_role(role_name) {
+        return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
+    }
+
+    // Spin up an ephemeral FUSE session for the duration of this single command
+    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
+    
+    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd)?;
+    let output = command.output()?;
+    
+    let mut result = String::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    if !stdout.is_empty() {
+        result.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !result.is_empty() { result.push('\n'); }
+        result.push_str("STDERR:\n");
+        result.push_str(&stderr);
+    }
+    
+    Ok(if result.is_empty() { "(Command executed successfully with no output)".to_string() } else { result })
 }

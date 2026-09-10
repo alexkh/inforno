@@ -470,20 +470,36 @@ impl Filesystem for RealmFuseFS {
                 }
             }
         } else {
-            // Populate Root or synthetic virtual mounts
-            // We clone the required data into a Vec first to avoid holding an 
-            // immutable borrow of `self` while trying to mutate `self` below.
-            let mounts_info: Vec<_> = self.realm.mounts.iter()
-                .map(|m| (m.virtual_path.clone(), m.host_path.clone()))
-                .collect();
+            // We are in a synthetic directory (e.g. FUSE Root or an intermediate folder like /workspace)
+            let parent_str = parent_vpath.to_str().unwrap_or("");
+            let parent_clean = parent_str.trim_matches('/');
 
-            for (vpath_str, host_path) in mounts_info {
-                let vpath = vpath_str.trim_start_matches('/');
-                if !vpath.is_empty() {
-                    let child_vpath = PathBuf::from("/").join(vpath);
-                    let child_ino = self.get_or_create_ino(&child_vpath, Some(host_path), true);
-                    entries.push((child_ino, FileType::Directory, vpath.to_string()));
+            let mut virtual_dirs = std::collections::HashSet::new();
+
+            for mount in &self.realm.mounts {
+                let m_vpath = mount.virtual_path.trim_matches('/');
+                
+                if parent_clean.is_empty() {
+                    // We are at root, add the first component of the mount
+                    if !m_vpath.is_empty() {
+                        let first_comp = m_vpath.split('/').next().unwrap_or(m_vpath);
+                        virtual_dirs.insert(first_comp.to_string());
+                    }
+                } else if m_vpath.starts_with(parent_clean) {
+                    // We are deeper in the tree
+                    let remainder = m_vpath.strip_prefix(parent_clean).unwrap_or("").trim_start_matches('/');
+                    if !remainder.is_empty() {
+                        let next_comp = remainder.split('/').next().unwrap_or(remainder);
+                        virtual_dirs.insert(next_comp.to_string());
+                    }
                 }
+            }
+
+            for child_name in virtual_dirs {
+                let child_vpath = parent_vpath.join(&child_name);
+                // For intermediate dirs, host_path is None. lookup() will handle resolving it when accessed
+                let child_ino = self.get_or_create_ino(&child_vpath, None, true);
+                entries.push((child_ino, FileType::Directory, child_name));
             }
             
             // Populate synthetic OS directories in root

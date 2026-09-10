@@ -82,6 +82,21 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
         }
     });
 
+    engine.register_fn("autorno_run", |realm: rhai::ImmutableString, role: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
+        #[cfg(target_os = "linux")]
+        {
+            send_ipc_command(DaemonCommand::Run {
+                realm: realm.to_string(),
+                role: role.to_string(),
+                cmd: cmd.to_string(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "Error: Autorno daemon IPC is only supported on Linux.".to_string()
+        }
+    });
+
     let result = engine.eval::<rhai::Dynamic>(script);
     let mut final_out = output.lock().unwrap().clone();
 
@@ -111,6 +126,7 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
 pub enum DaemonCommand {
     Start { id: String, realm: String, role: String, cmd: String },
     Stop { id: String },
+    Run { realm: String, role: String, cmd: String },
     Ping,
 }
 

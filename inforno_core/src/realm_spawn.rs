@@ -7,11 +7,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Spawns a shell or child command trapped strictly inside the given VfsMask's
+/// Builds a process trapped strictly inside the given VfsMask's
 /// mounted view, without requiring root privileges, using unprivileged Linux
 /// user + mount namespaces. `mount_path` should come from a live
 /// `VfsMaskSession::mount_path()`.
-pub fn spawn_masked_command(mount_path: &Path, cmd: &str) -> Result<std::process::Child, Box<dyn std::error::Error>> {
+pub fn build_masked_command(mount_path: &Path, cmd: &str) -> Result<std::process::Command, Box<dyn std::error::Error>> {
     let mount_path = mount_path.to_path_buf();
     let uid = getuid();
     let gid = getgid();
@@ -111,6 +111,10 @@ pub fn spawn_masked_command(mount_path: &Path, cmd: &str) -> Result<std::process
             Ok(())
         });
 
-        Ok(command.spawn()?)
+        Ok(command)
     }
+}
+
+pub fn spawn_masked_command(mount_path: &Path, cmd: &str) -> Result<std::process::Child, Box<dyn std::error::Error>> {
+    Ok(build_masked_command(mount_path, cmd)?.spawn()?)
 }
