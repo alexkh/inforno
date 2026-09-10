@@ -225,13 +225,29 @@ pub struct TierConfig {
     pub powers: Vec<Power>,
 }
 
+fn validate_places<'de, D>(deserializer: D) -> Result<IndexMap<String, serde_saphyr::Commented<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let places = IndexMap::<String, serde_saphyr::Commented<String>>::deserialize(deserializer)?;
+    for (name, commented) in &places {
+        if commented.1.trim().is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "Place '{}' is missing a description. A YAML comment is required (e.g., `{} # My description`).",
+                name, commented.0
+            )));
+        }
+    }
+    Ok(places)
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
     #[serde(default)]
     pub mounts: IndexMap<String, RealmMountConfig>,
     /// Global bookmarks resolving to virtual paths (or host paths) across the VFS.
-    #[serde(default)]
-    pub places: IndexMap<String, String>,
+    #[serde(default, deserialize_with = "validate_places")]
+    pub places: IndexMap<String, serde_saphyr::Commented<String>>,
     /// Sandboxes permitted to open this Realm, keyed by local name. The key
     /// `"default"` is reserved and names the sandbox opened when the Realm
     /// itself is opened directly. Each sandbox must provide an absolute
