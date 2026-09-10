@@ -1,94 +1,133 @@
-use inforno_core::realm::{
-    ActiveRealm, Actor, Cap, GlobExpr, Power, RealmConfig, RealmMountConfig,
-    RoleConfig, Tier,
-};
+use inforno_core::realm::{ActiveRealm, RealmConfig};
 use inforno_core::realm_mount::VfsMaskSession;
 use inforno_core::realm_spawn::spawn_masked_command;
-use indexmap::IndexMap;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::{Deserialize, Serialize};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Define a minimal dummy realm config mounting the current directory
-    let mut mounts = IndexMap::new();
-    mounts.insert(
-        "/workspace".to_string(),
-        RealmMountConfig {
-            host: std::env::current_dir()?,
-            read_only: false,
-            hide_if: None,
-            read_only_if: None,
-            wildcards: vec![],
-            ignore: vec![],
-            description: None,
-            kind: None,
-            create_rules: vec![],
-        },
-    );
+#[derive(Deserialize, Debug)]
+pub enum DaemonCommand {
+    Start { id: String, realm: String, role: String, cmd: String },
+    Stop { id: String },
+    Ping,
+}
 
-    let mut roles = IndexMap::new();
-    roles.insert(
-        "tester".to_string(),
-        RoleConfig {
-            tier: Tier(2),
-            description: "Test Role".to_string(),
-            // Overrides are attached directly to the role config so they don't broadly cascade
-            powers: vec![Power {
-                span: GlobExpr::Match(vec![
-                    "**/.gitignore".to_string(),
-                    "**/.env".to_string(),
-                    "**/.cargo".to_string(),
-                    "**/.cargo/**".to_string(),
-                ]),
-                caps: vec![Cap::Read, Cap::Write, Cap::Create],
-                memo: Some("Unhide specific dotfiles".to_string()),
-                overrides: Some("dotfiles".to_string()),
-            }],
-        },
-    );
+#[derive(Serialize, Debug)]
+pub enum DaemonResponse {
+    Ok(String),
+    Error(String),
+}
 
-    let mut tiers = std::collections::BTreeMap::new();
-    tiers.insert(
-        2,
-        vec![Power {
-            span: GlobExpr::Match(vec!["**".to_string()]),
-            caps: vec![Cap::Read, Cap::Write, Cap::Create],
-            memo: Some("Full access".to_string()),
-            overrides: None,
-        }],
-    );
+struct Harness {
+    vfs_session: VfsMaskSession,
+    child: std::process::Child,
+}
 
-    let config = RealmConfig {
-        default_workspace: None,
-        hide_if: None,
-        read_only_if: None,
-        expressions: IndexMap::new(),
-        wildcards: IndexMap::new(),
-        mounts,
-        create_rules: vec![],
-        roles,
-        tiers,
+// Thread-safe registry mapping harness IDs to their active processes and FUSE mounts
+type Registry = Arc<Mutex<HashMap<String, Harness>>>;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
+        .ok_or("Could not find project directories")?;
+    
+    let cache_dir = proj_dirs.cache_dir();
+    std::fs::create_dir_all(cache_dir)?;
+    let socket_path = cache_dir.join("autorno.sock");
+
+    // Singleton Lock: Try binding. If the socket exists, ensure it's not a dead file from a crash.
+    if socket_path.exists() {
+        if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+            eprintln!("Daemon is already running at {:?}", socket_path);
+            std::process::exit(1);
+        } else {
+            std::fs::remove_file(&socket_path)?;
+        }
+    }
+
+    let listener = UnixListener::bind(&socket_path)?;
+    println!("Autorno daemon listening on {:?}", socket_path);
+
+    let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let reg_clone = registry.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(stream, reg_clone).await {
+                        eprintln!("Client error: {}", e);
+                    }
+                });
+            }
+            Err(e) => eprintln!("Accept error: {}", e),
+        }
+    }
+}
+
+async fn handle_client(mut stream: UnixStream, registry: Registry) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = vec![0; 4096];
+    let n = stream.read(&mut buf).await?;
+    if n == 0 { return Ok(()); }
+
+    let response = match serde_json::from_slice::<DaemonCommand>(&buf[..n]) {
+        Ok(cmd) => process_command(cmd, registry),
+        Err(e) => DaemonResponse::Error(format!("Invalid payload: {}", e)),
     };
 
-    // 2. Compile realm and spawn the FUSE background session
-    let active_realm = ActiveRealm::from_config("test_realm".to_string(), config)?;
-    let actor = Actor {
-        roles: vec!["tester".to_string()],
-    };
-    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, actor)?;
-
-    // Give FUSE a moment to fully initialize in the background thread
-    // before we try to bind-mount host folders into its synthetic directories.
-    //std::thread::sleep(std::time::Duration::from_millis(200));
-
-    println!("FUSE Mount ready at: {:?}", vfs_session.mount_path());
-    println!("Dropping into restricted bash shell. Type 'exit' to leave.\n");
-
-    // 3. Spawn the masked bash shell (empty cmd string triggers interactive bash)
-    // std::process::Command inherits stdin/stdout/stderr by default.
-    let mut child = spawn_masked_command(vfs_session.mount_path(), "")?;
-
-    // 4. Wait for the user to exit the shell before dropping/cleaning the FUSE mount
-    let status = child.wait()?;
-    println!("\nShell exited with status: {}", status);
-
+    let res_bytes = serde_json::to_vec(&response)?;
+    stream.write_all(&res_bytes).await?;
     Ok(())
+}
+
+fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
+    match cmd {
+        DaemonCommand::Start { id, realm, role, cmd } => {
+            let mut reg = registry.lock().unwrap();
+            if reg.contains_key(&id) {
+                return DaemonResponse::Error(format!("Harness '{}' already running", id));
+            }
+
+            match spawn_harness(&realm, &role, &cmd) {
+                Ok(harness) => {
+                    reg.insert(id.clone(), harness);
+                    DaemonResponse::Ok(format!("Started harness '{}'", id))
+                }
+                Err(e) => DaemonResponse::Error(e.to_string()),
+            }
+        }
+        DaemonCommand::Stop { id } => {
+            let mut reg = registry.lock().unwrap();
+            if let Some(mut harness) = reg.remove(&id) {
+                // 1. Kill the actual trapped process
+                let _ = harness.child.kill();
+                // 2. The `vfs_session` is dropped here, which cleanly unmounts the background FUSE driver
+                DaemonResponse::Ok(format!("Stopped harness '{}'", id))
+            } else {
+                DaemonResponse::Error(format!("Harness '{}' not found", id))
+            }
+        }
+        DaemonCommand::Ping => DaemonResponse::Ok("Pong".to_string()),
+    }
+}
+
+fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness, Box<dyn std::error::Error>> {
+    let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
+        .ok_or("Could not find project directories")?;
+    let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
+
+    let config_str = std::fs::read_to_string(&yaml_path)?;
+    let config = serde_saphyr::from_str::<RealmConfig>(&config_str)?;
+
+    let active_realm = ActiveRealm::from_config(realm_name.to_string(), config)?;
+    if !active_realm.has_role(role_name) {
+        return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
+    }
+
+    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
+    let child = spawn_masked_command(vfs_session.mount_path(), cmd)?;
+
+    Ok(Harness { vfs_session, child })
 }

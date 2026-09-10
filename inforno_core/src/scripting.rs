@@ -41,6 +41,47 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
         *pr_clone.lock().unwrap() = Some(text.to_string());
     });
 
+    // IPC Bridge to Autorno Daemon
+    engine.register_fn("autorno_ping", || -> String {
+        #[cfg(target_os = "linux")]
+        {
+            send_ipc_command(DaemonCommand::Ping)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "Error: Autorno daemon IPC is only supported on Linux.".to_string()
+        }
+    });
+
+    engine.register_fn("autorno_start", |id: rhai::ImmutableString, realm: rhai::ImmutableString, role: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
+        #[cfg(target_os = "linux")]
+        {
+            send_ipc_command(DaemonCommand::Start {
+                id: id.to_string(),
+                realm: realm.to_string(),
+                role: role.to_string(),
+                cmd: cmd.to_string(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "Error: Autorno daemon IPC is only supported on Linux.".to_string()
+        }
+    });
+
+    engine.register_fn("autorno_stop", |id: rhai::ImmutableString| -> String {
+        #[cfg(target_os = "linux")]
+        {
+            send_ipc_command(DaemonCommand::Stop {
+                id: id.to_string(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "Error: Autorno daemon IPC is only supported on Linux.".to_string()
+        }
+    });
+
     let result = engine.eval::<rhai::Dynamic>(script);
     let mut final_out = output.lock().unwrap().clone();
 
@@ -63,4 +104,55 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
 
     let requested = prompt_request.lock().unwrap().take();
     (final_str, requested)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+pub enum DaemonCommand {
+    Start { id: String, realm: String, role: String, cmd: String },
+    Stop { id: String },
+    Ping,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+pub enum DaemonResponse {
+    Ok(String),
+    Error(String),
+}
+
+#[cfg(target_os = "linux")]
+fn send_ipc_command(cmd: DaemonCommand) -> String {
+    let socket_path = match directories::ProjectDirs::from("", "", "inforno") {
+        Some(d) => d.cache_dir().join("autorno.sock"),
+        None => return "Error: Could not resolve cache directory".to_string(),
+    };
+
+    use std::os::unix::net::UnixStream;
+    use std::io::{Write, Read};
+
+    let mut stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(e) => return format!("Error connecting to daemon: {}", e),
+    };
+
+    let payload = match serde_json::to_string(&cmd) {
+        Ok(s) => s,
+        Err(e) => return format!("Error serializing command: {}", e),
+    };
+
+    if let Err(e) = stream.write_all(payload.as_bytes()) {
+        return format!("Error writing to socket: {}", e);
+    }
+
+    let mut response_buf = String::new();
+    if let Err(e) = stream.read_to_string(&mut response_buf) {
+        return format!("Error reading from socket: {}", e);
+    }
+
+    match serde_json::from_str::<DaemonResponse>(&response_buf) {
+        Ok(DaemonResponse::Ok(msg)) => msg,
+        Ok(DaemonResponse::Error(msg)) => format!("Daemon Error: {}", msg),
+        Err(_) => format!("Raw daemon response: {}", response_buf),
+    }
 }
