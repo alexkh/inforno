@@ -12,6 +12,16 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     if let Some(err) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("startup_error"))) {
         state.error_msg = Some(err);
         state.is_modal_open = true;
+        
+        if let Some(broken_yaml) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_yaml"))) {
+            state.realm_config_state.yaml_buffer = broken_yaml.clone();
+            state.realm_config_state.original_yaml = broken_yaml;
+            state.realm_config_state.is_fixing_broken_realm = true;
+            
+            if let Some(broken_name) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_name"))) {
+                state.realm_config_state.realm_name = Some(broken_name);
+            }
+        }
     }
 
     egui::Panel::top("top_panel").show(ui, |ui| {
@@ -240,11 +250,11 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                 // Save selection state
                                                 ctx.data_mut(|d| d.insert_temp(cache_id, place_name.clone()));
 
-                                                state.active_workspace_name = Some(place_vpath.clone());
+                                                state.active_workspace_name = Some(place_vpath.0.clone());
 
                                                 // Resolve virtual path to host path for the IDE
                                                 for mount in &realm.mounts {
-                                                    let p_clean = place_vpath.trim_matches('/');
+                                                    let p_clean = place_vpath.0.trim_matches('/');
                                                     let m_clean = mount.virtual_path.trim_matches('/');
 
                                                     let is_match = if m_clean.is_empty() {
@@ -287,10 +297,14 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                     // Initialize the YAML buffer if opening
                                     if state.show_realm_config {
                                         if let Some(active_realm) = &state.active_realm {
-                                            // Assuming ActiveRealm can be serialized back to RealmConfig
-                                            if let Ok(yaml) = serde_yaml::to_string(&active_realm.raw_config) {
-                                                state.realm_config_state.yaml_buffer = yaml.clone();
-                                                state.realm_config_state.original_yaml = yaml;
+                                            if let Some(realm_dir) = directories::ProjectDirs::from("", "", "inforno")
+                                                .map(|d| d.config_dir().join("realms").join(&active_realm.name)) {
+                                                
+                                                let yaml_path = realm_dir.join("realm2.yml");
+                                                if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
+                                                    state.realm_config_state.yaml_buffer = config_str.clone();
+                                                    state.realm_config_state.original_yaml = config_str;
+                                                }
                                             }
                                         }
                                     }

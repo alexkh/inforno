@@ -101,7 +101,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                                     
                                     if let Some(place_vpath) = realm.raw_config.places.get(&active_place_name) {
                                         for mount in &realm.mounts {
-                                            let p_clean = place_vpath.trim_matches('/');
+                                            let p_clean = place_vpath.0.trim_matches('/');
                                             let m_clean = mount.virtual_path.trim_matches('/');
 
                                             let is_match = if m_clean.is_empty() {

@@ -121,20 +121,15 @@ async fn main() -> eframe::Result {
             let mut pending_project_init: Option<PathBuf> = None;
             let mut active_realm_name: Option<String> = None;
 
-            // Determine target realm (CLI arg takes priority over global config)
+            // Determine target realm (CLI arg or positional argument takes top priority over global config)
             let mut target_realm = args.realm.clone();
             let mut positional_path = args.project_dir.clone();
 
-            // Allow positional argument to act as a realm name (e.g., `inforno inforno`)
+            // If a positional argument is passed, treat it strictly as the realm name
             if target_realm.is_none() {
                 if let Some(pos_arg) = &positional_path {
-                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
-                        let realm_dir = proj_dirs.config_dir().join("realms").join(pos_arg);
-                        if realm_dir.exists() && realm_dir.join("realm2.yml").exists() {
-                            target_realm = Some(pos_arg.clone());
-                            positional_path = None; // Consume it so it's not treated as a project dir
-                        }
-                    }
+                    target_realm = Some(pos_arg.clone());
+                    positional_path = None; // Consume it so it's not treated as a project dir
                 }
             }
 
@@ -143,9 +138,13 @@ async fn main() -> eframe::Result {
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                     let global_config_path = proj_dirs.config_dir().join("config.yml");
                     if let Ok(contents) = std::fs::read_to_string(global_config_path) {
-                        if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&contents) {
-                            if let Some(r) = val.get("default_realm").and_then(|v| v.as_str()) {
-                                target_realm = Some(r.to_string());
+                        #[derive(serde::Deserialize)]
+                        struct GlobalConfig {
+                            default_realm: Option<String>,
+                        }
+                        if let Ok(val) = serde_saphyr::from_str::<GlobalConfig>(&contents) {
+                            if let Some(r) = val.default_realm {
+                                target_realm = Some(r);
                             }
                         }
                     }
@@ -164,7 +163,7 @@ async fn main() -> eframe::Result {
                     let yaml_path = realm_dir.join("realm2.yml");
 
                     match std::fs::read_to_string(&yaml_path) {
-                        Ok(config_str) => match serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
+                        Ok(config_str) => match serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
                             Ok(realm_config) => {
                                 match inforno_core::realm::resolve_default_sandbox_path(&realm_config) {
                                     Ok(resolved) => {
@@ -182,7 +181,11 @@ async fn main() -> eframe::Result {
                             Err(e) => {
                                 let err_msg = format!("Failed to parse realm2.yml for realm '{}':\n{}", realm_name, e);
                                 eprintln!("{}", err_msg);
-                                cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                                cc.egui_ctx.data_mut(|d| {
+                                    d.insert_temp(egui::Id::new("startup_error"), err_msg);
+                                    d.insert_temp(egui::Id::new("broken_realm_yaml"), config_str);
+                                    d.insert_temp(egui::Id::new("broken_realm_name"), realm_name.clone());
+                                });
                             }
                         },
                         Err(e) => {

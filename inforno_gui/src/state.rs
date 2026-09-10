@@ -239,7 +239,7 @@ impl State {
             if let Some(realm_dir) = realm_dir {
                 let yaml_path = realm_dir.join("realm2.yml");
                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
-                    if let Ok(raw_config) = serde_yaml::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
+                    if let Ok(raw_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
 
                         // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
                         if let Ok(realm) = inforno_core::realm::ActiveRealm::from_config(realm_name, raw_config) {
@@ -249,12 +249,12 @@ impl State {
 
                             // 1. Try to grab the first globally defined Place
                             if let Some(first_place_vpath) = realm.raw_config.places.values().next() {
-                                selected_workspace_name = Some(first_place_vpath.clone());
+                                selected_workspace_name = Some(first_place_vpath.0.clone());
                                 
                                 let mut found = false;
                                 for mount in &realm.mounts {
-                                    if first_place_vpath.starts_with(&mount.virtual_path) {
-                                        let relative = first_place_vpath.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
+                                    if first_place_vpath.0.starts_with(&mount.virtual_path) {
+                                        let relative = first_place_vpath.0.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
                                         selected_project_root = Some(mount.host_path.join(relative));
                                         found = true;
                                         break;
@@ -262,7 +262,7 @@ impl State {
                                 }
                                 // Fallback for raw host paths
                                 if !found {
-                                    selected_project_root = Some(std::path::PathBuf::from(first_place_vpath));
+                                    selected_project_root = Some(std::path::PathBuf::from(&first_place_vpath.0));
                                 }
                             }
 
@@ -935,11 +935,21 @@ impl eframe::App for MyApp {
                         ui.label(&msg_text);
                         ui.add_space(20.0);
 
-                        if ui.button("OK").clicked() {
-                            // Close logic
-                            state.error_msg = None;
-                            state.is_modal_open = false;
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("OK").clicked() {
+                                // Close logic
+                                state.error_msg = None;
+                                state.is_modal_open = false;
+                            }
+                            
+                            if state.realm_config_state.is_fixing_broken_realm {
+                                if ui.button("🔧 Fix Configuration").clicked() {
+                                    state.error_msg = None;
+                                    state.is_modal_open = false;
+                                    state.show_realm_config = true; // Automatically open the editor
+                                }
+                            }
+                        });
                     });
                 });
 
