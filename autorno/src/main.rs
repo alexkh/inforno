@@ -22,8 +22,25 @@ pub enum DaemonResponse {
 }
 
 struct Harness {
-    vfs_session: VfsMaskSession,
+    // Same declaration-order-is-drop-order reasoning as `VfsMaskSession`:
+    // the child (and the mount namespace/bind-mounts it holds against
+    // `vfs_session`'s FUSE tree) should be gone before the FUSE session
+    // tears down. Defense-in-depth only — dropping a `Child` doesn't kill
+    // or wait for it, so this doesn't substitute for the explicit
+    // kill+wait in `Stop` above, just protects other drop paths.
     child: std::process::Child,
+    vfs_session: VfsMaskSession,
+}
+
+/// Host directories scanned when resolving a Realm's `bin` cascade
+/// (`ActiveRealm::allowed_binaries`). A binary needs to live in one of
+/// these to ever be selectable via `bin:` in `realm2.yml`, regardless of
+/// what the glob expression says.
+fn bin_search_dirs() -> Vec<std::path::PathBuf> {
+    ["/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 // Thread-safe registry mapping harness IDs to their active processes and FUSE mounts
@@ -31,6 +48,29 @@ type Registry = Arc<Mutex<HashMap<String, Harness>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "exec" {
+        let realm_name = &args[2];
+        let role_name = &args[3];
+        let cmd = if args.len() > 4 { &args[4] } else { "" };
+        
+        match spawn_harness(realm_name, role_name, cmd) {
+            Ok(mut harness) => {
+                let status = harness.child.wait().unwrap();
+                println!("\nProcess exited with status: {}", status);
+                println!("Closing terminal in 10 seconds...");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            Err(e) => {
+                eprintln!("\nFailed to start harness:\n{}", e);
+                println!("Closing terminal in 10 seconds...");
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                std::process::exit(1);
+            }
+        }
+    }
+
     let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
         .ok_or("Could not find project directories")?;
     
@@ -102,9 +142,18 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
         DaemonCommand::Stop { id } => {
             let mut reg = registry.lock().unwrap();
             if let Some(mut harness) = reg.remove(&id) {
-                // 1. Kill the actual trapped process
+                // 1. Kill the actual trapped process...
                 let _ = harness.child.kill();
-                // 2. The `vfs_session` is dropped here, which cleanly unmounts the background FUSE driver
+                // ...and wait for it to actually be reaped. `kill()` only
+                // sends the signal — without `wait()` the process may
+                // still be mid-exit, still holding its own mount namespace
+                // (built from bind-mounts of `vfs_session`'s FUSE tree)
+                // open underneath it. Dropping `vfs_session` while that's
+                // still true races the unmount, can fail silently, and
+                // leaves a dead mount behind that hangs any later access.
+                let _ = harness.child.wait();
+                // 2. `vfs_session` is dropped here (child now fully gone),
+                //    which cleanly unmounts the background FUSE driver.
                 DaemonResponse::Ok(format!("Stopped harness '{}'", id))
             } else {
                 DaemonResponse::Error(format!("Harness '{}' not found", id))
@@ -133,8 +182,11 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness
         return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
     }
 
+    // Resolved before `active_realm` is moved into `spawn_vfs` below.
+    let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
+
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
-    let child = spawn_masked_command(vfs_session.mount_path(), cmd)?;
+    let child = spawn_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries)?;
 
     Ok(Harness { vfs_session, child })
 }
@@ -152,10 +204,13 @@ fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, B
         return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
     }
 
+    // Resolved before `active_realm` is moved into `spawn_vfs` below.
+    let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
+
     // Spin up an ephemeral FUSE session for the duration of this single command
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
     
-    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd)?;
+    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries)?;
     let output = command.output()?;
     
     let mut result = String::new();

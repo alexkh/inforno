@@ -1,10 +1,10 @@
 #![cfg(target_os = "linux")]
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
 };
-use libc::{EACCES, ENOENT, O_RDWR, O_WRONLY};
+use libc::{EACCES, EEXIST, ENOENT, O_RDWR, O_WRONLY};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -128,6 +128,17 @@ impl Filesystem for RealmFuseFS {
 
         // Security check via ActiveRealm
         if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.role) {
+            // `secure_resolve_path` only validates the virtual->host mapping and
+            // visibility rules; it says nothing about whether anything actually
+            // lives at that path. Without this check, `lookup` reports a
+            // positive (phantom, zero-size) entry for ANY name under an
+            // accessible mount, so the kernel later rejects a real `mkdir`/
+            // `create` for that same name with EEXIST, believing the dentry
+            // already exists.
+            if !host_path.exists() {
+                reply.error(ENOENT);
+                return;
+            }
             let is_dir = host_path.is_dir();
             let is_protected = self.realm.is_path_read_only(&child_vpath);
             let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), is_dir);
@@ -164,6 +175,19 @@ impl Filesystem for RealmFuseFS {
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
         if let Some(node) = self.inodes.get(&ino).cloned() {
+            // If this inode is backed by a real host path that no longer
+            // exists (deleted via unlink/rmdir, or removed out-of-band), say
+            // so honestly instead of fabricating a fake stat — otherwise the
+            // kernel keeps treating a dead entry as alive forever, and later
+            // `mkdir`/`create` calls for the same name spuriously fail with
+            // EEXIST. Synthetic nodes (host_path == None) are unaffected.
+            if let Some(ref hp) = node.host_path {
+                if !hp.exists() {
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+
             let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
             let is_protected = vpath.map(|p| self.realm.is_path_read_only(&p)).unwrap_or(false);
             
@@ -198,7 +222,18 @@ impl Filesystem for RealmFuseFS {
                     return;
                 }
             }
-            reply.opened(ino, flags as u32);
+            // The second argument here is FUSE's own `FOPEN_*` reply
+            // bitmask (FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, ...), not an echo
+            // of the caller's open(2) flags — those are a different
+            // bitfield entirely. Passing `flags` through directly used to
+            // set FOPEN_DIRECT_IO on any write-mode open, since O_WRONLY
+            // and FOPEN_DIRECT_IO share bit 0. That silently broke mmap()
+            // on writable files (the kernel won't MAP_SHARED a direct_io
+            // file), which never showed up on plain read()/write() but
+            // breaks tools like rustc's archive writer that mmap their
+            // output. We don't need any special behavior here — every
+            // read/write re-resolves the host path fresh regardless.
+            reply.opened(ino, 0);
         } else {
             reply.error(ENOENT);
         }
@@ -417,10 +452,257 @@ impl Filesystem for RealmFuseFS {
             Ok(_) => {
                 let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), false);
                 let attr = self.stat_to_attr(ino, &Some(host_path), false, false);
-                reply.created(&TTL, &attr, 0, ino, flags as u32);
+                // See the matching note in `open()`: this is FUSE's
+                // FOPEN_* reply bitmask, not the caller's open flags.
+                reply.created(&TTL, &attr, 0, ino, 0);
             }
             Err(_) => {
                 reply.error(EACCES);
+            }
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = match parent_vpath {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let child_vpath = parent_vpath.join(name_str);
+
+        // Same Cap::Create gate as `create()` — directories are governed by
+        // the same powers/create_rules as regular files.
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.role) {
+            eprintln!("Realm VFS: denied mkdir '{}': {}", child_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+
+        match fs::create_dir(&host_path) {
+            Ok(_) => {
+                let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), true);
+                let attr = self.stat_to_attr(ino, &Some(host_path), true, false);
+                reply.entry(&TTL, &attr, 0);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                reply.error(EEXIST);
+            }
+            Err(_) => {
+                reply.error(EACCES);
+            }
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = match parent_vpath {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let child_vpath = parent_vpath.join(name_str);
+
+        // Deleting a file requires Write — Append alone (log-style grants)
+        // intentionally does not permit removing the file outright.
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.role) {
+            eprintln!("Realm VFS: denied unlink '{}': {}", child_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+
+        match fs::remove_file(&host_path) {
+            Ok(_) => {
+                if let Some(ino) = self.path_to_ino.remove(&child_vpath) {
+                    self.inodes.remove(&ino);
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                reply.error(e.raw_os_error().unwrap_or(EACCES));
+            }
+        }
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = match parent_vpath {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let child_vpath = parent_vpath.join(name_str);
+
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.role) {
+            eprintln!("Realm VFS: denied rmdir '{}': {}", child_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+
+        // fs::remove_dir mirrors rmdir(2): non-recursive, fails with
+        // ENOTEMPTY/EEXIST if the directory still has children. That's the
+        // correct behavior here — recursive deletion (`rm -rf`) is driven by
+        // the actor issuing a series of unlink/rmdir calls, not by us.
+        match fs::remove_dir(&host_path) {
+            Ok(_) => {
+                if let Some(ino) = self.path_to_ino.remove(&child_vpath) {
+                    self.inodes.remove(&ino);
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                reply.error(e.raw_os_error().unwrap_or(EACCES));
+            }
+        }
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let (name_str, newname_str) = match (name.to_str(), newname.to_str()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let newparent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == newparent { Some(path.clone()) } else { None });
+
+        let (parent_vpath, newparent_vpath) = match (parent_vpath, newparent_vpath) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let old_vpath = parent_vpath.join(name_str);
+        let new_vpath = newparent_vpath.join(newname_str);
+
+        // Making the old name disappear is a removal (same gate as `unlink`);
+        // establishing the new name is a creation (same gate as
+        // `create`/`mkdir`). This is exactly what lets a build tool's
+        // atomic write-then-rename pattern (e.g. rustc writing a temp file,
+        // then renaming it onto the final `.rmeta` name) work anywhere
+        // Create is already granted, with no separate "rename" capability.
+        if let Err(reason) = self.realm.can_access(&old_vpath, Cap::Write, &self.role) {
+            eprintln!("Realm VFS: denied rename source '{}': {}", old_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+        if let Err(reason) = self.realm.can_access(&new_vpath, Cap::Create, &self.role) {
+            eprintln!("Realm VFS: denied rename destination '{}': {}", new_vpath.display(), reason);
+            reply.error(EACCES);
+            return;
+        }
+
+        let old_host = match self.realm.secure_resolve_path(&old_vpath, &self.role) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+        let new_host = match self.realm.secure_resolve_path(&new_vpath, &self.role) {
+            Some(p) => p,
+            None => {
+                reply.error(EACCES);
+                return;
+            }
+        };
+
+        match fs::rename(&old_host, &new_host) {
+            Ok(_) => {
+                // Drop stale bookkeeping for a pre-existing destination
+                // (rename can silently overwrite), then move the source's
+                // inode, if tracked, to the new virtual path/host location.
+                if let Some(old_ino) = self.path_to_ino.remove(&new_vpath) {
+                    self.inodes.remove(&old_ino);
+                }
+                if let Some(ino) = self.path_to_ino.remove(&old_vpath) {
+                    if let Some(node) = self.inodes.get_mut(&ino) {
+                        node.host_path = Some(new_host.clone());
+                    }
+                    self.path_to_ino.insert(new_vpath.clone(), ino);
+                }
+                reply.ok();
+            }
+            Err(e) => {
+                reply.error(e.raw_os_error().unwrap_or(EACCES));
             }
         }
     }

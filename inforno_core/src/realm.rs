@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -156,6 +156,12 @@ pub struct RoleConfig {
     pub intro: String,
     #[serde(default)]
     pub boss: Option<String>,
+    /// Glob expression selecting extra host binaries (matched by bare
+    /// basename) to expose in `/bin`, on top of whatever the Realm-wide
+    /// `bin` and this role's Tier(s) already contribute. See
+    /// `RealmConfig::bin` for how the cascade combines.
+    #[serde(default)]
+    pub bin: Option<GlobExpr>,
 }
 
 /// Declares that a mount contains more than one selectable root — e.g. a
@@ -223,6 +229,12 @@ pub(crate) fn is_safe_path_component(s: &str) -> bool {
 pub struct TierConfig {
     #[serde(default)]
     pub powers: Vec<Power>,
+    /// Glob expression selecting extra host binaries (matched by bare
+    /// basename) to expose in `/bin` to every role at or above this tier —
+    /// unioned with the Realm-wide `bin` and whatever the role adds itself.
+    /// See `RealmConfig::bin` for how the cascade combines.
+    #[serde(default)]
+    pub bin: Option<GlobExpr>,
 }
 
 fn validate_places<'de, D>(deserializer: D) -> Result<IndexMap<String, serde_saphyr::Commented<String>>, D::Error>
@@ -267,6 +279,18 @@ pub struct RealmConfig {
     /// at load time. Purely a config-authoring convenience.
     #[serde(default, rename = "spans")]
     pub expressions: IndexMap<String, GlobExpr>,
+    /// Glob expression selecting which host binaries (matched by bare
+    /// basename, e.g. `cc`, `git`) are exposed in a spawned process's
+    /// chroot `/bin`, on top of the fixed coreutils list (`bash`, `ls`,
+    /// `cat`, ...) that's always present regardless of this cascade. This
+    /// is the base of the `bin` cascade — applied first, then unioned with
+    /// whatever the actor's Tier(s) (`TierConfig::bin`) and Role
+    /// (`RoleConfig::bin`) add on top. A match at ANY level is enough to
+    /// expose a binary — "everything except X" is expressed within one
+    /// level's own expression (`all` + `not`), not by subtracting across
+    /// levels. See `ActiveRealm::bin_is_selected`.
+    #[serde(default)]
+    pub bin: Option<GlobExpr>,
 }
 
 /// Resolves the on-disk path for `key` in `config.sandboxes`. `studies_dir`
@@ -432,6 +456,7 @@ pub struct CompiledRole {
     pub intro: Arc<str>,
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
+    pub bin: Option<Arc<CompiledExpr>>,
 }
 
 #[derive(Clone)]
@@ -443,6 +468,12 @@ pub struct ActiveRealm {
     /// Tier number -> powers cascading from that tier upward. `BTreeMap`
     /// keeps numeric order for `range()` queries during cascade resolution.
     pub tiers: BTreeMap<u32, Vec<CompiledPower>>,
+    /// Tier number -> compiled `bin` expression, mirroring `tiers` above.
+    /// Sparse: a tier with no `bin` declared contributes nothing to the cascade.
+    pub tier_bins: BTreeMap<u32, Arc<CompiledExpr>>,
+    /// The Realm-wide `bin` expression (from `RealmConfig::bin`), applied
+    /// first in the cascade — see `bin_is_selected`.
+    pub bin: Option<Arc<CompiledExpr>>,
     /// Plain-English capability descriptions per role name, computed once at
     /// construction time. Correctness depends on `ActiveRealm` always being
     /// rebuilt fresh via `from_config` when realm2.yml changes, rather than
@@ -487,12 +518,19 @@ impl ActiveRealm {
         }
 
         let mut tiers: BTreeMap<u32, Vec<CompiledPower>> = BTreeMap::new();
+        let mut tier_bins: BTreeMap<u32, Arc<CompiledExpr>> = BTreeMap::new();
         for (&tier_num, tier_cfg) in &raw_config.tiers {
             let compiled = tier_cfg.powers
                 .iter()
                 .map(|p| CompiledPower::compile(p, &raw_config.expressions))
                 .collect::<Result<Vec<_>, _>>()?;
             tiers.insert(tier_num, compiled);
+
+            if let Some(expr) = &tier_cfg.bin {
+                let compiled_bin = CompiledExpr::compile(expr, &raw_config.expressions)
+                    .map_err(|e| format!("In tier {}'s `bin`: {}", tier_num, e))?;
+                tier_bins.insert(tier_num, Arc::new(compiled_bin));
+            }
         }
 
         // --- Roles: validate tier 0 has no powers, tier <= 9, compile powers. ---
@@ -501,10 +539,11 @@ impl ActiveRealm {
             if rcfg.tier.0 > Tier::MAX.0 {
                 return Err(format!("Role '{}' has tier {}, which exceeds the maximum of {}", rname, rcfg.tier.0, Tier::MAX.0));
             }
-            if rcfg.tier == Tier::NONE && !rcfg.powers.is_empty() {
+            if rcfg.tier == Tier::NONE && (!rcfg.powers.is_empty() || rcfg.bin.is_some()) {
                 return Err(format!(
-                    "Role '{}' is at tier 0 (no access, hardcoded) but declares its own powers. \
-                     Tier 0 can never receive any power — remove the powers or raise the tier.",
+                    "Role '{}' is at tier 0 (no access, hardcoded) but declares its own powers \
+                     and/or a `bin` expression. Tier 0 can never receive any power or extra \
+                     binary, of any kind — remove them or raise the tier.",
                     rname
                 ));
             }
@@ -515,6 +554,14 @@ impl ActiveRealm {
                 .map(|p| CompiledPower::compile(p, &raw_config.expressions))
                 .collect::<Result<Vec<_>, _>>()?;
 
+            let compiled_bin = match &rcfg.bin {
+                Some(expr) => Some(Arc::new(
+                    CompiledExpr::compile(expr, &raw_config.expressions)
+                        .map_err(|e| format!("In role '{}'s `bin`: {}", rname, e))?,
+                )),
+                None => None,
+            };
+
             roles.insert(
                 rname.clone(),
                 CompiledRole {
@@ -522,6 +569,7 @@ impl ActiveRealm {
                     intro: rcfg.intro.as_str().into(),
                     boss: rcfg.boss.clone(),
                     powers: compiled_powers,
+                    bin: compiled_bin,
                 },
             );
         }
@@ -561,12 +609,22 @@ impl ActiveRealm {
             }
         }
 
+        let bin = match &raw_config.bin {
+            Some(expr) => Some(Arc::new(
+                CompiledExpr::compile(expr, &raw_config.expressions)
+                    .map_err(|e| format!("In the Realm's top-level `bin`: {}", e))?,
+            )),
+            None => None,
+        };
+
         let mut realm = Self {
             name,
             mounts,
             raw_config,
             roles,
             tiers,
+            tier_bins,
+            bin,
             role_capabilities: HashMap::new(),
         };
 
@@ -599,28 +657,102 @@ impl ActiveRealm {
         out
     }
 
+    /// Whether `candidate` (a bare binary basename, e.g. `Path::new("cc")`)
+    /// is selected by `role_name`'s effective `bin` expression. Resolution
+    /// mirrors `effective_powers`: the Realm-wide `bin` (if any) is checked
+    /// first, then every cascading tier's `bin` from `2..=role.tier`, then
+    /// the role's own `bin` — a match at ANY level is sufficient (a union
+    /// across levels). Excluding names ("everything except X") is
+    /// expressed within a single level's own boolean expression
+    /// (`all` + `not`), not by subtracting across levels. Tier 0 (`NONE`)
+    /// is "provably zero access, of any kind" by design (see `Tier`), so it
+    /// short-circuits to `false` even for the Realm-wide `bin`.
+    pub fn bin_is_selected(&self, role_name: &str, candidate: &Path) -> bool {
+        let Some(role) = self.roles.get(role_name) else { return false };
+        if role.tier == Tier::NONE {
+            return false;
+        }
+
+        if let Some(expr) = &self.bin {
+            if expr.is_match(candidate) {
+                return true;
+            }
+        }
+
+        if role.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, expr) in self.tier_bins.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+                if expr.is_match(candidate) {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(expr) = &role.bin {
+            if expr.is_match(candidate) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Scans `search_dirs` (host directories, e.g. `/usr/bin`,
+    /// `/usr/local/bin`) for entries whose basename is selected by
+    /// `role_name`'s effective `bin` expression (`bin_is_selected`),
+    /// returning their absolute host paths. Used to decide which extra
+    /// binaries get bind-mounted into a spawned process's chroot `/bin`,
+    /// on top of the fixed coreutils list `realm_spawn.rs` always mounts.
+    /// A basename already seen in an earlier dir is skipped, so distros
+    /// where e.g. `/bin` symlinks to `/usr/bin` don't produce duplicate
+    /// mount attempts for the same name.
+    pub fn allowed_binaries(&self, role_name: &str, search_dirs: &[PathBuf]) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for dir in search_dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name() else { continue };
+                if !seen.insert(name.to_os_string()) {
+                    continue;
+                }
+                if self.bin_is_selected(role_name, Path::new(name)) {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `rel_path` (relative to a mount root) is hidden purely by the
     /// built-in dotfile rule, i.e. any path component starts with `.`. This
-    /// is unconditional — no tier, nothing but an explicit
-    /// `Power { caps: [visibility], overrides: "dotfiles" }` held directly
-    /// by a role (never cascaded from a tier) can unhide anything matched
-    /// by it. It exists so Realm definitions (e.g. under `.inforno/`) can
-    /// never be discovered or blindly created by any role, at any tier,
-    /// unless a config author deliberately carves out an exception by name.
+    /// is unconditional by default — nothing but an explicit
+    /// `Power { caps: [visibility], overrides: "dotfiles" }` matching the
+    /// path can unhide it, whether that power is declared directly on a
+    /// role or cascaded in from a tier. It exists so Realm definitions
+    /// (e.g. under `.inforno/`) and other sensitive dotfiles stay invisible
+    /// by default, unless a config author deliberately carves out an
+    /// exception by name (tier-level exceptions are intentionally allowed —
+    /// build tooling like Cargo relies heavily on dotfiles such as
+    /// `target/.fingerprint/`, and gating that per-role only would make
+    /// tiers like the `**/target/**` grant above unworkable).
     fn is_builtin_dotfile_path(rel_path: &Path) -> bool {
         rel_path
             .components()
             .any(|c| c.as_os_str().to_str().map(|s| s.starts_with('.')).unwrap_or(false))
     }
 
-    /// True if a role held by `actor` carries, in its OWN `powers` (NOT
-    /// cascaded in from a tier), a `visibility` power overriding "dotfiles"
-    /// for this path. Deliberately role-only: unhiding a Realm's own
-    /// config directory must be a per-role decision, never an incidental
-    /// side effect of a broad tier-level power.
+    /// True if `role_name`'s effective powers — its own `powers` plus
+    /// whatever cascades in from its tier — include one overriding
+    /// "dotfiles" for this path. Tier-level overrides are allowed
+    /// deliberately: build tooling (Cargo, etc.) writes constantly to
+    /// dotfiles/dot-directories under paths like `target/`, and requiring
+    /// every role to redeclare that exception itself, rather than
+    /// inheriting it from a shared tier grant (e.g. the `**/target/**`
+    /// power), would make tiers largely useless for this case.
     fn dotfile_override_applies(&self, rel_path: &Path, role_name: &str) -> bool {
         let Some(role) = self.roles.get(role_name) else { return false };
-        role.powers.iter().any(|p| {
+        self.effective_powers(role).iter().any(|p| {
             p.overrides.as_deref() == Some("dotfiles")
                 && p.matches_path(rel_path)
         })

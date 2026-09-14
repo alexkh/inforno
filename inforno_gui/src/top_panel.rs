@@ -309,6 +309,90 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         }
                                     }
                                 }
+
+                            #[cfg(target_os = "linux")]
+                            {
+                                // --- ⚙ Autorno Daemon Status ---
+                                let now = std::time::Instant::now();
+                                let (is_running, last_check) = ctx.data_mut(|d| {
+                                    d.get_temp::<(bool, std::time::Instant)>(egui::Id::new("autorno_status"))
+                                     .unwrap_or((false, now - std::time::Duration::from_secs(10)))
+                                });
+                                
+                                let mut new_running = is_running;
+                                // Ping the Unix socket once every 2 seconds to avoid spanning too many syscalls
+                                if now.duration_since(last_check).as_secs_f32() > 2.0 {
+                                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                                        let socket_path = proj_dirs.cache_dir().join("autorno.sock");
+                                        new_running = std::os::unix::net::UnixStream::connect(socket_path).is_ok();
+                                    }
+                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (new_running, now)));
+                                }
+
+                                let (status_color, status_text) = if new_running {
+                                    (egui::Color32::GREEN, "🟢")
+                                } else {
+                                    (ui.visuals().error_fg_color, "🔴")
+                                };
+
+                                if ui.button(egui::RichText::new(status_text).color(status_color))
+                                    .on_hover_text(if new_running { "Autorno daemon is running" } else { "Start Autorno daemon" })
+                                    .clicked() 
+                                {
+                                    if !new_running {
+                                        if let Ok(exe_path) = std::env::current_exe() {
+                                            if let Some(parent) = exe_path.parent() {
+                                                let autorno_path = parent.join("autorno");
+                                                let _ = std::process::Command::new(autorno_path).spawn();
+                                                // Force an immediate re-check next frame
+                                                ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (false, now - std::time::Duration::from_secs(10))));
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // --- 💻 Terminal ---
+                                if ui.button("💻").on_hover_text("Open interactive terminal in VFS (as gui)").clicked() {
+                                    if let Ok(exe_path) = std::env::current_exe() {
+                                        if let Some(parent) = exe_path.parent() {
+                                            let autorno_path = parent.join("autorno");
+                                            
+                                            // Extract the first bookmark's path. 
+                                            // (Ensure `places` uses IndexMap in your Realm struct to guarantee order).
+                                            // If your places are structs requiring the mandatory 'intro' field, change this to: .map(|p| p.path.clone())
+                                            let start_dir = realm.raw_config.places.values().next()
+                                                .map(|v| v.0.clone())
+                                                .unwrap_or_else(|| "/".to_string());
+                                                
+                                            let shell_cmd = format!("cd {} && exec bash", start_dir);
+                                            
+                                            // Fallback chain for different Desktop Environments
+                                            let terms = [
+                                                ("x-terminal-emulator", vec!["-e"]),
+                                                ("gnome-terminal", vec!["--"]),
+                                                ("konsole", vec!["-e"]),
+                                                ("alacritty", vec!["-e"]),
+                                                ("kitty", vec!["--"]),
+                                            ];
+                                            
+                                            for (term, t_args) in terms {
+                                                if std::process::Command::new(term)
+                                                    .args(&t_args)
+                                                    .arg(&autorno_path)
+                                                    .arg("exec")
+                                                    .arg(&realm.name)
+                                                    .arg("gui")
+                                                    .arg(&shell_cmd)
+                                                    .spawn()
+                                                    .is_ok() 
+                                                {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         });
                     }
             });

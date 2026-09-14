@@ -19,8 +19,16 @@ use crate::realm_vfs::RealmFuseFS;
 /// all VfsMasks, can race exactly as with any two processes writing to the
 /// same file without coordination.
 pub struct VfsMaskSession {
-    mount_dir: tempfile::TempDir,
+    // Declaration order IS drop order for struct fields in Rust (top to
+    // bottom — unlike local variables, which drop in reverse). The FUSE
+    // session must be unmounted before we ever try to remove the directory
+    // it's mounted on: removing a still-mounted directory just fails
+    // (EBUSY), and `TempDir`'s Drop silently swallows that error, leaving
+    // an orphaned mountpoint behind with no daemon left to answer it. Any
+    // later access to it (even an `ls -la` statting it) then hangs forever
+    // waiting for a FUSE reply that will never come.
     _session_handle: fuser::BackgroundSession,
+    mount_dir: tempfile::TempDir,
 }
 
 impl VfsMaskSession {
@@ -28,7 +36,10 @@ impl VfsMaskSession {
     /// as enforced for the given Role for the lifetime of the session — a
     /// different Role needs its own `spawn_vfs` call and its own mount.
     pub fn spawn_vfs(realm: ActiveRealm, role: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let mount_dir = tempfile::TempDir::new()?;
+        let base_dir = std::env::temp_dir().join("autorno_mounts");
+        std::fs::create_dir_all(&base_dir)?;
+        let mount_dir = tempfile::Builder::new().prefix("vfs_").tempdir_in(&base_dir)?;
+        
         let fs = RealmFuseFS::new(realm, role);
 
         // Intentionally omitting MountOption::RO to allow FUSE to selectively handle write operations.
@@ -37,8 +48,8 @@ impl VfsMaskSession {
         ])?;
 
         Ok(Self {
-            mount_dir,
             _session_handle: session,
+            mount_dir,
         })
     }
 
@@ -86,10 +97,11 @@ mod tests {
             intro: "Test Role".to_string(),
             boss: None,
             powers: vec![],
+            bin: None,
         });
 
         let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert(2, crate::realm::TierConfig { powers: vec![
+        tiers.insert(2, crate::realm::TierConfig { bin: None, powers: vec![
             Power {
                 span: GlobExpr::Match { match_globs: vec!["**".to_string()] },
                 caps: vec![Cap::Read],
@@ -118,6 +130,7 @@ mod tests {
             sandboxes: IndexMap::new(),
             roles,
             tiers,
+            bin: None,
         };
 
         // 3. Compile Realm and Spawn FUSE Driver
