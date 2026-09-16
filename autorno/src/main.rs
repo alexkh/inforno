@@ -35,7 +35,10 @@ struct Harness {
 /// Host directories scanned when resolving a Realm's `bin` cascade
 /// (`ActiveRealm::allowed_binaries`). A binary needs to live in one of
 /// these to ever be selectable via `bin:` in `realm2.yml`, regardless of
-/// what the glob expression says.
+/// what the glob expression says. Each match is later bind-mounted into
+/// the chroot at the corresponding path (`/bin`, `/usr/bin`, or
+/// `/usr/local/bin`) rather than always into `/bin` — see
+/// `build_masked_command`'s step 6b in `realm_spawn.rs`.
 fn bin_search_dirs() -> Vec<std::path::PathBuf> {
     ["/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]
         .iter()

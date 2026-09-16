@@ -342,6 +342,8 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                     if !new_running {
                                         if let Ok(exe_path) = std::env::current_exe() {
                                             if let Some(parent) = exe_path.parent() {
+                                                inforno_core::realm_mount::cleanup_orphaned_mounts();
+                                                
                                                 let autorno_path = parent.join("autorno");
                                                 let _ = std::process::Command::new(autorno_path).spawn();
                                                 // Force an immediate re-check next frame

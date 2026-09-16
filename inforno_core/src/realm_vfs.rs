@@ -31,6 +31,18 @@ pub struct RealmFuseFS {
     role: String,
     inodes: HashMap<u64, VNode>,
     path_to_ino: HashMap<PathBuf, u64>,
+    /// Reverse index of `path_to_ino`, maintained in lockstep on every
+    /// insert/remove. FUSE callbacks are handed an inode number and need
+    /// its virtual path far more often than the other direction — to
+    /// resolve a parent's path for a child lookup, or a node's path to
+    /// open its backing host file. Without this, every single lookup /
+    /// getattr / read / write / create / mkdir / unlink / rmdir / rename /
+    /// readdir call had to linearly scan the entire `path_to_ino` map
+    /// looking for a matching value — an O(N) cost, N = every path this
+    /// session has ever seen, paid on EVERY filesystem call. That's the
+    /// dominant reason large builds get disproportionately slower as they
+    /// touch more files.
+    ino_to_path: HashMap<u64, PathBuf>,
     next_ino: u64,
 }
 
@@ -41,6 +53,7 @@ impl RealmFuseFS {
             role,
             inodes: HashMap::new(),
             path_to_ino: HashMap::new(),
+            ino_to_path: HashMap::new(),
             next_ino: 1,
         };
 
@@ -54,8 +67,26 @@ impl RealmFuseFS {
             return ino;
         }
 
-        let ino = self.next_ino;
-        self.next_ino += 1;
+        let mut ino = if let Some(ref hp) = host_path {
+            if let Ok(meta) = fs::metadata(hp) {
+                use std::os::unix::fs::MetadataExt;
+                meta.ino()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        if ino == 0 || self.inodes.contains_key(&ino) {
+            loop {
+                ino = self.next_ino;
+                self.next_ino = self.next_ino.wrapping_add(1);
+                if !self.inodes.contains_key(&ino) {
+                    break;
+                }
+            }
+        }
 
         let node = VNode {
             ino,
@@ -65,29 +96,37 @@ impl RealmFuseFS {
 
         self.inodes.insert(ino, node);
         self.path_to_ino.insert(vpath.to_path_buf(), ino);
+        self.ino_to_path.insert(ino, vpath.to_path_buf());
         ino
     }
 
     fn stat_to_attr(&self, ino: u64, host_path: &Option<PathBuf>, is_dir: bool, is_protected: bool) -> FileAttr {
-        let (size, perm) = if let Some(hp) = host_path {
+        let (size, perm, atime, mtime, ctime, crtime) = if let Some(hp) = host_path {
             if let Ok(meta) = fs::metadata(hp) {
-                // If protected, strip write bits completely (0o444). Otherwise, grant read/write (0o644).
-                (meta.len(), if is_dir { 0o755 } else { if is_protected { 0o444 } else { 0o644 } })
+                use std::os::unix::fs::PermissionsExt;
+                let host_perm = (meta.permissions().mode() & 0o777) as u16;
+                
+                let atime = meta.accessed().unwrap_or(UNIX_EPOCH);
+                let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+                let crtime = meta.created().unwrap_or(UNIX_EPOCH);
+                
+                // If protected, strip write bits. Otherwise, mirror host permissions (including +x).
+                (meta.len(), if is_protected { host_perm & 0o555 } else { host_perm }, atime, mtime, mtime, crtime)
             } else {
-                (0, 0o555)
+                (0, 0o555, UNIX_EPOCH, UNIX_EPOCH, UNIX_EPOCH, UNIX_EPOCH)
             }
         } else {
-            (0, if is_dir { 0o755 } else { 0o444 })
+            (0, if is_dir { 0o755 } else { 0o444 }, UNIX_EPOCH, UNIX_EPOCH, UNIX_EPOCH, UNIX_EPOCH)
         };
 
         FileAttr {
             ino,
             size,
             blocks: (size + 511) / 512,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
+            atime,
+            mtime,
+            ctime,
+            crtime,
             kind: if is_dir { FileType::Directory } else { FileType::RegularFile },
             perm,
             nlink: 1,
@@ -112,9 +151,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.inodes.get(&parent).and_then(|_node| {
-            self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path) } else { None })
-        });
+        let parent_vpath = self.inodes.get(&parent).and_then(|_node| self.ino_to_path.get(&parent));
 
         let parent_vpath = match parent_vpath {
             Some(p) => p.clone(),
@@ -188,7 +225,7 @@ impl Filesystem for RealmFuseFS {
                 }
             }
 
-            let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+            let vpath = self.ino_to_path.get(&ino).cloned();
             let is_protected = vpath.map(|p| self.realm.is_path_read_only(&p)).unwrap_or(false);
             
             let attr = self.stat_to_attr(ino, &node.host_path, node.is_dir, is_protected);
@@ -200,7 +237,7 @@ impl Filesystem for RealmFuseFS {
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         if self.inodes.contains_key(&ino) {
-            let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+            let vpath = self.ino_to_path.get(&ino).cloned();
             
             if let Some(p) = vpath {
                 let is_write_access = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
@@ -250,7 +287,7 @@ impl Filesystem for RealmFuseFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+        let vpath = self.ino_to_path.get(&ino).cloned();
         if let Some(ref p) = vpath {
             if self.realm.can_access(p, Cap::Read, &self.role).is_err() {
                 reply.error(EACCES);
@@ -286,7 +323,7 @@ impl Filesystem for RealmFuseFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+        let vpath = self.ino_to_path.get(&ino).cloned();
         let mut can_write = false;
         let mut can_append = false;
 
@@ -342,7 +379,7 @@ impl Filesystem for RealmFuseFS {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _mode: Option<u32>,
+        mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
@@ -364,13 +401,12 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let vpath = self.path_to_ino.iter().find_map(|(p, &i)| if i == ino { Some(p.clone()) } else { None });
+        let vpath = self.ino_to_path.get(&ino).cloned();
         let is_protected = vpath.as_ref().map(|p| self.realm.is_path_read_only(p)).unwrap_or(false);
 
-        // Only actually mutate the host file if a size change (e.g. truncate) was requested.
-        if let Some(new_size) = size {
+        if size.is_some() || mode.is_some() || _atime.is_some() || _mtime.is_some() {
             if let Some(ref p) = vpath {
-                // Truncation STRICTLY requires Write. Append is intentionally insufficient.
+                // Truncation, permission, and timestamp changes require Write access.
                 if self.realm.can_access(p, Cap::Write, &self.role).is_err() {
                     reply.error(EACCES);
                     return;
@@ -381,16 +417,48 @@ impl Filesystem for RealmFuseFS {
             }
             
             if let Some(ref host_path) = node.host_path {
-                match OpenOptions::new().write(true).open(host_path) {
-                    Ok(file) => {
-                        if file.set_len(new_size).is_err() {
+                if _atime.is_some() || _mtime.is_some() {
+                    if let Ok(file) = fs::File::open(host_path) {
+                        let mut times = fs::FileTimes::new();
+                        if let Some(at) = _atime {
+                            times = times.set_accessed(match at {
+                                TimeOrNow::SpecificTime(st) => st,
+                                TimeOrNow::Now => SystemTime::now(),
+                            });
+                        }
+                        if let Some(mt) = _mtime {
+                            times = times.set_modified(match mt {
+                                TimeOrNow::SpecificTime(st) => st,
+                                TimeOrNow::Now => SystemTime::now(),
+                            });
+                        }
+                        let _ = file.set_times(times);
+                    }
+                }
+
+                if let Some(new_size) = size {
+                    match OpenOptions::new().write(true).open(host_path) {
+                        Ok(file) => {
+                            if file.set_len(new_size).is_err() {
+                                reply.error(EACCES);
+                                return;
+                            }
+                        }
+                        Err(_) => {
                             reply.error(EACCES);
                             return;
                         }
                     }
-                    Err(_) => {
-                        reply.error(EACCES);
-                        return;
+                }
+
+                if let Some(new_mode) = mode {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(mut perms) = fs::metadata(host_path).map(|m| m.permissions()) {
+                        perms.set_mode(new_mode);
+                        if fs::set_permissions(host_path, perms).is_err() {
+                            reply.error(EACCES);
+                            return;
+                        }
                     }
                 }
             }
@@ -405,7 +473,7 @@ impl Filesystem for RealmFuseFS {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         flags: i32,
         reply: ReplyCreate,
@@ -418,7 +486,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&parent).cloned();
         let parent_vpath = match parent_vpath {
             Some(p) => p,
             None => {
@@ -448,7 +516,8 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        match OpenOptions::new().write(true).create_new(true).open(&host_path) {
+        use std::os::unix::fs::OpenOptionsExt;
+        match OpenOptions::new().write(true).create_new(true).mode(mode).open(&host_path) {
             Ok(_) => {
                 let ino = self.get_or_create_ino(&child_vpath, Some(host_path.clone()), false);
                 let attr = self.stat_to_attr(ino, &Some(host_path), false, false);
@@ -479,7 +548,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&parent).cloned();
         let parent_vpath = match parent_vpath {
             Some(p) => p,
             None => {
@@ -530,7 +599,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&parent).cloned();
         let parent_vpath = match parent_vpath {
             Some(p) => p,
             None => {
@@ -561,6 +630,7 @@ impl Filesystem for RealmFuseFS {
             Ok(_) => {
                 if let Some(ino) = self.path_to_ino.remove(&child_vpath) {
                     self.inodes.remove(&ino);
+                    self.ino_to_path.remove(&ino);
                 }
                 reply.ok();
             }
@@ -579,7 +649,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&parent).cloned();
         let parent_vpath = match parent_vpath {
             Some(p) => p,
             None => {
@@ -612,6 +682,7 @@ impl Filesystem for RealmFuseFS {
             Ok(_) => {
                 if let Some(ino) = self.path_to_ino.remove(&child_vpath) {
                     self.inodes.remove(&ino);
+                    self.ino_to_path.remove(&ino);
                 }
                 reply.ok();
             }
@@ -639,8 +710,8 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == parent { Some(path.clone()) } else { None });
-        let newparent_vpath = self.path_to_ino.iter().find_map(|(path, &ino)| if ino == newparent { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&parent).cloned();
+        let newparent_vpath = self.ino_to_path.get(&newparent).cloned();
 
         let (parent_vpath, newparent_vpath) = match (parent_vpath, newparent_vpath) {
             (Some(a), Some(b)) => (a, b),
@@ -692,12 +763,14 @@ impl Filesystem for RealmFuseFS {
                 // inode, if tracked, to the new virtual path/host location.
                 if let Some(old_ino) = self.path_to_ino.remove(&new_vpath) {
                     self.inodes.remove(&old_ino);
+                    self.ino_to_path.remove(&old_ino);
                 }
                 if let Some(ino) = self.path_to_ino.remove(&old_vpath) {
                     if let Some(node) = self.inodes.get_mut(&ino) {
                         node.host_path = Some(new_host.clone());
                     }
                     self.path_to_ino.insert(new_vpath.clone(), ino);
+                    self.ino_to_path.insert(ino, new_vpath.clone());
                 }
                 reply.ok();
             }
@@ -723,7 +796,7 @@ impl Filesystem for RealmFuseFS {
             }
         };
 
-        let parent_vpath = self.path_to_ino.iter().find_map(|(path, &i)| if i == ino { Some(path.clone()) } else { None });
+        let parent_vpath = self.ino_to_path.get(&ino).cloned();
         let parent_vpath = match parent_vpath {
             Some(p) => p,
             None => {

@@ -18,6 +18,53 @@ use crate::realm_vfs::RealmFuseFS;
 /// are reachable. Concurrent access from multiple VfsMasks, or from outside
 /// all VfsMasks, can race exactly as with any two processes writing to the
 /// same file without coordination.
+pub fn cleanup_orphaned_mounts() {
+    let base_dir = if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+        proj_dirs.cache_dir().join("autorno_mounts")
+    } else {
+        std::env::temp_dir().join("autorno_mounts")
+    };
+    
+    if let Ok(entries) = std::fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.file_name().unwrap_or_default().to_string_lossy().starts_with("vfs_") {
+                // Ping the mount to see if the FUSE daemon is still answering
+                match std::fs::metadata(&path) {
+                    Ok(_) => {
+                        // Daemon is alive and responded. Leave this mount alone!
+                        continue;
+                    }
+                    Err(e) => {
+                        // OS Error 107 (ENOTCONN): "Transport endpoint is not connected"
+                        // This guarantees the FUSE daemon died but the mount is stuck.
+                        if e.raw_os_error() == Some(libc::ENOTCONN) {
+                            // -u: unmount, -z: lazy (force detach even if a terminal is still inside)
+                            let _ = std::process::Command::new("fusermount3")
+                                .args(["-u", "-z"])
+                                .arg(&path)
+                                .output();
+                            // Clean up the leftover directory
+                            let _ = std::fs::remove_dir(&path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Spawns a background worker thread that cleans orphaned mounts at regular intervals.
+pub fn spawn_orphan_reaper(interval: std::time::Duration) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("autorno-orphan-reaper".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(interval);
+            cleanup_orphaned_mounts();
+        })
+        .expect("Failed to spawn autorno orphan reaper thread")
+}
+
 pub struct VfsMaskSession {
     // Declaration order IS drop order for struct fields in Rust (top to
     // bottom — unlike local variables, which drop in reverse). The FUSE
@@ -36,7 +83,11 @@ impl VfsMaskSession {
     /// as enforced for the given Role for the lifetime of the session — a
     /// different Role needs its own `spawn_vfs` call and its own mount.
     pub fn spawn_vfs(realm: ActiveRealm, role: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let base_dir = std::env::temp_dir().join("autorno_mounts");
+        let base_dir = if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+            proj_dirs.cache_dir().join("autorno_mounts")
+        } else {
+            std::env::temp_dir().join("autorno_mounts")
+        };
         std::fs::create_dir_all(&base_dir)?;
         let mount_dir = tempfile::Builder::new().prefix("vfs_").tempdir_in(&base_dir)?;
         
@@ -45,6 +96,7 @@ impl VfsMaskSession {
         // Intentionally omitting MountOption::RO to allow FUSE to selectively handle write operations.
         let session = fuser::spawn_mount2(fs, mount_dir.path(), &[
             fuser::MountOption::FSName("inforno_vfsmask".to_string()),
+            fuser::MountOption::CUSTOM("auto_unmount".to_string()),
         ])?;
 
         Ok(Self {

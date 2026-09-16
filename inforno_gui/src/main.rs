@@ -78,6 +78,7 @@ async fn main() -> eframe::Result {
 
     // native_options.wgpu_options.present_mode = PresentMode::AutoVsync;
 
+
     eframe::run_native(
         "inforno",
         native_options,

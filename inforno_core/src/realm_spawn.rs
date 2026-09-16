@@ -17,20 +17,30 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     let gid = getgid();
     let cmd_str = cmd.to_string();
     
-    // Setup FHS-compliant paths on the host
-    let mut global_usr_bin = std::path::PathBuf::new();
+    // Setup FHS-compliant paths on the host.
+    // `global_bin_dir` (~/.local/share/inforno/mounts/bin) and
+    // `realm_bin_dir` (~/.local/share/inforno/realms/<realm>/mounts/bin)
+    // are reserved for a future feature: staging/installing binaries
+    // outside of whatever the realm's own `bin:` glob cascade selects from
+    // the host — the former a global, read-only, inforno-managed bin dir
+    // shared by all realms, the latter a per-realm, writable one for
+    // installing binaries from inside the FUSE shell. Neither is mounted
+    // yet; extra binaries are now placed by mirroring their real host
+    // location instead (see step 6b below). Only the directories get
+    // created here so the paths exist once that mounting lands.
+    let mut global_bin_dir = std::path::PathBuf::new();
     let mut realm_etc = std::path::PathBuf::new();
-    let mut realm_usr_local = std::path::PathBuf::new();
+    let mut realm_bin_dir = std::path::PathBuf::new();
     if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
         let data_dir = proj_dirs.data_dir();
-        global_usr_bin = data_dir.join("mounts").join("usr").join("bin");
+        global_bin_dir = data_dir.join("mounts").join("bin");
         let realm_vfs_dir = data_dir.join("realms").join(realm_name).join("vfs");
         realm_etc = realm_vfs_dir.join("etc");
-        realm_usr_local = realm_vfs_dir.join("usr").join("local");
+        realm_bin_dir = data_dir.join("realms").join(realm_name).join("mounts").join("bin");
         
-        let _ = std::fs::create_dir_all(&global_usr_bin);
+        let _ = std::fs::create_dir_all(&global_bin_dir);
         let _ = std::fs::create_dir_all(&realm_etc);
-        let _ = std::fs::create_dir_all(&realm_usr_local);
+        let _ = std::fs::create_dir_all(&realm_bin_dir);
     }
 
     unsafe {
@@ -96,7 +106,7 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
 
             // 5. Construct /usr inside the tmpfs
             let usr_target = mount_path.join("usr");
-            for dir in &["/usr/lib", "/usr/lib64"] {
+            for dir in &["/usr/lib", "/usr/lib64", "/usr/include", "/usr/share"] {
                 let host_dir = Path::new(dir);
                 let target = mount_path.join(dir.trim_start_matches('/'));
                 if host_dir.exists() {
@@ -106,23 +116,19 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
                 }
             }
 
-            // Global /usr/bin
-            if global_usr_bin.exists() {
-                let target = usr_target.join("bin");
-                fs::create_dir_all(&target)?;
-                mount(Some(&global_usr_bin), &target, none, MsFlags::MS_BIND | MsFlags::MS_REC, none)?;
-                mount(none, &target, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_REC | MsFlags::MS_RDONLY, none)?;
-            }
-
-            // Realm /usr/local
-            if realm_usr_local.exists() {
-                let target = usr_target.join("local");
-                fs::create_dir_all(&target)?;
-                mount(Some(&realm_usr_local), &target, none, MsFlags::MS_BIND | MsFlags::MS_REC, none)?;
-            }
-
-            // Lock down /usr tmpfs
-            mount(none, &usr_target, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, none)?;
+            // /usr/bin and /usr/local/bin as plain tmpfs directories.
+            // Populated below (6b) by bind-mounting extra_binaries
+            // individually according to where each was actually found on
+            // the host, the same way the coreutils below populate /bin,
+            // instead of bind-mounting a whole inforno-managed directory
+            // over them (that's `global_bin_dir` / `realm_bin_dir` from
+            // above -- disabled for now, see comment there). Must happen
+            // before "Lock down /usr tmpfs" below, while the tmpfs is
+            // still writable.
+            let usr_bin_target = usr_target.join("bin");
+            fs::create_dir_all(&usr_bin_target)?;
+            let usr_local_bin_target = usr_target.join("local").join("bin");
+            fs::create_dir_all(&usr_local_bin_target)?;
 
             // 6. Construct /bin inside the tmpfs
             let bin_target = mount_path.join("bin");
@@ -137,20 +143,42 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
             }
 
             // 6b. Realm-configured extra binaries (compilers, linkers, etc.),
-            // given as absolute host paths via realm2.yml's `binaries:` list.
-            // Mounted the same way, at the same time, as the coreutils above.
+            // given as absolute host paths via realm2.yml's `binaries:` list
+            // (resolved in `bin_search_dirs()`/`allowed_binaries` against
+            // /usr/local/{bin,sbin}, /usr/{bin,sbin}, and /{bin,sbin}).
+            // Each one is bind-mounted into whichever of /bin, /usr/bin, or
+            // /usr/local/bin mirrors its *host* parent directory, so e.g. a
+            // host-side /usr/local/bin tool lands in the chroot's
+            // /usr/local/bin too, instead of always flattening into /bin.
             for host_bin in &extra_binaries {
-                if host_bin.exists() {
-                    if let Some(bin_name) = host_bin.file_name() {
-                        let target_bin = bin_target.join(bin_name);
-                        fs::File::create(&target_bin)?; // Safe inside tmpfs!
-                        mount(Some(host_bin), &target_bin, none, MsFlags::MS_BIND, none)?;
-                        mount(none, &target_bin, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, none)?;
-                    }
+                if !host_bin.exists() {
+                    continue;
                 }
+                let Some(bin_name) = host_bin.file_name() else { continue };
+                let target_dir = match host_bin.parent().and_then(|p| p.to_str()) {
+                    Some("/usr/local/bin") | Some("/usr/local/sbin") => &usr_local_bin_target,
+                    Some("/usr/bin") | Some("/usr/sbin") => &usr_bin_target,
+                    _ => &bin_target, // /bin, /sbin, or anything unrecognized
+                };
+                let target_bin = target_dir.join(bin_name);
+                fs::File::create(&target_bin)?; // Safe inside tmpfs!
+                mount(Some(host_bin), &target_bin, none, MsFlags::MS_BIND, none)?;
+                mount(none, &target_bin, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, none)?;
             }
 
             mount(none, &bin_target, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, none)?;
+
+            // Lock down /usr tmpfs. Moved to here (after 6b) so it happens
+            // only once /usr/bin and /usr/local/bin have been populated.
+            // Non-recursive on purpose: /usr/bin and /usr/local/bin are
+            // plain directories inside this same tmpfs (not separate
+            // mounts), so this alone stops any new entries from being
+            // created directly under /usr, /usr/bin, /usr/local, or
+            // /usr/local/bin. It doesn't touch /usr/lib, /usr/include,
+            // /usr/share, or the individual extra-binary bind-mounts placed
+            // into /usr/bin and /usr/local/bin above -- those are their own
+            // mounts and already carry the readonly mode they were given.
+            mount(none, &usr_target, none, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, none)?;
 
             // 7. Rust toolchains
             if !host_home.is_empty() {
