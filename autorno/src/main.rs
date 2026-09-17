@@ -52,6 +52,74 @@ type Registry = Arc<Mutex<HashMap<String, Harness>>>;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    
+    // --- CONFIG SUBCOMMANDS ---
+    // autorno config realm <realmname> add place <place_name> <vpath> <intro...>
+    // autorno config realm <realmname> rm  place <place_name>
+    if args.len() >= 2 && args[1] == "config" {
+        if args.len() < 6 || args[2] != "realm" || args[5] != "place" {
+            eprintln!("Usage: autorno config realm <realmname> <add|rm> place ...");
+            std::process::exit(1);
+        }
+        let realm_name = &args[3];
+        let action = &args[4];
+        
+        let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
+            .ok_or("Could not find project directories")?;
+        let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
+        
+        if !yaml_path.exists() {
+            eprintln!("Realm config not found at {:?}", yaml_path);
+            std::process::exit(1);
+        }
+
+        let config_str = std::fs::read_to_string(&yaml_path)?;
+        let mut config = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str)?;
+
+        match action.as_str() {
+            "add" => {
+                if args.len() < 9 {
+                    eprintln!("Usage: autorno config realm <realmname> add place <place_name> <vpath> <intro...>");
+                    eprintln!("Note: An intro is strictly required to provide context to the LLM.");
+                    std::process::exit(1);
+                }
+                let name = &args[6];
+                let vpath = &args[7];
+                // Capture all remaining arguments as the intro/description
+                let description = args[8..].join(" ");
+                
+                // Inject the required Commented structure
+                config.places.insert(
+                    name.to_string(), 
+                    serde_saphyr::Commented(vpath.to_string(), format!(" {}", description))
+                );
+                
+                std::fs::write(&yaml_path, serde_saphyr::to_string(&config)?)?;
+                println!("✔ Added place '{}' -> '{}' to realm '{}'", name, vpath, realm_name);
+            }
+            "rm" => {
+                if args.len() < 7 {
+                    eprintln!("Usage: autorno config realm <realmname> rm place <place_name>");
+                    std::process::exit(1);
+                }
+                let name = &args[6];
+                if config.places.shift_remove(name).is_some() {
+                    std::fs::write(&yaml_path, serde_saphyr::to_string(&config)?)?;
+                    println!("✔ Removed place '{}' from realm '{}'", name, realm_name);
+                } else {
+                    eprintln!("Place '{}' not found in realm '{}'.", name, realm_name);
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("Unknown config action: {}", action);
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
+    // --- EXEC SUBCOMMAND ---
     if args.len() >= 2 && args[1] == "exec" {
         inforno_core::realm_mount::cleanup_orphaned_mounts();
 
