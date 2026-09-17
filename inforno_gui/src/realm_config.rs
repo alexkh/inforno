@@ -336,18 +336,24 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             let new_key = substate.mount_edit_key.trim().to_string();
 
                             if let Some(ref orig_key) = substate.mount_edit_original_key {
-                                // Rebuild map to preserve insertion order where possible
+                                // Rebuild map to preserve insertion order where possible.
+                                // Carry over whatever comment was already attached to this
+                                // mount (edited via the raw YAML, not exposed as a form
+                                // field yet) instead of silently dropping it here.
+                                let existing_comment = parsed_config.mounts.get(orig_key)
+                                    .map(|c| c.1.clone())
+                                    .unwrap_or_default();
                                 let mut new_mounts = indexmap::IndexMap::new();
                                 for (k, v) in parsed_config.mounts.iter() {
                                     if k == orig_key {
-                                        new_mounts.insert(new_key.clone(), new_mount.clone());
+                                        new_mounts.insert(new_key.clone(), serde_saphyr::Commented(new_mount.clone(), existing_comment.clone()));
                                     } else {
                                         new_mounts.insert(k.clone(), v.clone());
                                     }
                                 }
                                 new_config.mounts = new_mounts;
                             } else {
-                                new_config.mounts.insert(new_key, new_mount);
+                                new_config.mounts.insert(new_key, serde_saphyr::Commented(new_mount, String::new()));
                             }
 
                             config_changed = true;
@@ -361,6 +367,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                 });
             } else {
                 for (name, mount) in &parsed_config.mounts {
+                    let mount = &mount.0;
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(name).strong());
@@ -520,6 +527,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     egui::CollapsingHeader::new(format!("📶 Tiers ({})", parsed_config.tiers.len()))
         .show(ui, |ui| {
             for (tier_num, tier_cfg) in &parsed_config.tiers {
+                let tier_cfg = &tier_cfg.0;
                 ui.group(|ui| {
                     ui.label(egui::RichText::new(format!("Tier {}", tier_num)).strong());
                     ui.label(format!("Powers: {} defined", tier_cfg.powers.len()));
@@ -533,6 +541,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     egui::CollapsingHeader::new(format!("🎭 Roles ({})", parsed_config.roles.len()))
         .show(ui, |ui| {
             for (name, role) in &parsed_config.roles {
+                let role = &role.0;
                 ui.group(|ui| {
                     ui.label(egui::RichText::new(name).strong());
                     ui.horizontal(|ui| {
@@ -559,6 +568,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     egui::CollapsingHeader::new(format!("📦 Sandboxes ({})", parsed_config.sandboxes.len()))
         .show(ui, |ui| {
             for (name, sandbox) in &parsed_config.sandboxes {
+                let sandbox = &sandbox.0;
                 ui.group(|ui| {
                     ui.label(egui::RichText::new(name).strong());
                     ui.label(format!("Path: {}", sandbox.path.display()));
@@ -573,9 +583,15 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
             ui.button("+ Add Sandbox");
         });
 
-    // If the visual builder produced changes, serialize them automatically back to the right-side text editor
+    // If the visual builder produced changes, serialize them automatically back to the right-side text editor.
+    // CommentPosition::Above (rather than the default Inline) is required here: Inline silently
+    // drops comments attached to non-scalar values (mounts/roles/tiers/sandboxes are all
+    // structs), so without this every comment on those would vanish the moment the Visual
+    // Builder touches anything. This also changes how `places` comments render -- as a line
+    // above the key instead of trailing on the same line -- rather than reflowing per field.
     if config_changed {
-        match serde_saphyr::to_string(&new_config) {
+        let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
+        match serde_saphyr::to_string_with_options(&new_config, opts) {
             Ok(yaml) => {
                 substate.yaml_buffer = yaml;
                 substate.parse_error = None; // Clear any existing typing errors

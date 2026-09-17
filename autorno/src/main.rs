@@ -94,7 +94,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     serde_saphyr::Commented(vpath.to_string(), format!(" {}", description))
                 );
                 
-                std::fs::write(&yaml_path, serde_saphyr::to_string(&config)?)?;
+                // CommentPosition::Above (not the default Inline) is required so that
+                // comments on mounts/roles/tiers/sandboxes -- all non-scalar values --
+                // survive this rewrite; Inline silently drops comments on those.
+                let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
+                std::fs::write(&yaml_path, serde_saphyr::to_string_with_options(&config, opts)?)?;
                 println!("✔ Added place '{}' -> '{}' to realm '{}'", name, vpath, realm_name);
             }
             "rm" => {
@@ -104,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let name = &args[6];
                 if config.places.shift_remove(name).is_some() {
-                    std::fs::write(&yaml_path, serde_saphyr::to_string(&config)?)?;
+                    let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
+                    std::fs::write(&yaml_path, serde_saphyr::to_string_with_options(&config, opts)?)?;
                     println!("✔ Removed place '{}' from realm '{}'", name, realm_name);
                 } else {
                     eprintln!("Place '{}' not found in realm '{}'.", name, realm_name);

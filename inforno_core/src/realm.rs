@@ -259,25 +259,38 @@ where
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RealmConfig {
+    /// Keyed by virtual path. Each entry is wrapped in `Commented` so a
+    /// user-written comment near the mount (e.g. `workspace: # scratch
+    /// checkout` or a `#`-line above it) survives being read and rewritten
+    /// by the Realm Configuration window's Visual Builder, instead of being
+    /// silently dropped on the next save. See the `places` field below for
+    /// the original instance of this pattern; note that surviving a save
+    /// requires serializing with `CommentPosition::Above` (see
+    /// `write_realm_config` / callers of `serde_saphyr::to_string`), since
+    /// the default `Inline` position drops comments on non-scalar values.
     #[serde(default)]
-    pub mounts: IndexMap<String, RealmMountConfig>,
+    pub mounts: IndexMap<String, serde_saphyr::Commented<RealmMountConfig>>,
     /// Global bookmarks resolving to virtual paths (or host paths) across the VFS.
     #[serde(default, deserialize_with = "validate_places")]
     pub places: IndexMap<String, serde_saphyr::Commented<String>>,
     /// Sandboxes permitted to open this Realm, keyed by local name. The key
     /// `"default"` is reserved and names the sandbox opened when the Realm
     /// itself is opened directly. Each sandbox must provide an absolute
-    /// `path` to a self-contained `.rno` file.
+    /// `path` to a self-contained `.rno` file. `Commented` wrapping is the
+    /// same comment-preservation mechanism as `mounts` above.
     #[serde(default)]
-    pub sandboxes: IndexMap<String, SandboxRef>,
-    /// Role name -> Tier/description/role-specific powers.
+    pub sandboxes: IndexMap<String, serde_saphyr::Commented<SandboxRef>>,
+    /// Role name -> Tier/description/role-specific powers. `Commented`
+    /// wrapping is the same comment-preservation mechanism as `mounts` above.
     #[serde(default)]
-    pub roles: IndexMap<String, RoleConfig>,
+    pub roles: IndexMap<String, serde_saphyr::Commented<RoleConfig>>,
     /// Tier number (2-9) -> powers cascading to every role AT OR ABOVE that
     /// tier. Sparse: a tier number with no entry contributes nothing, no
     /// contiguity required. 0 and 1 are reserved and may not appear here.
+    /// `Commented` wrapping is the same comment-preservation mechanism as
+    /// `mounts` above.
     #[serde(default)]
-    pub tiers: BTreeMap<u32, TierConfig>,
+    pub tiers: BTreeMap<u32, serde_saphyr::Commented<TierConfig>>,
     /// Named, reusable `GlobExpr` definitions, referenced via
     /// `GlobExpr::Ref(name)`. May reference each other; cycles are rejected
     /// at load time. Purely a config-authoring convenience.
@@ -306,8 +319,9 @@ pub fn resolve_sandbox_path(
     key: &str,
     config: &RealmConfig,
 ) -> Result<PathBuf, String> {
-    let sref = config.sandboxes.get(key)
-        .ok_or_else(|| format!("No sandbox named '{}' declared in this Realm", key))?;
+    let sref = &config.sandboxes.get(key)
+        .ok_or_else(|| format!("No sandbox named '{}' declared in this Realm", key))?
+        .0;
 
     if !sref.path.is_absolute() {
         return Err(format!(
@@ -533,6 +547,7 @@ impl ActiveRealm {
         }
 
         for (v_path, mount_cfg) in config.mounts {
+            let mount_cfg = mount_cfg.0;
             mounts.push(CompiledMount {
                 virtual_path: v_path,
                 host_path: mount_cfg.host,
@@ -558,6 +573,7 @@ impl ActiveRealm {
         let mut tier_envs: BTreeMap<u32, Arc<globset::GlobSet>> = BTreeMap::new();
         let mut tier_env_vars: BTreeMap<u32, HashMap<String, String>> = BTreeMap::new();
         for (&tier_num, tier_cfg) in &raw_config.tiers {
+            let tier_cfg = &tier_cfg.0;
             let compiled = tier_cfg.powers
                 .iter()
                 .map(|p| CompiledPower::compile(p, &raw_config.expressions))
@@ -582,6 +598,7 @@ impl ActiveRealm {
         // --- Roles: validate tier 0 has no powers, tier <= 9, compile powers. ---
         let mut roles: HashMap<String, CompiledRole> = HashMap::new();
         for (rname, rcfg) in &raw_config.roles {
+            let rcfg = &rcfg.0;
             if rcfg.tier.0 > Tier::MAX.0 {
                 return Err(format!("Role '{}' has tier {}, which exceeds the maximum of {}", rname, rcfg.tier.0, Tier::MAX.0));
             }
@@ -627,6 +644,7 @@ impl ActiveRealm {
 
         // --- Sandboxes: validate required absolute .rno paths and allowed role names. ---
         if let Some((sname, sref)) = raw_config.sandboxes.first() {
+            let sref = &sref.0;
             if !sref.path.exists() {
                 return Err(format!("Default sandbox '{}' points to a non-existent path: {}", sname, sref.path.display()));
             }
@@ -636,6 +654,7 @@ impl ActiveRealm {
         }
 
         for (sname, sref) in &raw_config.sandboxes {
+            let sref = &sref.0;
             if !sref.path.is_absolute() {
                 return Err(format!(
                     "Sandbox '{}' path must be absolute, got '{}'",
