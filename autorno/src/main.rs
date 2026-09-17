@@ -52,14 +52,28 @@ type Registry = Arc<Mutex<HashMap<String, Harness>>>;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() >= 4 && args[1] == "exec" {
+    if args.len() >= 2 && args[1] == "exec" {
         inforno_core::realm_mount::cleanup_orphaned_mounts();
 
-        let realm_name = &args[2];
-        let role_name = &args[3];
-        let cmd = if args.len() > 4 { &args[4] } else { "" };
+        let mut idx = 2;
+        let mut work_dir = None;
+        if args.len() > idx && args[idx] == "--workdir" {
+            if idx + 1 < args.len() {
+                work_dir = Some(args[idx + 1].clone());
+                idx += 2;
+            }
+        }
+
+        if args.len() < idx + 2 {
+            eprintln!("Usage: autorno exec [--workdir <dir>] <realm> <role> [cmd...]");
+            std::process::exit(1);
+        }
+
+        let realm_name = &args[idx];
+        let role_name = &args[idx + 1];
+        let cmd = if args.len() > idx + 2 { args[idx + 2..].join(" ") } else { "".to_string() };
         
-        let exit_code = match spawn_harness(realm_name, role_name, cmd) {
+        let exit_code = match spawn_harness(realm_name, role_name, &cmd, work_dir.as_deref()) {
             Ok(mut harness) => {
                 let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
                 let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
@@ -187,7 +201,7 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
                 return DaemonResponse::Error(format!("Harness '{}' already running", id));
             }
 
-            match spawn_harness(&realm, &role, &cmd) {
+            match spawn_harness(&realm, &role, &cmd, None) {
                 Ok(harness) => {
                     reg.insert(id.clone(), harness);
                     DaemonResponse::Ok(format!("Started harness '{}'", id))
@@ -225,7 +239,7 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
     }
 }
 
-fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness, Box<dyn std::error::Error>> {
+fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str, work_dir: Option<&str>) -> Result<Harness, Box<dyn std::error::Error>> {
     let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
         .ok_or("Could not find project directories")?;
     let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
@@ -243,7 +257,15 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness
     let allowed_envs = active_realm.allowed_envs(role_name);
 
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
-    let child = spawn_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs)?;
+
+    // Wait for the FUSE mount to be fully ready before proceeding
+    let mut retries = 50;
+    while !vfs_session.mount_path().join("bin").exists() && retries > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        retries -= 1;
+    }
+
+    let child = spawn_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs, work_dir)?;
 
     Ok(Harness { vfs_session, child })
 }
@@ -268,7 +290,14 @@ fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, B
     // Spin up an ephemeral FUSE session for the duration of this single command
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
     
-    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs)?;
+    // Wait for the FUSE mount to be fully ready before proceeding
+    let mut retries = 50;
+    while !vfs_session.mount_path().join("bin").exists() && retries > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        retries -= 1;
+    }
+
+    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs, None)?;
     let output = command.output()?;
     
     let mut result = String::new();

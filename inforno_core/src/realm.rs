@@ -501,7 +501,8 @@ fn compile_env_list(envs: &[String]) -> Result<(Option<Arc<globset::GlobSet>>, H
 
     for item in envs {
         if let Some((k, v)) = item.split_once('=') {
-            vars.insert(k.trim().to_string(), v.trim().to_string());
+            // Keep the value exactly as-is so trailing spaces (like in PS1) are preserved
+            vars.insert(k.trim().to_string(), v.to_string());
         } else {
             builder.add(globset::Glob::new(item).map_err(|e| format!("Invalid env glob '{}': {}", item, e))?);
             has_globs = true;

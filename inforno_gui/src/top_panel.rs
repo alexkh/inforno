@@ -366,8 +366,6 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                 .map(|v| v.0.clone())
                                                 .unwrap_or_else(|| "/".to_string());
                                                 
-                                            let shell_cmd = format!("cd {} && exec bash", start_dir);
-                                            
                                             // Fallback chain for different Desktop Environments
                                             let terms = [
                                                 ("x-terminal-emulator", vec!["-e"]),
@@ -382,9 +380,10 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                     .args(&t_args)
                                                     .arg(&autorno_path)
                                                     .arg("exec")
+                                                    .arg("--workdir")
+                                                    .arg(&start_dir)
                                                     .arg(&realm.name)
                                                     .arg("gui")
-                                                    .arg(&shell_cmd)
                                                     .spawn()
                                                     .is_ok() 
                                                 {

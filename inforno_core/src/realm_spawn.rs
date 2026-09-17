@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 /// mounted view, without requiring root privileges, using unprivileged Linux
 /// user + mount namespaces. `mount_path` should come from a live
 /// `VfsMaskSession::mount_path()`.
-pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)]) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)], work_dir: Option<&str>) -> Result<std::process::Command, Box<dyn std::error::Error>> {
     let mount_path = mount_path.to_path_buf();
+    let work_dir_clone = work_dir.map(|s| s.to_string());
     let extra_binaries = extra_binaries.to_vec();
     let allowed_envs = allowed_envs.to_vec();
     let uid = getuid();
@@ -47,10 +48,13 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     unsafe {
         use std::os::unix::process::CommandExt;
 
+        // Fallback gracefully for minimal host systems
+        let shell_path = if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
+
         let mut command = if cmd_str.is_empty() {
-            std::process::Command::new("/bin/bash")
+            std::process::Command::new(shell_path)
         } else {
-            let mut c = std::process::Command::new("/bin/bash");
+            let mut c = std::process::Command::new(shell_path);
             c.arg("-c").arg(cmd_str);
             c
         };
@@ -234,7 +238,13 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
 
             // 9. Chroot!
             chroot(&mount_path)?;
-            chdir("/")?;
+            if let Some(ref wd) = work_dir_clone {
+                if chdir(Path::new(wd)).is_err() {
+                    let _ = chdir("/");
+                }
+            } else {
+                let _ = chdir("/");
+            }
 
             Ok(())
         });
@@ -243,6 +253,6 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     }
 }
 
-pub fn spawn_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)]) -> Result<std::process::Child, Box<dyn std::error::Error>> {
-    Ok(build_masked_command(mount_path, cmd, realm_name, extra_binaries, allowed_envs)?.spawn()?)
+pub fn spawn_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)], work_dir: Option<&str>) -> Result<std::process::Child, Box<dyn std::error::Error>> {
+    Ok(build_masked_command(mount_path, cmd, realm_name, extra_binaries, allowed_envs, work_dir)?.spawn()?)
 }
