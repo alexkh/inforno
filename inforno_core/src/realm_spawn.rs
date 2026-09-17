@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 /// mounted view, without requiring root privileges, using unprivileged Linux
 /// user + mount namespaces. `mount_path` should come from a live
 /// `VfsMaskSession::mount_path()`.
-pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf]) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)]) -> Result<std::process::Command, Box<dyn std::error::Error>> {
     let mount_path = mount_path.to_path_buf();
     let extra_binaries = extra_binaries.to_vec();
+    let allowed_envs = allowed_envs.to_vec();
     let uid = getuid();
     let gid = getgid();
     let cmd_str = cmd.to_string();
@@ -54,6 +55,14 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
             c
         };
         
+        // Clear all inherited environment variables first
+        command.env_clear();
+
+        // Inject the cherry-picked host environment variables
+        for (k, v) in &allowed_envs {
+            command.env(k, v);
+        }
+
         // Override host environment variables to match our synthetic identity
         command.env("HOME", "/");
         command.env("USER", "actor");
@@ -234,6 +243,6 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     }
 }
 
-pub fn spawn_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf]) -> Result<std::process::Child, Box<dyn std::error::Error>> {
-    Ok(build_masked_command(mount_path, cmd, realm_name, extra_binaries)?.spawn()?)
+pub fn spawn_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extra_binaries: &[PathBuf], allowed_envs: &[(String, String)]) -> Result<std::process::Child, Box<dyn std::error::Error>> {
+    Ok(build_masked_command(mount_path, cmd, realm_name, extra_binaries, allowed_envs)?.spawn()?)
 }

@@ -57,21 +57,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let role_name = &args[3];
         let cmd = if args.len() > 4 { &args[4] } else { "" };
         
-        match spawn_harness(realm_name, role_name, cmd) {
+        let exit_code = match spawn_harness(realm_name, role_name, cmd) {
             Ok(mut harness) => {
                 let status = harness.child.wait().unwrap();
+                // explicitly drop harness to unmount FUSE before sleeping
+                drop(harness);
                 println!("\nProcess exited with status: {}", status);
                 println!("Closing terminal in 10 seconds...");
                 std::thread::sleep(std::time::Duration::from_secs(10));
-                std::process::exit(status.code().unwrap_or(1));
+                status.code().unwrap_or(1)
             }
             Err(e) => {
                 eprintln!("\nFailed to start harness:\n{}", e);
                 println!("Closing terminal in 10 seconds...");
                 std::thread::sleep(std::time::Duration::from_secs(10));
-                std::process::exit(1);
+                1
             }
-        }
+        };
+        std::process::exit(exit_code);
     }
 
     let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
@@ -187,9 +190,10 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<Harness
 
     // Resolved before `active_realm` is moved into `spawn_vfs` below.
     let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
+    let allowed_envs = active_realm.allowed_envs(role_name);
 
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
-    let child = spawn_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries)?;
+    let child = spawn_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs)?;
 
     Ok(Harness { vfs_session, child })
 }
@@ -209,11 +213,12 @@ fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, B
 
     // Resolved before `active_realm` is moved into `spawn_vfs` below.
     let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
+    let allowed_envs = active_realm.allowed_envs(role_name);
 
     // Spin up an ephemeral FUSE session for the duration of this single command
     let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
     
-    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries)?;
+    let mut command = inforno_core::realm_spawn::build_masked_command(vfs_session.mount_path(), cmd, realm_name, &extra_binaries, &allowed_envs)?;
     let output = command.output()?;
     
     let mut result = String::new();

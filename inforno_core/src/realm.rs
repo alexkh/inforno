@@ -162,6 +162,8 @@ pub struct RoleConfig {
     /// `RealmConfig::bin` for how the cascade combines.
     #[serde(default)]
     pub bin: Option<GlobExpr>,
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// Declares that a mount contains more than one selectable root — e.g. a
@@ -235,6 +237,8 @@ pub struct TierConfig {
     /// See `RealmConfig::bin` for how the cascade combines.
     #[serde(default)]
     pub bin: Option<GlobExpr>,
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 fn validate_places<'de, D>(deserializer: D) -> Result<IndexMap<String, serde_saphyr::Commented<String>>, D::Error>
@@ -291,6 +295,8 @@ pub struct RealmConfig {
     /// levels. See `ActiveRealm::bin_is_selected`.
     #[serde(default)]
     pub bin: Option<GlobExpr>,
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// Resolves the on-disk path for `key` in `config.sandboxes`. `studies_dir`
@@ -457,6 +463,8 @@ pub struct CompiledRole {
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
     pub bin: Option<Arc<CompiledExpr>>,
+    pub env: Option<Arc<globset::GlobSet>>,
+    pub env_vars: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -471,15 +479,42 @@ pub struct ActiveRealm {
     /// Tier number -> compiled `bin` expression, mirroring `tiers` above.
     /// Sparse: a tier with no `bin` declared contributes nothing to the cascade.
     pub tier_bins: BTreeMap<u32, Arc<CompiledExpr>>,
+    pub tier_envs: BTreeMap<u32, Arc<globset::GlobSet>>,
+    pub tier_env_vars: BTreeMap<u32, HashMap<String, String>>,
     /// The Realm-wide `bin` expression (from `RealmConfig::bin`), applied
     /// first in the cascade — see `bin_is_selected`.
     pub bin: Option<Arc<CompiledExpr>>,
+    pub env: Option<Arc<globset::GlobSet>>,
+    pub env_vars: HashMap<String, String>,
     /// Plain-English capability descriptions per role name, computed once at
     /// construction time. Correctness depends on `ActiveRealm` always being
     /// rebuilt fresh via `from_config` when realm2.yml changes, rather than
     /// mutated in place — if that assumption ever changes, this cache needs
     /// explicit invalidation.
     pub role_capabilities: HashMap<String, Arc<Vec<String>>>,
+}
+
+fn compile_env_list(envs: &[String]) -> Result<(Option<Arc<globset::GlobSet>>, HashMap<String, String>), String> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut vars = HashMap::new();
+    let mut has_globs = false;
+
+    for item in envs {
+        if let Some((k, v)) = item.split_once('=') {
+            vars.insert(k.trim().to_string(), v.trim().to_string());
+        } else {
+            builder.add(globset::Glob::new(item).map_err(|e| format!("Invalid env glob '{}': {}", item, e))?);
+            has_globs = true;
+        }
+    }
+
+    let globset = if has_globs {
+        Some(Arc::new(builder.build().map_err(|e| e.to_string())?))
+    } else {
+        None
+    };
+
+    Ok((globset, vars))
 }
 
 impl ActiveRealm {
@@ -519,6 +554,8 @@ impl ActiveRealm {
 
         let mut tiers: BTreeMap<u32, Vec<CompiledPower>> = BTreeMap::new();
         let mut tier_bins: BTreeMap<u32, Arc<CompiledExpr>> = BTreeMap::new();
+        let mut tier_envs: BTreeMap<u32, Arc<globset::GlobSet>> = BTreeMap::new();
+        let mut tier_env_vars: BTreeMap<u32, HashMap<String, String>> = BTreeMap::new();
         for (&tier_num, tier_cfg) in &raw_config.tiers {
             let compiled = tier_cfg.powers
                 .iter()
@@ -530,6 +567,14 @@ impl ActiveRealm {
                 let compiled_bin = CompiledExpr::compile(expr, &raw_config.expressions)
                     .map_err(|e| format!("In tier {}'s `bin`: {}", tier_num, e))?;
                 tier_bins.insert(tier_num, Arc::new(compiled_bin));
+            }
+            let (tier_env_set, tier_env_map) = compile_env_list(&tier_cfg.env)
+                .map_err(|e| format!("In tier {}'s `env`: {}", tier_num, e))?;
+            if let Some(set) = tier_env_set {
+                tier_envs.insert(tier_num, set);
+            }
+            if !tier_env_map.is_empty() {
+                tier_env_vars.insert(tier_num, tier_env_map);
             }
         }
 
@@ -562,6 +607,9 @@ impl ActiveRealm {
                 None => None,
             };
 
+            let (compiled_env, env_vars) = compile_env_list(&rcfg.env)
+                .map_err(|e| format!("In role '{}'s `env`: {}", rname, e))?;
+
             roles.insert(
                 rname.clone(),
                 CompiledRole {
@@ -570,6 +618,8 @@ impl ActiveRealm {
                     boss: rcfg.boss.clone(),
                     powers: compiled_powers,
                     bin: compiled_bin,
+					env: compiled_env,
+                    env_vars,
                 },
             );
         }
@@ -617,6 +667,9 @@ impl ActiveRealm {
             None => None,
         };
 
+        let (env, env_vars) = compile_env_list(&raw_config.env)
+            .map_err(|e| format!("In the Realm's top-level `env`: {}", e))?;
+
         let mut realm = Self {
             name,
             mounts,
@@ -624,7 +677,11 @@ impl ActiveRealm {
             roles,
             tiers,
             tier_bins,
+            tier_envs,
+            tier_env_vars,
             bin,
+            env,
+            env_vars,
             role_capabilities: HashMap::new(),
         };
 
@@ -705,6 +762,73 @@ impl ActiveRealm {
     /// A basename already seen in an earlier dir is skipped, so distros
     /// where e.g. `/bin` symlinks to `/usr/bin` don't produce duplicate
     /// mount attempts for the same name.
+    pub fn env_is_selected(&self, role_name: &str, candidate: &str) -> bool {
+        let Some(role) = self.roles.get(role_name) else { return false };
+        if role.tier == Tier::NONE {
+            return false;
+        }
+
+        let cand_path = Path::new(candidate);
+
+        if let Some(set) = &self.env {
+            if set.is_match(cand_path) {
+                return true;
+            }
+        }
+
+        if role.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, set) in self.tier_envs.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+                if set.is_match(cand_path) {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(set) = &role.env {
+            if set.is_match(cand_path) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn allowed_envs(&self, role_name: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (k, v) in std::env::vars() {
+            if self.env_is_selected(role_name, &k) {
+                out.push((k, v));
+            }
+        }
+
+        let Some(role) = self.roles.get(role_name) else { return out };
+        
+        if role.tier == Tier::NONE {
+            return out;
+        }
+
+        // Apply Realm-wide custom env vars
+        for (k, v) in &self.env_vars {
+            out.push((k.clone(), v.clone()));
+        }
+
+        // Apply tier custom env vars
+        if role.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, vars) in self.tier_env_vars.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+                for (k, v) in vars {
+                    out.push((k.clone(), v.clone()));
+                }
+            }
+        }
+
+        // Apply role custom env vars
+        for (k, v) in &role.env_vars {
+            out.push((k.clone(), v.clone()));
+        }
+
+        out
+    }
+
     pub fn allowed_binaries(&self, role_name: &str, search_dirs: &[PathBuf]) -> Vec<PathBuf> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
