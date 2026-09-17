@@ -53,19 +53,45 @@ type Registry = Arc<Mutex<HashMap<String, Harness>>>;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 4 && args[1] == "exec" {
+        inforno_core::realm_mount::cleanup_orphaned_mounts();
+
         let realm_name = &args[2];
         let role_name = &args[3];
         let cmd = if args.len() > 4 { &args[4] } else { "" };
         
         let exit_code = match spawn_harness(realm_name, role_name, cmd) {
             Ok(mut harness) => {
-                let status = harness.child.wait().unwrap();
-                // explicitly drop harness to unmount FUSE before sleeping
-                drop(harness);
-                println!("\nProcess exited with status: {}", status);
-                println!("Closing terminal in 10 seconds...");
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                status.code().unwrap_or(1)
+                let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+                let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+                let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+                let mut sigquit = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit()).unwrap();
+
+                let status = loop {
+                    if let Ok(Some(status)) = harness.child.try_wait() {
+                        break Some(status);
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+                        _ = sigterm.recv() => break None,
+                        _ = sighup.recv() => break None,
+                        _ = sigint.recv() => break None,
+                        _ = sigquit.recv() => break None,
+                    }
+                };
+
+                if let Some(st) = status {
+                    // explicitly drop harness to unmount FUSE before sleeping
+                    drop(harness);
+                    println!("\nProcess exited with status: {}", st);
+                    println!("Closing terminal in 10 seconds...");
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    st.code().unwrap_or(1)
+                } else {
+                    let _ = harness.child.kill();
+                    let _ = harness.child.wait();
+                    drop(harness);
+                    1
+                }
             }
             Err(e) => {
                 eprintln!("\nFailed to start harness:\n{}", e);
@@ -94,25 +120,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let listener = UnixListener::bind(&socket_path)?;
-    println!("Autorno daemon listening on {:?}", socket_path);
+            let listener = UnixListener::bind(&socket_path)?;
+        println!("Autorno daemon listening on {:?}", socket_path);
 
-    let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+        let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                let reg_clone = registry.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, reg_clone).await {
-                        eprintln!("Client error: {}", e);
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+        let mut sigquit = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())?;
+
+        loop {
+            tokio::select! {
+                accept_res = listener.accept() => {
+                    match accept_res {
+                        Ok((stream, _)) => {
+                            let reg_clone = registry.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_client(stream, reg_clone).await {
+                                    eprintln!("Client error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => eprintln!("Accept error: {}", e),
                     }
-                });
+                }
+                _ = sigterm.recv() => break,
+                _ = sigint.recv() => break,
+                _ = sighup.recv() => break,
+                _ = sigquit.recv() => break,
             }
-            Err(e) => eprintln!("Accept error: {}", e),
         }
+
+        let mut reg = registry.lock().unwrap();
+        for (_, mut harness) in reg.drain() {
+            let _ = harness.child.kill();
+            let _ = harness.child.wait();
+        }
+        drop(reg);
+
+        let _ = std::fs::remove_file(&socket_path);
+
+        Ok(())
     }
-}
 
 async fn handle_client(mut stream: UnixStream, registry: Registry) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = vec![0; 4096];
