@@ -137,9 +137,9 @@ pub enum Cap {
 pub struct Power {
     pub span: GlobExpr,
     pub caps: Vec<Cap>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<String>,
 }
 
@@ -151,18 +151,21 @@ pub struct Power {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RoleConfig {
     pub tier: Tier,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub powers: Vec<Power>,
-    pub intro: String,
-    #[serde(default)]
+    // `intro` was removed: roles are entries in `RealmConfig::roles`,
+    // already wrapped in `Commented<RoleConfig>`, so a description now
+    // lives as a YAML comment on/above the role's key instead of a
+    // dedicated (and previously required) field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boss: Option<String>,
     /// Glob expression selecting extra host binaries (matched by bare
     /// basename) to expose in `/bin`, on top of whatever the Realm-wide
     /// `bin` and this role's Tier(s) already contribute. See
     /// `RealmConfig::bin` for how the cascade combines.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin: Option<GlobExpr>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
 
@@ -187,7 +190,10 @@ pub struct RealmMountConfig {
     pub host: PathBuf,
     #[serde(default)]
     pub read_only: bool,
-    pub intro: Option<String>,
+    // `intro` was removed: mounts are entries in `RealmConfig::mounts`,
+    // already wrapped in `Commented<RealmMountConfig>`, so a description
+    // now lives as a YAML comment on/above the mount's key instead of a
+    // dedicated field -- same pattern `places` already used.
 }
 
 /// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
@@ -212,10 +218,12 @@ pub struct SandboxRef {
     /// Realm roles this sandbox is allowed to use.
     /// Empty means the sandbox is known but not authorized to open
     /// this Realm under any role.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
-    #[serde(default)]
-    pub description: Option<String>,
+    // `description` was removed: sandboxes are entries in
+    // `RealmConfig::sandboxes`, already wrapped in `Commented<SandboxRef>`,
+    // so a description now lives as a YAML comment on/above the sandbox's
+    // key instead of a dedicated field.
 }
 
 /// A single filesystem-path component: no separators, no `.`/`..`. Used to
@@ -229,15 +237,15 @@ pub(crate) fn is_safe_path_component(s: &str) -> bool {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TierConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub powers: Vec<Power>,
     /// Glob expression selecting extra host binaries (matched by bare
     /// basename) to expose in `/bin` to every role at or above this tier —
     /// unioned with the Realm-wide `bin` and whatever the role adds itself.
     /// See `RealmConfig::bin` for how the cascade combines.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin: Option<GlobExpr>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
 
@@ -273,17 +281,11 @@ pub struct RealmConfig {
     /// Global bookmarks resolving to virtual paths (or host paths) across the VFS.
     #[serde(default, deserialize_with = "validate_places")]
     pub places: IndexMap<String, serde_saphyr::Commented<String>>,
-    /// Sandboxes permitted to open this Realm, keyed by local name. The key
-    /// `"default"` is reserved and names the sandbox opened when the Realm
-    /// itself is opened directly. Each sandbox must provide an absolute
-    /// `path` to a self-contained `.rno` file. `Commented` wrapping is the
-    /// same comment-preservation mechanism as `mounts` above.
-    #[serde(default)]
-    pub sandboxes: IndexMap<String, serde_saphyr::Commented<SandboxRef>>,
-    /// Role name -> Tier/description/role-specific powers. `Commented`
-    /// wrapping is the same comment-preservation mechanism as `mounts` above.
-    #[serde(default)]
-    pub roles: IndexMap<String, serde_saphyr::Commented<RoleConfig>>,
+    /// Named, reusable `GlobExpr` definitions, referenced via
+    /// `GlobExpr::Ref(name)`. May reference each other; cycles are rejected
+    /// at load time. Purely a config-authoring convenience.
+    #[serde(default, rename = "spans", skip_serializing_if = "IndexMap::is_empty")]
+    pub expressions: IndexMap<String, GlobExpr>,
     /// Tier number (2-9) -> powers cascading to every role AT OR ABOVE that
     /// tier. Sparse: a tier number with no entry contributes nothing, no
     /// contiguity required. 0 and 1 are reserved and may not appear here.
@@ -291,11 +293,17 @@ pub struct RealmConfig {
     /// `mounts` above.
     #[serde(default)]
     pub tiers: BTreeMap<u32, serde_saphyr::Commented<TierConfig>>,
-    /// Named, reusable `GlobExpr` definitions, referenced via
-    /// `GlobExpr::Ref(name)`. May reference each other; cycles are rejected
-    /// at load time. Purely a config-authoring convenience.
-    #[serde(default, rename = "spans")]
-    pub expressions: IndexMap<String, GlobExpr>,
+    /// Role name -> Tier/role-specific powers. `Commented` wrapping is the
+    /// same comment-preservation mechanism as `mounts` above.
+    #[serde(default)]
+    pub roles: IndexMap<String, serde_saphyr::Commented<RoleConfig>>,
+    /// Sandboxes permitted to open this Realm, keyed by local name. The key
+    /// `"default"` is reserved and names the sandbox opened when the Realm
+    /// itself is opened directly. Each sandbox must provide an absolute
+    /// `path` to a self-contained `.rno` file. `Commented` wrapping is the
+    /// same comment-preservation mechanism as `mounts` above.
+    #[serde(default)]
+    pub sandboxes: IndexMap<String, serde_saphyr::Commented<SandboxRef>>,
     /// Glob expression selecting which host binaries (matched by bare
     /// basename, e.g. `cc`, `git`) are exposed in a spawned process's
     /// chroot `/bin`, on top of the fixed coreutils list (`bash`, `ls`,
@@ -306,9 +314,9 @@ pub struct RealmConfig {
     /// expose a binary — "everything except X" is expressed within one
     /// level's own expression (`all` + `not`), not by subtracting across
     /// levels. See `ActiveRealm::bin_is_selected`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin: Option<GlobExpr>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
 
@@ -467,13 +475,11 @@ pub struct CompiledMount {
     pub virtual_path: String,
     pub host_path: PathBuf,
     pub read_only: bool,
-    pub intro: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct CompiledRole {
     pub tier: Tier,
-    pub intro: Arc<str>,
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
     pub bin: Option<Arc<CompiledExpr>>,
@@ -552,7 +558,6 @@ impl ActiveRealm {
                 virtual_path: v_path,
                 host_path: mount_cfg.host,
                 read_only: mount_cfg.read_only,
-                intro: mount_cfg.intro,
             });
         }
 
@@ -632,7 +637,6 @@ impl ActiveRealm {
                 rname.clone(),
                 CompiledRole {
                     tier: rcfg.tier,
-                    intro: rcfg.intro.as_str().into(),
                     boss: rcfg.boss.clone(),
                     powers: compiled_powers,
                     bin: compiled_bin,

@@ -2,22 +2,23 @@ use egui::{Color32, RichText};
 use rust_i18n::t;
 
 use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_sandbox_db};
-use crate::state::{State, err_color};
+use crate::{emoji_render::{emoji_button, emoji_image, emoji_label}, state::{State, err_color}};
 use crate::mybtn;
 
 pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
-    
+
     // Intercept any startup errors and show them as a modal popup
     if let Some(err) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("startup_error"))) {
         state.error_msg = Some(err);
         state.is_modal_open = true;
-        
+
         if let Some(broken_yaml) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_yaml"))) {
             state.realm_config_state.yaml_buffer = broken_yaml.clone();
             state.realm_config_state.original_yaml = broken_yaml;
+            state.realm_config_state.cached_config = None;
             state.realm_config_state.is_fixing_broken_realm = true;
-            
+
             if let Some(broken_name) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_name"))) {
                 state.realm_config_state.realm_name = Some(broken_name);
             }
@@ -50,7 +51,50 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 // 2. Update the live locale immediately
                 rust_i18n::set_locale(target_lang);
             }
-            ui.separator(); // Visual spacer
+
+            #[cfg(target_os = "linux")]
+            {
+                // --- ⚙ Autorno Daemon Status ---
+                let now = std::time::Instant::now();
+                let (is_running, last_check) = ctx.data_mut(|d| {
+                    d.get_temp::<(bool, std::time::Instant)>(egui::Id::new("autorno_status"))
+                        .unwrap_or((false, now - std::time::Duration::from_secs(10)))
+                });
+
+                let mut new_running = is_running;
+                // Ping the Unix socket once every 2 seconds to avoid spanning too many syscalls
+                if now.duration_since(last_check).as_secs_f32() > 2.0 {
+                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                        let socket_path = proj_dirs.cache_dir().join("autorno.sock");
+                        new_running = std::os::unix::net::UnixStream::connect(socket_path).is_ok();
+                    }
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (new_running, now)));
+                }
+
+                let (status_color, status_text) = if new_running {
+                    (egui::Color32::GREEN, "😈") // "🟢")
+                } else {
+                    (ui.visuals().error_fg_color, "👿") // "🔴")
+                };
+
+                if ui.button(egui::RichText::new(status_text).color(status_color))
+                    .on_hover_text(if new_running { "Autorno daemon is running" } else { "Start Autorno daemon" })
+                    .clicked()
+                {
+                    if !new_running {
+                        if let Ok(exe_path) = std::env::current_exe() {
+                            if let Some(parent) = exe_path.parent() {
+                                inforno_core::realm_mount::cleanup_orphaned_mounts();
+
+                                let autorno_path = parent.join("autorno");
+                                let _ = std::process::Command::new(autorno_path).spawn();
+                                // Force an immediate re-check next frame
+                                ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (false, now - std::time::Duration::from_secs(10))));
+                            }
+                        }
+                    }
+                }
+            }
 
             // API Keys Button
             let api_btn = egui::Button::new(t!("menu_api_keys_btn"))
@@ -71,6 +115,15 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 ui.colored_label(err_color(), "🔑");
             }
 
+
+            if ui.add(crate::emoji_render::emoji_button_widget(ui, '🌙')).clicked() {
+                ctx.set_theme(egui::Theme::Dark);
+            }
+
+            if ui.add(crate::emoji_render::emoji_button_widget(ui, '🔆')).clicked() {
+                ctx.set_theme(egui::Theme::Light);
+            }
+
             ui.colored_label(ui.visuals().code_bg_color,"|");
 
             // Presets Button
@@ -86,15 +139,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 state.show_preset_editor = !state.show_preset_editor;
             }
 
-            ui.colored_label(ui.visuals().code_bg_color,"|");
-
-            if mybtn!(ui, "menu_dark_theme_btn") {
-                ctx.set_theme(egui::Theme::Dark);
-            }
-
-            if mybtn!(ui, "menu_light_theme_btn") {
-                ctx.set_theme(egui::Theme::Light);
-            }
+            // ui.colored_label(ui.visuals().code_bg_color,"|");
 
             ui.colored_label(ui.visuals().code_bg_color,"|");
 
@@ -225,9 +270,9 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
 
                             // --- 🔖 The Place (Workspace) ---
                             if !realm.raw_config.places.is_empty() {
-                                
+
                                 let cache_id = egui::Id::new("active_place").with(&realm.name);
-                                
+
                                 // Retrieve selected place from cache, default to the FIRST place in the IndexMap
                                 let first_place_name = realm.raw_config.places.keys().next().unwrap().clone();
                                 let active_place_name = ctx.data_mut(|d| {
@@ -286,7 +331,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
 
                             // --- 🏰 The Realm ---
                             if ui.button(
-                                egui::RichText::new(format!("🏰 {} ⚙", realm.name))
+                                egui::RichText::new(format!("{}", realm.name))
                                         .color(orange)
                                         .strong()
                                 )
@@ -299,73 +344,36 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         if let Some(active_realm) = &state.active_realm {
                                             if let Some(realm_dir) = directories::ProjectDirs::from("", "", "inforno")
                                                 .map(|d| d.config_dir().join("realms").join(&active_realm.name)) {
-                                                
+
                                                 let yaml_path = realm_dir.join("realm2.yml");
                                                 if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
                                                     state.realm_config_state.yaml_buffer = config_str.clone();
                                                     state.realm_config_state.original_yaml = config_str;
+                                                    state.realm_config_state.cached_config = None;
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            emoji_label(ui, "🏰");
 
                             #[cfg(target_os = "linux")]
                             {
-                                // --- ⚙ Autorno Daemon Status ---
-                                let now = std::time::Instant::now();
-                                let (is_running, last_check) = ctx.data_mut(|d| {
-                                    d.get_temp::<(bool, std::time::Instant)>(egui::Id::new("autorno_status"))
-                                     .unwrap_or((false, now - std::time::Duration::from_secs(10)))
-                                });
-                                
-                                let mut new_running = is_running;
-                                // Ping the Unix socket once every 2 seconds to avoid spanning too many syscalls
-                                if now.duration_since(last_check).as_secs_f32() > 2.0 {
-                                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
-                                        let socket_path = proj_dirs.cache_dir().join("autorno.sock");
-                                        new_running = std::os::unix::net::UnixStream::connect(socket_path).is_ok();
-                                    }
-                                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (new_running, now)));
+                                if ui.button("👥").on_hover_text("Open interactive terminal as role...").clicked() {
                                 }
-
-                                let (status_color, status_text) = if new_running {
-                                    (egui::Color32::GREEN, "🟢")
-                                } else {
-                                    (ui.visuals().error_fg_color, "🔴")
-                                };
-
-                                if ui.button(egui::RichText::new(status_text).color(status_color))
-                                    .on_hover_text(if new_running { "Autorno daemon is running" } else { "Start Autorno daemon" })
-                                    .clicked() 
-                                {
-                                    if !new_running {
-                                        if let Ok(exe_path) = std::env::current_exe() {
-                                            if let Some(parent) = exe_path.parent() {
-                                                inforno_core::realm_mount::cleanup_orphaned_mounts();
-                                                
-                                                let autorno_path = parent.join("autorno");
-                                                let _ = std::process::Command::new(autorno_path).spawn();
-                                                // Force an immediate re-check next frame
-                                                ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (false, now - std::time::Duration::from_secs(10))));
-                                            }
-                                        }
-                                    }
-                                }
-
                                 // --- 💻 Terminal ---
                                 if ui.button("💻").on_hover_text("Open interactive terminal in VFS (as gui)").clicked() {
                                     if let Ok(exe_path) = std::env::current_exe() {
                                         if let Some(parent) = exe_path.parent() {
                                             let autorno_path = parent.join("autorno");
-                                            
-                                            // Extract the first bookmark's path. 
+
+                                            // Extract the first bookmark's path.
                                             // (Ensure `places` uses IndexMap in your Realm struct to guarantee order).
                                             // If your places are structs requiring the mandatory 'intro' field, change this to: .map(|p| p.path.clone())
                                             let start_dir = realm.raw_config.places.values().next()
                                                 .map(|v| v.0.clone())
                                                 .unwrap_or_else(|| "/".to_string());
-                                                
+
                                             // Fallback chain for different Desktop Environments
                                             let terms = [
                                                 ("x-terminal-emulator", vec!["-e"]),
@@ -374,7 +382,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                 ("alacritty", vec!["-e"]),
                                                 ("kitty", vec!["--"]),
                                             ];
-                                            
+
                                             for (term, t_args) in terms {
                                                 if std::process::Command::new(term)
                                                     .args(&t_args)
@@ -385,7 +393,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                     .arg(&realm.name)
                                                     .arg("gui")
                                                     .spawn()
-                                                    .is_ok() 
+                                                    .is_ok()
                                                 {
                                                     break;
                                                 }

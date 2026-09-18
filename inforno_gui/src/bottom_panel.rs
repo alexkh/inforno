@@ -90,7 +90,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                         crate::emoji_render::emoji_menu_button(ui, '📎', attach_trailing).ui(ui, |ui| {
                             // Dynamically resolve the currently selected place to a local filesystem path
                             let mut current_root = state.project_root.clone();
-                            
+
                             if let Some(realm) = &state.active_realm {
                                 if !realm.raw_config.places.is_empty() {
                                     let cache_id = egui::Id::new("active_place").with(&realm.name);
@@ -98,7 +98,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                                         let first = realm.raw_config.places.keys().next().unwrap().clone();
                                         d.get_temp::<String>(cache_id).unwrap_or(first)
                                     });
-                                    
+
                                     if let Some(place_vpath) = realm.raw_config.places.get(&active_place_name) {
                                         for mount in &realm.mounts {
                                             let p_clean = place_vpath.0.trim_matches('/');
