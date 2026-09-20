@@ -30,10 +30,10 @@ pub enum GlobExpr {
     Any { any: Vec<GlobExpr> },
     All { all: Vec<GlobExpr> },
     Not { not: Box<GlobExpr> },
-    Match { #[serde(rename = "match")] match_globs: Vec<String> },
-    /// References a named expression in `RealmConfig::spans`, e.g.
-    /// `{ ref: "rust_source" }`. Resolved and cycle-checked at compile time.
-    Ref { #[serde(rename = "ref")] ref_name: String },
+    /// A raw list of expressions acts as an implicit OR (Any)
+    List(Vec<GlobExpr>),
+    /// A raw string. If it starts with '@', it's a reference to a Span. Otherwise, a glob.
+    Pattern(String),
 }
 
 pub enum CompiledExpr {
@@ -52,7 +52,7 @@ impl CompiledExpr {
 
     fn compile_inner(expr: &GlobExpr, defs: &IndexMap<String, GlobExpr>, stack: &mut Vec<String>) -> Result<Self, String> {
         match expr {
-            GlobExpr::Any { any: exprs } => {
+            GlobExpr::Any { any: exprs } | GlobExpr::List(exprs) => {
                 let compiled = exprs.iter().map(|e| Self::compile_inner(e, defs, stack)).collect::<Result<Vec<_>, _>>()?;
                 Ok(CompiledExpr::Any(compiled))
             }
@@ -63,24 +63,23 @@ impl CompiledExpr {
             GlobExpr::Not { not: inner } => {
                 Ok(CompiledExpr::Not(Box::new(Self::compile_inner(inner, defs, stack)?)))
             }
-            GlobExpr::Match { match_globs: globs } => {
-                let mut builder = globset::GlobSetBuilder::new();
-                for g in globs {
-                    builder.add(globset::Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
+            GlobExpr::Pattern(s) => {
+                if let Some(ref_name) = s.strip_prefix('@') {
+                    if stack.contains(&ref_name.to_string()) {
+                        let mut cycle = stack.clone();
+                        cycle.push(ref_name.to_string());
+                        return Err(format!("Cyclic expression reference: {}", cycle.join(" -> ")));
+                    }
+                    let target = defs.get(ref_name).ok_or_else(|| format!("Undefined named expression '{}'", ref_name))?;
+                    stack.push(ref_name.to_string());
+                    let compiled = Self::compile_inner(target, defs, stack)?;
+                    stack.pop();
+                    Ok(compiled)
+                } else {
+                    let mut builder = globset::GlobSetBuilder::new();
+                    builder.add(globset::Glob::new(s).map_err(|e| format!("Invalid glob '{}': {}", s, e))?);
+                    Ok(CompiledExpr::Match(builder.build().map_err(|e| e.to_string())?))
                 }
-                Ok(CompiledExpr::Match(builder.build().map_err(|e| e.to_string())?))
-            }
-            GlobExpr::Ref { ref_name: name } => {
-                if stack.contains(name) {
-                    let mut cycle = stack.clone();
-                    cycle.push(name.clone());
-                    return Err(format!("Cyclic expression reference: {}", cycle.join(" -> ")));
-                }
-                let target = defs.get(name).ok_or_else(|| format!("Undefined named expression '{}'", name))?;
-                stack.push(name.clone());
-                let compiled = Self::compile_inner(target, defs, stack)?;
-                stack.pop();
-                Ok(compiled)
             }
         }
     }
@@ -1096,26 +1095,29 @@ impl ActiveRealm {
 /// cycles); the fallback below is defensive, not expected in practice.
 pub fn describe_expr(expr: &GlobExpr, defs: &IndexMap<String, GlobExpr>) -> String {
     match expr {
-        GlobExpr::Match { match_globs: globs } => {
-            if globs.len() == 1 {
-                format!("matching `{}`", globs[0])
+        GlobExpr::Pattern(s) => {
+            if let Some(ref_name) = s.strip_prefix('@') {
+                match defs.get(ref_name) {
+                    Some(target) => describe_expr(target, defs),
+                    None => format!("matching an undefined pattern '{}'", ref_name),
+                }
             } else {
-                format!("matching any of: {}", globs.iter().map(|g| format!("`{}`", g)).collect::<Vec<_>>().join(", "))
+                format!("matching `{}`", s)
             }
         }
-        GlobExpr::Any { any: exprs } => {
+        GlobExpr::List(exprs) | GlobExpr::Any { any: exprs } => {
             let parts: Vec<String> = exprs.iter().map(|e| describe_expr(e, defs)).collect();
-            format!("any of ({})", parts.join("; or "))
+            if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                format!("any of ({})", parts.join("; or "))
+            }
         }
         GlobExpr::All { all: exprs } => {
             let parts: Vec<String> = exprs.iter().map(|e| describe_expr(e, defs)).collect();
             format!("all of ({})", parts.join("; and "))
         }
         GlobExpr::Not { not: inner } => format!("anything except {}", describe_expr(inner, defs)),
-        GlobExpr::Ref { ref_name: name } => match defs.get(name) {
-            Some(target) => describe_expr(target, defs),
-            None => format!("matching an undefined pattern '{}'", name),
-        },
     }
 }
 

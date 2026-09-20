@@ -31,8 +31,17 @@ pub struct RealmConfigState {
     pub place_edit_path: String,
     pub place_edit_comment: String,
 
+    // --- Visual Builder: Span Edit State ---
+    pub is_editing_span: bool,
+    pub span_edit_original_key: Option<String>, // None means "Adding new"
+    pub span_edit_key: String,
+    pub span_edit_expr: Option<inforno_core::realm::GlobExpr>,
+
     pub cached_config: Option<inforno_core::realm::RealmConfig>,
     pub show_save_confirmation: bool,
+    
+    // The role selected in the VFS tree preview dropdown
+    pub vfs_preview_role: String,
 
     // Indicates the app booted with a broken YAML file and is offering a rescue
     pub is_fixing_broken_realm: bool,
@@ -200,13 +209,30 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                     // 2. Live VFS Tree Visualization
                     ui.heading("Active Virtual File System");
                     ui.separator();
-                    ScrollArea::vertical().id_salt("vfs_tree_scroll").show(ui, |ui| {
-                        if let Some(realm) = &state.active_realm {
-                            render_vfs_tree(ui, realm);
-                        } else {
-                            ui.label("No active realm to display.");
-                        }
-                    });
+                    if let Some(realm) = &state.active_realm {
+                        ui.horizontal(|ui| {
+                            ui.label("Preview as Role:");
+                            if substate.vfs_preview_role.is_empty() && !realm.roles.is_empty() {
+                                substate.vfs_preview_role = realm.roles.keys().next().unwrap().clone();
+                            }
+                            
+                            egui::ComboBox::from_id_salt("vfs_preview_role")
+                                .selected_text(&substate.vfs_preview_role)
+                                .show_ui(ui, |ui| {
+                                    for role in realm.roles.keys() {
+                                        ui.selectable_value(&mut substate.vfs_preview_role, role.clone(), role);
+                                    }
+                                });
+                        });
+                        ui.add_space(5.0);
+                        
+                        // Use both() to allow horizontal scrolling for deep folder trees
+                        ScrollArea::both().id_salt("vfs_tree_scroll").max_height(350.0).show(ui, |ui| {
+                            render_vfs_tree(ui, realm, &substate.vfs_preview_role);
+                        });
+                    } else {
+                        ui.label("No active realm loaded to display (Apply changes first).");
+                    }
                 });
             });
         });
@@ -472,7 +498,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
     ui.add_space(10.0);
 
-    egui::CollapsingHeader::new(format!("🔖 Places ({})", parsed_config.places.len()))
+    egui::CollapsingHeader::new(format!("🗼 Places ({})", parsed_config.places.len()))
         .show(ui, |ui| {
             if substate.is_editing_place {
                 ui.group(|ui| {
@@ -540,7 +566,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             ui.label("->");
                             ui.label(&path.0);
                             if !path.1.is_empty() {
-                                ui.label(egui::RichText::new(format!("// {}", path.1.trim())).weak());
+                                ui.label(egui::RichText::new(format!("# {}", path.1.trim())).weak());
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.button("🗑").on_hover_text("Delete Place").clicked() {
@@ -572,12 +598,86 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
     egui::CollapsingHeader::new(format!("🎯 Spans ({})", parsed_config.expressions.len()))
         .show(ui, |ui| {
-            for (name, _expr) in &parsed_config.expressions {
-                ui.label(egui::RichText::new(name).strong());
-            }
-            ui.button("+ Add Span");
-        });
+            if substate.is_editing_span {
+                ui.group(|ui| {
+                    ui.heading(if substate.span_edit_original_key.is_some() { "Edit Span" } else { "Add Span" });
 
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut substate.span_edit_key);
+                    });
+
+                    ui.add_space(5.0);
+                    ui.label("Expression:");
+                    
+                    let available_refs: Vec<String> = parsed_config.expressions.keys().cloned().collect();
+                    
+                    if let Some(mut expr) = substate.span_edit_expr.take() {
+                        ui_edit_glob_expr(ui, &mut expr, &available_refs, 0);
+                        substate.span_edit_expr = Some(expr);
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let can_apply = !substate.span_edit_key.trim().is_empty() && substate.span_edit_expr.is_some();
+
+                        if ui.add_enabled(can_apply, egui::Button::new("✔ Apply")).clicked() {
+                            let new_key = substate.span_edit_key.trim().to_string();
+                            let new_expr = substate.span_edit_expr.take().unwrap();
+
+                            if let Some(ref orig_key) = substate.span_edit_original_key {
+                                let mut new_exprs = indexmap::IndexMap::new();
+                                for (k, v) in parsed_config.expressions.iter() {
+                                    if k == orig_key {
+                                        new_exprs.insert(new_key.clone(), new_expr.clone());
+                                    } else {
+                                        new_exprs.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                new_config.expressions = new_exprs;
+                            } else {
+                                new_config.expressions.insert(new_key, new_expr);
+                            }
+
+                            config_changed = true;
+                            substate.is_editing_span = false;
+                        }
+
+                        if ui.button("✖ Cancel").clicked() {
+                            substate.is_editing_span = false;
+                            substate.span_edit_expr = None;
+                        }
+                    });
+                });
+            } else {
+                for (name, expr) in &parsed_config.expressions {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(name).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑").on_hover_text("Delete Span").clicked() {
+                                    new_config.expressions.shift_remove(name);
+                                    config_changed = true;
+                                }
+                                if ui.button("✏").on_hover_text("Edit Span").clicked() {
+                                    substate.is_editing_span = true;
+                                    substate.span_edit_original_key = Some(name.clone());
+                                    substate.span_edit_key = name.clone();
+                                    substate.span_edit_expr = Some(expr.clone());
+                                }
+                            });
+                        });
+                        ui.label(egui::RichText::new(inforno_core::realm::describe_expr(expr, &parsed_config.expressions)).weak().small());
+                    });
+                }
+                if ui.button("+ Add Span").clicked() {
+                    substate.is_editing_span = true;
+                    substate.span_edit_original_key = None;
+                    substate.span_edit_key = "new_span".to_string();
+                    substate.span_edit_expr = Some(inforno_core::realm::GlobExpr::Pattern("**/*".to_string()));
+                }
+            }
+        });
     ui.add_space(10.0);
 
     egui::CollapsingHeader::new(format!("🎓 Tiers ({})", parsed_config.tiers.len()))
@@ -599,22 +699,22 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
             for (name, role) in &parsed_config.roles {
                 let role = &role.0;
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new(name).strong());
-                    ui.horizontal(|ui| {
-                        ui.label("Tier:");
-                        ui.label(role.tier.0.to_string());
-                    });
-                    if let Some(boss) = &role.boss {
-                        ui.horizontal(|ui| {
-                            ui.label("Boss:");
-                            ui.label(boss);
-                        });
-                    }
                     if let Some(c) = parsed_config.roles.get(name) {
                         if !c.1.trim().is_empty() {
-                            ui.label(egui::RichText::new(format!("// {}", c.1.trim())).weak());
+                            ui.label(egui::RichText::new(format!("# {}", c.1.trim())).weak());
                         }
                     }
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(name).strong());
+
+                        ui.label("🎓Tier:");
+                        ui.label(role.tier.0.to_string());
+
+                        if let Some(boss) = &role.boss {
+                            ui.label("Boss:");
+                            ui.label(boss);
+                        }
+                    });
                     if !role.powers.is_empty() {
                         ui.label(format!("Powers: {} defined", role.powers.len()));
                     }
@@ -625,7 +725,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
     ui.add_space(10.0);
 
-    egui::CollapsingHeader::new(format!("📦 Sandboxes ({})", parsed_config.sandboxes.len()))
+    egui::CollapsingHeader::new(format!("⚗️ Sandboxes ({})", parsed_config.sandboxes.len()))
         .show(ui, |ui| {
             for (name, sandbox) in &parsed_config.sandboxes {
                 let sandbox = &sandbox.0;
@@ -655,9 +755,9 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
         let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
         match serde_saphyr::to_string_with_options(&new_config, opts) {
             Ok(yaml) => {
-                // Post-processor: serde_saphyr places comments for structs (like mounts)
-                // inside the block before the first field. We hoist them above the parent key.
                 let mut lines: Vec<String> = yaml.lines().map(String::from).collect();
+                
+                // Pass 1: Handle Inner Struct Comments (Mounts, Roles, Tiers)
                 let mut i = 0;
                 while i < lines.len() {
                     let current_line = &lines[i];
@@ -682,20 +782,72 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
                         let num_comments = comment_block.len();
                         if num_comments > 0 {
+                            // Remove the comments from inside the struct block
                             for _ in 0..num_comments {
                                 lines.remove(i + 1);
                             }
-                            let indent_str = " ".repeat(key_indent);
-                            for (idx, comment) in comment_block.into_iter().enumerate() {
-                                lines.insert(i + idx, format!("{}{}", indent_str, comment));
+                            
+                            if num_comments == 1 {
+                                // SINGLE-LINE: Inline it! Append directly to the parent key.
+                                let comment = &comment_block[0];
+                                lines[i] = format!("{} {}", lines[i], comment);
+                            } else {
+                                // MULTI-LINE: Hoist it safely ABOVE the parent key.
+                                let indent_str = " ".repeat(key_indent);
+                                for (idx, comment) in comment_block.into_iter().enumerate() {
+                                    lines.insert(i + idx, format!("{}{}", indent_str, comment));
+                                }
+                                i += num_comments;
                             }
-                            i += num_comments;
                         }
                     }
                     i += 1;
                 }
 
-                // Second pass: Insert empty lines between major top-level sections
+                // Pass 2: Handle Above-Scalar Comments (Places)
+                let mut i = 0;
+                while i < lines.len() {
+                    let line = &lines[i];
+                    let trimmed = line.trim_start();
+                    
+                    if trimmed.starts_with('#') {
+                        let indent = line.len() - trimmed.len();
+                        
+                        if i + 1 < lines.len() {
+                            let next_line = &lines[i + 1];
+                            let next_trimmed = next_line.trim_start();
+                            let next_indent = next_line.len() - next_trimmed.len();
+                            
+                            // Check if this is an isolated, single-line comment
+                            let is_single_comment = if i > 0 {
+                                let prev_line = &lines[i - 1];
+                                let prev_trimmed = prev_line.trim_start();
+                                let prev_indent = prev_line.len() - prev_trimmed.len();
+                                !(prev_trimmed.starts_with('#') && prev_indent == indent)
+                            } else {
+                                true
+                            };
+                            
+                            // If it's a single comment, and the next line is a scalar (key: value), inline it!
+                            if is_single_comment 
+                                && next_indent == indent 
+                                && !next_trimmed.starts_with('#') 
+                                && next_trimmed.contains(':') 
+                                && !next_trimmed.trim_end().ends_with(':') 
+                            {
+                                let comment_text = trimmed.to_string();
+                                let base_line = next_line.to_string();
+                                
+                                lines[i] = format!("{} {}", base_line, comment_text);
+                                lines.remove(i + 1);
+                                // Don't advance `i` so we can re-evaluate the merged line (won't match '#' anyway)
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+
+                // Pass 3: Insert empty lines between major top-level sections
                 let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "roles:", "sandboxes:", "bin:", "env:"];
                 let mut i = 0;
                 while i < lines.len() {
@@ -724,26 +876,203 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     }
 }
 
-fn render_vfs_tree(ui: &mut egui::Ui, realm: &inforno_core::realm::ActiveRealm) {
-    // You would dynamically build this based on `realm.mounts`
-    for mount in &realm.mounts {
-        egui::CollapsingHeader::new(format!("🗄 {}", mount.virtual_path))
-            .default_open(true)
+fn ui_edit_glob_expr(
+    ui: &mut egui::Ui,
+    expr: &mut inforno_core::realm::GlobExpr,
+    available_refs: &[String],
+    id_salt: usize
+) {
+    use inforno_core::realm::GlobExpr;
+
+    ui.push_id(id_salt, |ui| {
+        egui::Frame::default()
+            .inner_margin(6.0)
+            .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .corner_radius(4.0)
             .show(ui, |ui| {
-                // In a real scenario, you could use `walkdir` up to a depth of 1 or 2
-                // mapped through your `glob_selections` to show what is accessible.
+                ui.horizontal(|ui| {
+                    let current_variant = match expr {
+                        GlobExpr::Pattern(s) if s.starts_with('@') => "Ref",
+                        GlobExpr::Pattern(_) => "Match",
+                        GlobExpr::List(_) | GlobExpr::Any { .. } => "Any",
+                        GlobExpr::All { .. } => "All",
+                        GlobExpr::Not { .. } => "Not",
+                    };
 
-                // For now, mockup visual representation:
-                ui.label(RichText::new("Host Path:").weak());
-                ui.label(mount.host_path.display().to_string());
-                ui.add_space(5.0);
+                    let label = match current_variant {
+                        "Match" => "📄 Glob Match",
+                        "Any" => "🔀 Any (OR)",
+                        "All" => "🔗 All (AND)",
+                        "Not" => "🚫 Not",
+                        "Ref" => "🔖 Reference",
+                        _ => "",
+                    };
 
-                egui::CollapsingHeader::new("📁 src")
-                    .show(ui, |ui| {
-                        ui.label("📄 main.rs");
-                        ui.label("📄 lib.rs");
+                    egui::ComboBox::from_id_salt("variant_combo").selected_text(label).show_ui(ui, |ui| {
+                        if ui.selectable_label(current_variant == "Match", "📄 Glob Match").clicked() && current_variant != "Match" {
+                            *expr = GlobExpr::Pattern("**/*".to_string());
+                        }
+                        if ui.selectable_label(current_variant == "Any", "🔀 Any (OR)").clicked() && current_variant != "Any" {
+                            *expr = GlobExpr::List(vec![]);
+                        }
+                        if ui.selectable_label(current_variant == "All", "🔗 All (AND)").clicked() && current_variant != "All" {
+                            *expr = GlobExpr::All { all: vec![] };
+                        }
+                        if ui.selectable_label(current_variant == "Not", "🚫 Not").clicked() && current_variant != "Not" {
+                            *expr = GlobExpr::Not { not: Box::new(GlobExpr::Pattern("**/*".to_string())) };
+                        }
+                        if ui.selectable_label(current_variant == "Ref", "🔖 Reference").clicked() && current_variant != "Ref" {
+                            *expr = GlobExpr::Pattern("@".to_string());
+                        }
                     });
-                ui.label("📄 Cargo.toml");
+                });
+
+                ui.indent("expr_indent", |ui| {
+                    match expr {
+                        GlobExpr::Pattern(s) => {
+                            if s.starts_with('@') {
+                                let mut current_ref = s.strip_prefix('@').unwrap_or("").to_string();
+                                egui::ComboBox::from_id_salt("ref_combo")
+                                    .selected_text(if current_ref.is_empty() { "Select a span..." } else { current_ref.as_str() })
+                                    .show_ui(ui, |ui| {
+                                        for r in available_refs {
+                                            if ui.selectable_value(&mut current_ref, r.clone(), r).clicked() {
+                                                *s = format!("@{}", current_ref);
+                                            }
+                                        }
+                                    });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.text_edit_singleline(s);
+                                });
+                            }
+                        }
+                        GlobExpr::List(any) | GlobExpr::Any { any } | GlobExpr::All { all: any } => {
+                            let mut to_remove = None;
+                            for (i, e) in any.iter_mut().enumerate() {
+                                ui.horizontal_top(|ui| {
+                                    if ui.button("✖").clicked() {
+                                        to_remove = Some(i);
+                                    }
+                                    ui_edit_glob_expr(ui, e, available_refs, i);
+                                });
+                            }
+                            if let Some(i) = to_remove {
+                                any.remove(i);
+                            }
+                            if ui.button("+ Add Condition").clicked() {
+                                any.push(GlobExpr::Pattern("**/*".to_string()));
+                            }
+                        }
+                        GlobExpr::Not { not } => {
+                            ui_edit_glob_expr(ui, not, available_refs, 0);
+                        }
+                    }
+                });
             });
+    });
+}
+
+fn render_vfs_tree(ui: &mut egui::Ui, realm: &inforno_core::realm::ActiveRealm, role: &str) {
+    for mount in &realm.mounts {
+        let v_path = std::path::PathBuf::from(&mount.virtual_path);
+        render_vfs_node(ui, realm, &mount.host_path, &v_path, role, true);
+    }
+}
+
+fn render_vfs_node(
+    ui: &mut egui::Ui,
+    realm: &inforno_core::realm::ActiveRealm,
+    host_path: &std::path::Path,
+    virtual_path: &std::path::Path,
+    role: &str,
+    is_root: bool
+) {
+    // 1. FUSE Visibility Gate: If the Realm hides it (e.g. dotfiles), it doesn't exist to `ls`.
+    if realm.is_path_hidden(virtual_path, role) {
+        return;
+    }
+
+    let is_dir = host_path.is_dir();
+
+    // 2. FUSE Access Check: Can they modify it?
+    // Directories themselves are governed by the mount's RO flag. FUSE evaluates
+    // glob-based Create/Write/Unlink rules against the specific *child* file path.
+    let mut can_read = true;
+    let mut can_write = true;
+    let mut can_append = true;
+
+    if is_dir {
+        if realm.is_path_read_only(virtual_path) {
+            can_write = false;
+            can_append = false;
+        }
+    } else {
+        can_read = realm.can_access(virtual_path, inforno_core::realm::Cap::Read, role).is_ok();
+        can_write = realm.can_access(virtual_path, inforno_core::realm::Cap::Write, role).is_ok();
+        can_append = realm.can_access(virtual_path, inforno_core::realm::Cap::Append, role).is_ok();
+    }
+
+    let icon = if can_write {
+        ""
+    } else if can_append {
+        " 📝 (Append Only)"
+    } else if can_read {
+        " 🔒 (Read Only)"
+    } else {
+        " 🚫 (No Access)"
+    };
+
+    let name = if is_root {
+        format!("🗄 {} (→ {}){}", virtual_path.display(), host_path.display(), icon)
+    } else {
+        format!("{}{}", host_path.file_name().unwrap_or_default().to_string_lossy(), icon)
+    };
+
+    let text_color = if !can_read {
+        ui.visuals().error_fg_color // Red for unreadable files
+    } else if can_write {
+        ui.visuals().text_color() // Normal for RW
+    } else {
+        ui.visuals().weak_text_color() // Dimmed for RO/Append
+    };
+
+    if host_path.is_dir() {
+        let label = egui::RichText::new(format!("{} {}", if is_root {""} else {"📁"}, name)).color(text_color);
+        
+        egui::CollapsingHeader::new(label)
+            .id_salt(virtual_path) // Guarantee unique ID
+            .default_open(is_root) // Auto-open the mount roots
+            .show(ui, |ui| {
+                // Egui's lazyness shines here: this code only runs if the header is EXPANDED!
+                if let Ok(entries) = std::fs::read_dir(host_path) {
+                    let mut paths: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                    // Sort directories first, then alphabetically
+                    paths.sort_by_key(|e| {
+                        let is_d = e.path().is_dir();
+                        (!is_d, e.file_name()) 
+                    });
+
+                    if paths.is_empty() {
+                        ui.label(egui::RichText::new("(empty)").weak().italics());
+                    } else {
+                        for entry in paths {
+                            render_vfs_node(
+                                ui, 
+                                realm, 
+                                &entry.path(), 
+                                &virtual_path.join(entry.file_name()), 
+                                role, 
+                                false
+                            );
+                        }
+                    }
+                } else {
+                    ui.label(egui::RichText::new("Failed to read directory from disk")
+                        .color(ui.visuals().error_fg_color));
+                }
+            });
+    } else {
+        ui.label(egui::RichText::new(format!("📄 {}", name)).color(text_color));
     }
 }
