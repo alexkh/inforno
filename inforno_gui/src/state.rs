@@ -229,6 +229,11 @@ impl State {
             }
         }
 
+        let mut initial_error_msg = None;
+        let mut is_fixing_broken_realm = false;
+        let mut broken_realm_yaml = String::new();
+        let mut broken_realm_name = String::new();
+
         if let Some(realm_name) = realm_name_lock {
             // We are in a Realm! Realms always live under the fixed realms
             // directory now — never derived from the Sandbox's location,
@@ -238,48 +243,67 @@ impl State {
 
             if let Some(realm_dir) = realm_dir {
                 let yaml_path = realm_dir.join("realm2.yml");
-                if let Ok(config_str) = std::fs::read_to_string(&yaml_path) {
-                    if let Ok(raw_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
+                match std::fs::read_to_string(&yaml_path) {
+                    Ok(config_str) => {
+                        match serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
+                            Ok(raw_config) => {
+                                match inforno_core::realm::ActiveRealm::from_config(realm_name.clone(), raw_config) {
+                                    Ok(realm) => {
+                                        // Resolve the default place (Fallback to the first mount point)
+                                        let mut selected_workspace_name = None;
+                                        let mut selected_project_root = None;
 
-                        // Compile the realm (builds the GlobSets and sorts for longest-prefix match)
-                        if let Ok(realm) = inforno_core::realm::ActiveRealm::from_config(realm_name, raw_config) {
-                            // Resolve the default place (Fallback to the first mount point)
-                            let mut selected_workspace_name = None;
-                            let mut selected_project_root = None;
+                                        // 1. Try to grab the first globally defined Place
+                                        if let Some(first_place_vpath) = realm.raw_config.places.values().next() {
+                                            selected_workspace_name = Some(first_place_vpath.0.clone());
+                                            
+                                            let mut found = false;
+                                            for mount in &realm.mounts {
+                                                if first_place_vpath.0.starts_with(&mount.virtual_path) {
+                                                    let relative = first_place_vpath.0.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
+                                                    selected_project_root = Some(mount.host_path.join(relative));
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                            // Fallback for raw host paths
+                                            if !found {
+                                                selected_project_root = Some(std::path::PathBuf::from(&first_place_vpath.0));
+                                            }
+                                        }
 
-                            // 1. Try to grab the first globally defined Place
-                            if let Some(first_place_vpath) = realm.raw_config.places.values().next() {
-                                selected_workspace_name = Some(first_place_vpath.0.clone());
-                                
-                                let mut found = false;
-                                for mount in &realm.mounts {
-                                    if first_place_vpath.0.starts_with(&mount.virtual_path) {
-                                        let relative = first_place_vpath.0.strip_prefix(&mount.virtual_path).unwrap_or("").trim_start_matches('/');
-                                        selected_project_root = Some(mount.host_path.join(relative));
-                                        found = true;
-                                        break;
+                                        // 2. Fallback to the first Mount if there are no Places
+                                        if selected_workspace_name.is_none() {
+                                            if let Some(first_mount) = realm.mounts.first() {
+                                                selected_workspace_name = Some(first_mount.virtual_path.clone());
+                                                selected_project_root = Some(first_mount.host_path.clone());
+                                            }
+                                        }
+
+                                        if selected_workspace_name.is_some() {
+                                            active_workspace_name = selected_workspace_name;
+                                            project_root = selected_project_root;
+                                        }
+                                        active_realm = Some(realm);
+                                    }
+                                    Err(e) => {
+                                        initial_error_msg = Some(format!("Failed to compile Realm '{}': {}", realm_name, e));
+                                        is_fixing_broken_realm = true;
+                                        broken_realm_yaml = config_str;
+                                        broken_realm_name = realm_name;
                                     }
                                 }
-                                // Fallback for raw host paths
-                                if !found {
-                                    selected_project_root = Some(std::path::PathBuf::from(&first_place_vpath.0));
-                                }
                             }
-
-                            // 2. Fallback to the first Mount if there are no Places
-                            if selected_workspace_name.is_none() {
-                                if let Some(first_mount) = realm.mounts.first() {
-                                    selected_workspace_name = Some(first_mount.virtual_path.clone());
-                                    selected_project_root = Some(first_mount.host_path.clone());
-                                }
+                            Err(e) => {
+                                initial_error_msg = Some(format!("Failed to parse realm2.yml for Realm '{}': {}", realm_name, e));
+                                is_fixing_broken_realm = true;
+                                broken_realm_yaml = config_str;
+                                broken_realm_name = realm_name;
                             }
-
-                            if selected_workspace_name.is_some() {
-                                active_workspace_name = selected_workspace_name;
-                                project_root = selected_project_root;
-                            }
-                            active_realm = Some(realm);
                         }
+                    }
+                    Err(e) => {
+                        initial_error_msg = Some(format!("Failed to read realm2.yml for Realm '{}': {}", realm_name, e));
                     }
                 }
             }
@@ -470,7 +494,13 @@ impl State {
             show_key_manager: false,
             show_preset_editor: false,
             show_realm_config: false,
-            realm_config_state: RealmConfigState::default(),
+            realm_config_state: RealmConfigState {
+                yaml_buffer: broken_realm_yaml.clone(),
+                original_yaml: broken_realm_yaml,
+                is_fixing_broken_realm,
+                realm_name: if is_fixing_broken_realm { Some(broken_realm_name) } else { None },
+                ..Default::default()
+            },
             api_key_entered: String::new(),
             openrouter_api_key: api_key,
             keyring_used: is_keyring_used,
@@ -497,8 +527,8 @@ impl State {
                 rx: chat_rx,
                 tx: chat_tx,
             },
-            error_msg: None, // if there is an error, modal will auto open
-            is_modal_open: false, // if file dialog is open this needs to be true
+            error_msg: initial_error_msg.clone(), // if there is an error, modal will auto open
+            is_modal_open: initial_error_msg.is_some() || show_project_init || show_realm_sandbox_init,
             bottom_panel_state: BottomPanelState::default(),
             agent_config_state: AgentConfigState::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),

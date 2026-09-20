@@ -153,26 +153,23 @@ mod tests {
         });
 
         let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert(2, crate::realm::TierConfig { bin: None, powers: vec![
-            Power {
-                span: GlobExpr::Match { match_globs: vec!["**".to_string()] },
+        tiers.insert(2, crate::realm::TierConfig { bin: None, env: vec![], powers: vec![
+            serde_saphyr::Commented(Power {
+                span: GlobExpr::Pattern("**".to_string()),
                 caps: vec![Cap::Read],
-                intro: Some("Read everything".to_string()),
                 overrides: None,
-            },
-            Power {
+            }, " Read everything".to_string()),
+            serde_saphyr::Commented(Power {
                 // Intentionally exclude readonly.txt and .hidden.txt from having Write power
-                span: GlobExpr::Match { match_globs: vec!["normal.txt".to_string()] },
+                span: GlobExpr::Pattern("normal.txt".to_string()),
                 caps: vec![Cap::Write],
-                intro: Some("Write access to normal files".to_string()),
                 overrides: None,
-            },
-            Power {
-                span: GlobExpr::Match { match_globs: vec!["append_only.txt".to_string()] },
+            }, " Write access to normal files".to_string()),
+            serde_saphyr::Commented(Power {
+                span: GlobExpr::Pattern("append_only.txt".to_string()),
                 caps: vec![Cap::Append],
-                intro: Some("Append access to logs".to_string()),
                 overrides: None,
-            }
+            }, " Append access to logs".to_string())
         ]});
 
         let config = RealmConfig {

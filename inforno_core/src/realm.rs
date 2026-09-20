@@ -137,8 +137,6 @@ pub struct Power {
     pub span: GlobExpr,
     pub caps: Vec<Cap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intro: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<String>,
 }
 
@@ -151,7 +149,7 @@ pub struct Power {
 pub struct RoleConfig {
     pub tier: Tier,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub powers: Vec<Power>,
+    pub powers: Vec<serde_saphyr::Commented<Power>>,
     // `intro` was removed: roles are entries in `RealmConfig::roles`,
     // already wrapped in `Commented<RoleConfig>`, so a description now
     // lives as a YAML comment on/above the role's key instead of a
@@ -162,8 +160,8 @@ pub struct RoleConfig {
     /// basename) to expose in `/bin`, on top of whatever the Realm-wide
     /// `bin` and this role's Tier(s) already contribute. See
     /// `RealmConfig::bin` for how the cascade combines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bin: Option<GlobExpr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bin: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
@@ -237,13 +235,13 @@ pub(crate) fn is_safe_path_component(s: &str) -> bool {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TierConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub powers: Vec<Power>,
+    pub powers: Vec<serde_saphyr::Commented<Power>>,
     /// Glob expression selecting extra host binaries (matched by bare
     /// basename) to expose in `/bin` to every role at or above this tier —
     /// unioned with the Realm-wide `bin` and whatever the role adds itself.
     /// See `RealmConfig::bin` for how the cascade combines.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bin: Option<GlobExpr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bin: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
@@ -313,8 +311,8 @@ pub struct RealmConfig {
     /// expose a binary — "everything except X" is expressed within one
     /// level's own expression (`all` + `not`), not by subtracting across
     /// levels. See `ActiveRealm::bin_is_selected`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bin: Option<GlobExpr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bin: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
 }
@@ -441,13 +439,13 @@ pub struct CompiledPower {
 }
 
 impl CompiledPower {
-    fn compile(power: &Power, defs: &IndexMap<String, GlobExpr>) -> Result<Self, String> {
+    fn compile(power: &Power, defs: &IndexMap<String, GlobExpr>, intro: Option<String>) -> Result<Self, String> {
         let span = Arc::new(CompiledExpr::compile(&power.span, defs)?);
         Ok(Self {
             span_source: power.span.clone(),
             span,
             caps: power.caps.clone(),
-            intro: power.intro.as_deref().map(Into::into),
+            intro: intro.map(Into::into),
             overrides: power.overrides.clone(),
         })
     }
@@ -481,7 +479,7 @@ pub struct CompiledRole {
     pub tier: Tier,
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
-    pub bin: Option<Arc<CompiledExpr>>,
+    pub bin: Option<Arc<globset::GlobSet>>,
     pub env: Option<Arc<globset::GlobSet>>,
     pub env_vars: HashMap<String, String>,
 }
@@ -497,12 +495,12 @@ pub struct ActiveRealm {
     pub tiers: BTreeMap<u32, Vec<CompiledPower>>,
     /// Tier number -> compiled `bin` expression, mirroring `tiers` above.
     /// Sparse: a tier with no `bin` declared contributes nothing to the cascade.
-    pub tier_bins: BTreeMap<u32, Arc<CompiledExpr>>,
+    pub tier_bins: BTreeMap<u32, Arc<globset::GlobSet>>,
     pub tier_envs: BTreeMap<u32, Arc<globset::GlobSet>>,
     pub tier_env_vars: BTreeMap<u32, HashMap<String, String>>,
     /// The Realm-wide `bin` expression (from `RealmConfig::bin`), applied
     /// first in the cascade — see `bin_is_selected`.
-    pub bin: Option<Arc<CompiledExpr>>,
+    pub bin: Option<Arc<globset::GlobSet>>,
     pub env: Option<Arc<globset::GlobSet>>,
     pub env_vars: HashMap<String, String>,
     /// Plain-English capability descriptions per role name, computed once at
@@ -511,6 +509,17 @@ pub struct ActiveRealm {
     /// mutated in place — if that assumption ever changes, this cache needs
     /// explicit invalidation.
     pub role_capabilities: HashMap<String, Arc<Vec<String>>>,
+}
+
+fn compile_bin_list(bins: &[String]) -> Result<Option<Arc<globset::GlobSet>>, String> {
+    if bins.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    for item in bins {
+        builder.add(globset::Glob::new(item).map_err(|e| format!("Invalid bin glob '{}': {}", item, e))?);
+    }
+    Ok(Some(Arc::new(builder.build().map_err(|e| e.to_string())?)))
 }
 
 fn compile_env_list(envs: &[String]) -> Result<(Option<Arc<globset::GlobSet>>, HashMap<String, String>), String> {
@@ -573,21 +582,22 @@ impl ActiveRealm {
         }
 
         let mut tiers: BTreeMap<u32, Vec<CompiledPower>> = BTreeMap::new();
-        let mut tier_bins: BTreeMap<u32, Arc<CompiledExpr>> = BTreeMap::new();
+        let mut tier_bins: BTreeMap<u32, Arc<globset::GlobSet>> = BTreeMap::new();
         let mut tier_envs: BTreeMap<u32, Arc<globset::GlobSet>> = BTreeMap::new();
         let mut tier_env_vars: BTreeMap<u32, HashMap<String, String>> = BTreeMap::new();
         for (&tier_num, tier_cfg) in &raw_config.tiers {
             let tier_cfg = &tier_cfg.0;
             let compiled = tier_cfg.powers
                 .iter()
-                .map(|p| CompiledPower::compile(p, &raw_config.expressions))
+                .map(|p| {
+                    let intro = if p.1.trim().is_empty() { None } else { Some(p.1.trim().to_string()) };
+                    CompiledPower::compile(&p.0, &raw_config.expressions, intro)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             tiers.insert(tier_num, compiled);
 
-            if let Some(expr) = &tier_cfg.bin {
-                let compiled_bin = CompiledExpr::compile(expr, &raw_config.expressions)
-                    .map_err(|e| format!("In tier {}'s `bin`: {}", tier_num, e))?;
-                tier_bins.insert(tier_num, Arc::new(compiled_bin));
+            if let Some(set) = compile_bin_list(&tier_cfg.bin).map_err(|e| format!("In tier {}'s `bin`: {}", tier_num, e))? {
+                tier_bins.insert(tier_num, set);
             }
             let (tier_env_set, tier_env_map) = compile_env_list(&tier_cfg.env)
                 .map_err(|e| format!("In tier {}'s `env`: {}", tier_num, e))?;
@@ -606,10 +616,10 @@ impl ActiveRealm {
             if rcfg.tier.0 > Tier::MAX.0 {
                 return Err(format!("Role '{}' has tier {}, which exceeds the maximum of {}", rname, rcfg.tier.0, Tier::MAX.0));
             }
-            if rcfg.tier == Tier::NONE && (!rcfg.powers.is_empty() || rcfg.bin.is_some()) {
+            if rcfg.tier == Tier::NONE && (!rcfg.powers.is_empty() || !rcfg.bin.is_empty()) {
                 return Err(format!(
                     "Role '{}' is at tier 0 (no access, hardcoded) but declares its own powers \
-                     and/or a `bin` expression. Tier 0 can never receive any power or extra \
+                     and/or extra binaries. Tier 0 can never receive any power or extra \
                      binary, of any kind — remove them or raise the tier.",
                     rname
                 ));
@@ -618,16 +628,14 @@ impl ActiveRealm {
             let compiled_powers = rcfg
                 .powers
                 .iter()
-                .map(|p| CompiledPower::compile(p, &raw_config.expressions))
+                .map(|p| {
+                    let intro = if p.1.trim().is_empty() { None } else { Some(p.1.trim().to_string()) };
+                    CompiledPower::compile(&p.0, &raw_config.expressions, intro)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let compiled_bin = match &rcfg.bin {
-                Some(expr) => Some(Arc::new(
-                    CompiledExpr::compile(expr, &raw_config.expressions)
-                        .map_err(|e| format!("In role '{}'s `bin`: {}", rname, e))?,
-                )),
-                None => None,
-            };
+            let compiled_bin = compile_bin_list(&rcfg.bin)
+                .map_err(|e| format!("In role '{}'s `bin`: {}", rname, e))?;
 
             let (compiled_env, env_vars) = compile_env_list(&rcfg.env)
                 .map_err(|e| format!("In role '{}'s `env`: {}", rname, e))?;
@@ -682,13 +690,8 @@ impl ActiveRealm {
             }
         }
 
-        let bin = match &raw_config.bin {
-            Some(expr) => Some(Arc::new(
-                CompiledExpr::compile(expr, &raw_config.expressions)
-                    .map_err(|e| format!("In the Realm's top-level `bin`: {}", e))?,
-            )),
-            None => None,
-        };
+        let bin = compile_bin_list(&raw_config.bin)
+            .map_err(|e| format!("In the Realm's top-level `bin`: {}", e))?;
 
         let (env, env_vars) = compile_env_list(&raw_config.env)
             .map_err(|e| format!("In the Realm's top-level `env`: {}", e))?;
@@ -825,7 +828,7 @@ impl ActiveRealm {
         }
 
         let Some(role) = self.roles.get(role_name) else { return out };
-        
+
         if role.tier == Tier::NONE {
             return out;
         }
@@ -965,7 +968,7 @@ impl ActiveRealm {
             Some(s) => s,
             None => return true, // Safe fallback
         };
-        
+
         for mount in &self.mounts {
             if path_str.starts_with(&mount.virtual_path) {
                 // Check if the entire mount is read-only
@@ -1132,16 +1135,16 @@ pub fn get_relative_path(
     if let Some(active_realm) = realm {
         for mount in &active_realm.mounts {
             let canonical_root = std::fs::canonicalize(&mount.host_path).unwrap_or_else(|_| mount.host_path.clone());
-            
+
             if let Ok(stripped) = canonical_target.strip_prefix(&canonical_root) {
                 // Ensure Windows slashes are converted to standard virtual path slashes
                 let stripped_str = stripped.to_string_lossy().replace('\\', "/");
                 let v_path = mount.virtual_path.trim_end_matches('/');
-                
+
                 if stripped_str.is_empty() {
                     return if v_path.is_empty() { "/".to_string() } else { v_path.to_string() };
                 }
-                
+
                 return format!("{}/{}", v_path, stripped_str);
             }
         }
@@ -1197,7 +1200,7 @@ pub fn resolve_filepath(
 
     // 3. Standard Exact Match Check
     let full_path = root_to_search.join(req_path);
-    
+
     // We return the path even if it doesn't exist yet, because the LLM might be creating a new file.
     // The `is_file()` check is removed because a non-existent path isn't a file or a directory yet.
     if !full_path.is_dir() {

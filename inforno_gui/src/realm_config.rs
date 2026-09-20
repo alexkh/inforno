@@ -37,6 +37,15 @@ pub struct RealmConfigState {
     pub span_edit_key: String,
     pub span_edit_expr: Option<inforno_core::realm::GlobExpr>,
 
+    // --- Visual Builder: Tier Edit State ---
+    pub is_editing_tier: bool,
+    pub tier_edit_original_key: Option<u32>, // None means "Adding new"
+    pub tier_edit_key: String,
+    pub tier_edit_comment: String,
+    pub tier_edit_bin: String,
+    pub tier_edit_env: String,
+    pub tier_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
+
     pub cached_config: Option<inforno_core::realm::RealmConfig>,
     pub show_save_confirmation: bool,
     
@@ -682,14 +691,180 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
     egui::CollapsingHeader::new(format!("🎓 Tiers ({})", parsed_config.tiers.len()))
         .show(ui, |ui| {
-            for (tier_num, tier_cfg) in &parsed_config.tiers {
-                let tier_cfg = &tier_cfg.0;
+            let available_refs: Vec<String> = parsed_config.expressions.keys().cloned().collect();
+
+            if substate.is_editing_tier {
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new(format!("Tier {}", tier_num)).strong());
-                    ui.label(format!("Powers: {} defined", tier_cfg.powers.len()));
+                    ui.heading(if substate.tier_edit_original_key.is_some() { "Edit Tier" } else { "Add Tier" });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Tier Level (2-9):");
+                        ui.text_edit_singleline(&mut substate.tier_edit_key);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Comment:");
+                        ui.text_edit_singleline(&mut substate.tier_edit_comment);
+                    });
+                    
+                    ui.separator();
+
+                    ui.add_space(5.0);
+                    ui.columns(2, |cols| {
+                        cols[0].vertical(|ui| {
+                            ui.label("Extra Binaries (one per line):");
+                            ui.text_edit_multiline(&mut substate.tier_edit_bin);
+                        });
+                        cols[1].vertical(|ui| {
+                            ui.label("Environment Variables (one per line):");
+                            ui.text_edit_multiline(&mut substate.tier_edit_env);
+                        });
+                    });
+                    
+                    ui.separator();
+
+                    ui.label(egui::RichText::new("Powers:").strong());
+                    let mut to_remove_power = None;
+                    for (i, p) in substate.tier_edit_powers.iter_mut().enumerate() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("Power {}", i + 1)).strong());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("🗑").clicked() {
+                                        to_remove_power = Some(i);
+                                    }
+                                });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Comment:");
+                                ui.text_edit_singleline(&mut p.1);
+                            });
+                            
+                            ui.label("Span:");
+                            ui_edit_glob_expr(ui, &mut p.0.span, &available_refs, 2000 + i);
+
+                            ui.horizontal(|ui| {
+                                ui.label("Caps:");
+                                let mut has_read = p.0.caps.contains(&inforno_core::realm::Cap::Read);
+                                let mut has_write = p.0.caps.contains(&inforno_core::realm::Cap::Write);
+                                let mut has_append = p.0.caps.contains(&inforno_core::realm::Cap::Append);
+                                let mut has_create = p.0.caps.contains(&inforno_core::realm::Cap::Create);
+
+                                if ui.checkbox(&mut has_read, "read").changed() {
+                                    if has_read { p.0.caps.push(inforno_core::realm::Cap::Read); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Read); }
+                                }
+                                if ui.checkbox(&mut has_write, "write").changed() {
+                                    if has_write { p.0.caps.push(inforno_core::realm::Cap::Write); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Write); }
+                                }
+                                if ui.checkbox(&mut has_append, "append").changed() {
+                                    if has_append { p.0.caps.push(inforno_core::realm::Cap::Append); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Append); }
+                                }
+                                if ui.checkbox(&mut has_create, "create").changed() {
+                                    if has_create { p.0.caps.push(inforno_core::realm::Cap::Create); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Create); }
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                let mut has_overrides = p.0.overrides.is_some();
+                                if ui.checkbox(&mut has_overrides, "Overrides dotfiles").changed() {
+                                    if has_overrides {
+                                        p.0.overrides = Some("dotfiles".to_string());
+                                    } else {
+                                        p.0.overrides = None;
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    if let Some(i) = to_remove_power {
+                        substate.tier_edit_powers.remove(i);
+                    }
+                    if ui.button("+ Add Power").clicked() {
+                        substate.tier_edit_powers.push(serde_saphyr::Commented(
+                            inforno_core::realm::Power {
+                                span: inforno_core::realm::GlobExpr::Pattern("**/*".to_string()),
+                                caps: vec![inforno_core::realm::Cap::Read],
+                                overrides: None,
+                            },
+                            "".to_string()
+                        ));
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let parsed_key = substate.tier_edit_key.parse::<u32>();
+                        let is_valid_key = parsed_key.is_ok() && parsed_key.as_ref().unwrap() >= &2 && parsed_key.as_ref().unwrap() <= &9;
+                        
+                        if ui.add_enabled(is_valid_key, egui::Button::new("✔ Apply")).on_disabled_hover_text("Tier Level must be a number between 2 and 9.").clicked() {
+                            let new_key = parsed_key.unwrap();
+                            let bin_lines: Vec<String> = substate.tier_edit_bin.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+                            let new_tier = serde_saphyr::Commented(
+                                inforno_core::realm::TierConfig {
+                                    powers: substate.tier_edit_powers.clone(),
+                                    bin: bin_lines,
+                                    env: substate.tier_edit_env.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+                                },
+                                substate.tier_edit_comment.clone()
+                            );
+
+                            if let Some(orig_key) = substate.tier_edit_original_key {
+                                if orig_key != new_key {
+                                    new_config.tiers.remove(&orig_key);
+                                }
+                            }
+                            new_config.tiers.insert(new_key, new_tier);
+                            config_changed = true;
+                            substate.is_editing_tier = false;
+                        }
+                        if ui.button("✖ Cancel").clicked() {
+                            substate.is_editing_tier = false;
+                        }
+                    });
                 });
+            } else {
+                for (tier_num, tier_cfg) in &parsed_config.tiers {
+                    let tier_inner = &tier_cfg.0;
+                    ui.group(|ui| {
+                        if !tier_cfg.1.trim().is_empty() {
+                            ui.label(egui::RichText::new(format!("# {}", tier_cfg.1.trim())).weak());
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("Tier {}", tier_num)).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑").on_hover_text("Delete Tier").clicked() {
+                                    new_config.tiers.remove(tier_num);
+                                    config_changed = true;
+                                }
+                                if ui.button("✏").on_hover_text("Edit Tier").clicked() {
+                                    substate.is_editing_tier = true;
+                                    substate.tier_edit_original_key = Some(*tier_num);
+                                    substate.tier_edit_key = tier_num.to_string();
+                                    substate.tier_edit_comment = tier_cfg.1.trim().to_string();
+                                    substate.tier_edit_bin = tier_inner.bin.join("\n");
+                                    substate.tier_edit_env = tier_inner.env.join("\n");
+                                    substate.tier_edit_powers = tier_inner.powers.clone();
+                                }
+                            });
+                        });
+                        ui.label(format!("Powers: {} defined", tier_inner.powers.len()));
+                        if !tier_inner.bin.is_empty() {
+                            ui.label(egui::RichText::new(format!("Includes {} extra binaries.", tier_inner.bin.len())).weak().small());
+                        }
+                        if !tier_inner.env.is_empty() {
+                            ui.label(egui::RichText::new(format!("Includes {} env variables.", tier_inner.env.len())).weak().small());
+                        }
+                    });
+                }
+                if ui.button("+ Add Tier").clicked() {
+                    substate.is_editing_tier = true;
+                    substate.tier_edit_original_key = None;
+                    substate.tier_edit_key = "2".to_string();
+                    substate.tier_edit_comment = "".to_string();
+                    substate.tier_edit_bin = "".to_string();
+                    substate.tier_edit_env = "".to_string();
+                    substate.tier_edit_powers = vec![];
+                }
             }
-            ui.button("+ Add Tier");
         });
 
     ui.add_space(10.0);
@@ -847,7 +1022,59 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     i += 1;
                 }
 
-                // Pass 3: Insert empty lines between major top-level sections
+                // Pass 3: Collapse dangling list dashes (artifact from commented structs in lists)
+                let mut i = 0;
+                while i < lines.len() {
+                    let trimmed = lines[i].trim();
+                    if trimmed == "-" {
+                        if i + 1 < lines.len() {
+                            let next_trimmed = lines[i + 1].trim_start();
+                            // Only collapse if the next line is a key/value, not a multi-line comment block
+                            if !next_trimmed.starts_with('#') && !next_trimmed.is_empty() {
+                                let next_line_owned = lines.remove(i + 1);
+                                let indent = lines[i].len() - lines[i].trim_start().len();
+                                let indent_str = " ".repeat(indent);
+                                lines[i] = format!("{}- {}", indent_str, next_line_owned.trim_start());
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+
+                // Pass 4: Collapse short arrays (like caps: and sandbox roles:) into inline flow style
+                let mut i = 0;
+                while i < lines.len() {
+                    let trimmed = lines[i].trim();
+                    // Target `caps:` and any indented `roles:` (to avoid collapsing the top-level roles: block)
+                    if trimmed == "caps:" || (trimmed == "roles:" && lines[i].starts_with(' ')) {
+                        let base_indent = lines[i].len() - lines[i].trim_start().len();
+                        let mut list_items = Vec::new();
+                        let mut j = i + 1;
+                        while j < lines.len() {
+                            let next_line = &lines[j];
+                            let next_trimmed = next_line.trim_start();
+                            let next_indent = next_line.len() - next_trimmed.len();
+                            
+                            // Only consume items if their indent is >= the parent key, preventing us from eating sibling blocks
+                            if next_indent >= base_indent && next_trimmed.starts_with("- ") {
+                                list_items.push(next_trimmed[2..].trim().to_string());
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if !list_items.is_empty() {
+                            let inline_array = format!("[{}]", list_items.join(", "));
+                            lines[i] = format!("{} {}", lines[i], inline_array);
+                            for _ in 0..list_items.len() {
+                                lines.remove(i + 1);
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+
+                // Pass 5: Insert empty lines between major top-level sections
                 let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "roles:", "sandboxes:", "bin:", "env:"];
                 let mut i = 0;
                 while i < lines.len() {
@@ -890,8 +1117,10 @@ fn ui_edit_glob_expr(
             .stroke(egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
             .corner_radius(4.0)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let current_variant = match expr {
+                // Force a vertical layout so nested recursive calls don't inherit horizontal layouts
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let current_variant = match expr {
                         GlobExpr::Pattern(s) if s.starts_with('@') => "Ref",
                         GlobExpr::Pattern(_) => "Match",
                         GlobExpr::List(_) | GlobExpr::Any { .. } => "Any",
@@ -970,6 +1199,7 @@ fn ui_edit_glob_expr(
                     }
                 });
             });
+        });
     });
 }
 
