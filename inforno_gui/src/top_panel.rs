@@ -5,6 +5,23 @@ use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_sandbox_db};
 use crate::{emoji_render::{emoji_button, emoji_image, emoji_label}, state::{State, err_color}};
 use crate::mybtn;
 
+fn switch_to_realm_sandbox(state: &mut State, realm_name: &str, sandbox_key: &str) {
+    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+        let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
+        if let Ok(yaml_str) = std::fs::read_to_string(&yaml_path) {
+            if let Ok(config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&yaml_str) {
+                if let Ok(path) = inforno_core::realm::resolve_sandbox_path(sandbox_key, &config) {
+                    *state.perma.active_realm_name.lock().unwrap() = Some(realm_name.to_string());
+                    state.reload(Some(path));
+                    return;
+                }
+            }
+        }
+    }
+    state.error_msg = Some(format!("Failed to resolve sandbox '{}' for realm '{}'", sandbox_key, realm_name));
+    state.is_modal_open = true;
+}
+
 pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
 
@@ -52,8 +69,150 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 rust_i18n::set_locale(target_lang);
             }
 
+            ui.colored_label(ui.visuals().code_bg_color,"|");
+
+            // --- 📦 SANDBOX MENU ---
+            // Scan the realms directory every 2 seconds to keep the list fresh
+            let now = std::time::Instant::now();
+            let (realms_cache, last_scan) = ctx.data_mut(|d| {
+                d.get_temp::<(Vec<(String, Vec<String>)>, std::time::Instant)>(egui::Id::new("realms_scan_cache"))
+                    .unwrap_or((vec![], now - std::time::Duration::from_secs(10)))
+            });
+
+            let mut new_realms = realms_cache.clone();
+            if now.duration_since(last_scan).as_secs_f32() > 2.0 {
+                new_realms.clear();
+                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                    let realms_dir = proj_dirs.config_dir().join("realms");
+                    if let Ok(entries) = std::fs::read_dir(realms_dir) {
+                        for entry in entries.flatten() {
+                            if entry.path().is_dir() {
+                                let realm_name = entry.file_name().to_string_lossy().to_string();
+                                let yaml_path = entry.path().join("realm2.yml");
+                                if yaml_path.exists() {
+                                    let mut sandbox_keys = vec![];
+                                    if let Ok(yaml_str) = std::fs::read_to_string(&yaml_path) {
+                                        if let Ok(config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&yaml_str) {
+                                            sandbox_keys = config.sandboxes.keys().cloned().collect();
+                                        }
+                                    }
+                                    new_realms.push((realm_name, sandbox_keys));
+                                }
+                            }
+                        }
+                    }
+                }
+                new_realms.sort_by(|a, b| a.0.cmp(&b.0));
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("realms_scan_cache"), (new_realms.clone(), now)));
+            }
+
+            ui.menu_button(t!("menu_sandbox"), |ui| {
+                // 1. Dynamic Realms List
+                if !new_realms.is_empty() {
+                    ui.label(egui::RichText::new("🏰 Realms").strong().color(ui.visuals().warn_fg_color));
+                    for (realm_name, sandboxes) in &new_realms {
+                        if sandboxes.is_empty() {
+                            if ui.button(format!("{} (No Sandboxes)", realm_name)).clicked() {
+                                *state.perma.realm_awaiting_sandbox.lock().unwrap() = Some(realm_name.clone());
+                                *state.perma.active_realm_name.lock().unwrap() = Some(realm_name.clone());
+                                state.reload(None);
+                                ui.close();
+                            }
+                        } else if sandboxes.len() == 1 {
+                            let sb_key = &sandboxes[0];
+                            if ui.button(realm_name).clicked() {
+                                switch_to_realm_sandbox(state, realm_name, sb_key);
+                                ui.close();
+                            }
+                        } else {
+                            ui.menu_button(realm_name, |ui| {
+                                for sb_key in sandboxes {
+                                    if ui.button(sb_key).clicked() {
+                                        switch_to_realm_sandbox(state, realm_name, sb_key);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+                }
+
+                // 2. Base Sandbox Actions
+                let is_home = state.is_in_home_sandbox && state.active_realm.is_none();
+                if ui.add_enabled(!is_home, egui::Button::new(t!("menu_sandbox_home_btn"))).clicked() {
+                    *state.perma.active_realm_name.lock().unwrap() = None; // Break out of the realm
+                    state.reload(None);
+                    ui.close();
+                }
+
+                if ui.button(t!("menu_sandbox_open_btn")).clicked() {
+                    state.pending_file_dialog_op = Some(FileOp::Open);
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .add_file_filter(
+                            "Inforno Sandbox",
+                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                p.extension().is_some_and(|ext| ext == "rno")
+                            })
+                        );
+                    state.file_dialog.pick_file();
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if mybtn!(ui, "menu_sandbox_save_as_btn") {
+                    state.pending_file_dialog_op = Some(FileOp::SaveAs);
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .default_file_name("")
+                        .add_file_filter(
+                            "Inforno Sandbox",
+                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                p.extension().is_some_and(|ext| ext == "rno")
+                            })
+                        );
+                    state.file_dialog.save_file();
+                    ui.close();
+                }
+
+                if mybtn!(ui, "menu_sandbox_save_copy_btn") {
+                    state.pending_file_dialog_op = Some(FileOp::SaveCopy);
+                    state.file_dialog = egui_file_dialog::FileDialog::new()
+                        .default_file_name("")
+                        .add_file_filter(
+                            "Inforno Sandbox",
+                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
+                                p.extension().is_some_and(|ext| ext == "rno")
+                            })
+                        );
+                    state.file_dialog.save_file();
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if ui.button(egui::RichText::new(t!("menu_sandbox_clear")).color(ui.visuals().error_fg_color)).clicked() {
+                    let _ = reset_sandbox_db(&state.db_conn);
+                    let tx_clone = state.op_tx.clone();
+                    let _ = tx_clone.send(FileOpMsg {
+                        op: FileOp::Clear,
+                        cancelled: false,
+                        path: None,
+                        attachments: None,
+                        left_content: None,
+                        right_content: None,
+                    });
+                    ui.close();
+                }
+            }).response.on_hover_text(
+                egui::RichText::new(t!("menu_sandbox_tooltip"))
+                .strong()
+                .heading()
+            );
+
             #[cfg(target_os = "linux")]
             {
+                ui.colored_label(ui.visuals().code_bg_color,"|");
                 // --- ⚙ Autorno Daemon Status ---
                 let now = std::time::Instant::now();
                 let (is_running, last_check) = ctx.data_mut(|d| {
@@ -142,99 +301,6 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
             // ui.colored_label(ui.visuals().code_bg_color,"|");
 
             ui.colored_label(ui.visuals().code_bg_color,"|");
-
-            // Sandbox Menu
-            ui.menu_button(t!("menu_sandbox"), |ui| {
-
-                // Save As Button
-                if mybtn!(ui, "menu_sandbox_save_as_btn") {
-                    ui.close();
-                    state.pending_file_dialog_op = Some(FileOp::SaveAs);
-                    state.file_dialog = egui_file_dialog::FileDialog::new()
-                        .default_file_name("")
-                        .add_file_filter(
-                            "Inforno Sandbox",
-                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
-                                p.extension().is_some_and(|ext| ext == "rno")
-                            })
-                        );
-                    state.file_dialog.save_file();
-                }
-
-                // Save Copy Button
-                if mybtn!(ui, "menu_sandbox_save_copy_btn") {
-                    ui.close(); // Fixed deprecation
-                    state.pending_file_dialog_op = Some(FileOp::SaveCopy);
-                    state.file_dialog = egui_file_dialog::FileDialog::new()
-                        .default_file_name("")
-                        .add_file_filter(
-                            "Inforno Sandbox",
-                            egui_file_dialog::Filter::new(|p: &std::path::Path| {
-                                p.extension().is_some_and(|ext| ext == "rno")
-                            })
-                        );
-                    state.file_dialog.save_file();
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
-
-                // Clear Button
-                if ui.button(
-                    egui::RichText::new(t!("menu_sandbox_clear"))
-                    .color(ui.visuals().error_fg_color)
-                ).clicked() {
-                    let _ = reset_sandbox_db(&state.db_conn);
-                    let tx_clone = state.op_tx.clone();
-                    let _ = tx_clone.send(FileOpMsg {
-                        op: FileOp::Clear,
-                        cancelled: false,
-                        path: None,
-                        attachments: None,
-                        left_content: None,
-                        right_content: None,
-                    });
-                }
-            }).response.on_hover_text(
-                egui::RichText::new(t!("menu_sandbox_tooltip"))
-                .strong()
-                .heading());
-
-            // Open Button
-            if ui.button(t!("menu_sandbox_open_btn"))
-                .on_hover_text(egui::RichText::new(
-                    t!("menu_sandbox_open_btn_tooltip"))
-                    .strong()
-                    .heading()
-                )
-                .clicked() {
-
-                state.pending_file_dialog_op = Some(FileOp::Open);
-                state.file_dialog = egui_file_dialog::FileDialog::new()
-                    .add_file_filter(
-                        "Inforno Sandbox",
-                        egui_file_dialog::Filter::new(|p: &std::path::Path| {
-                            p.extension().is_some_and(|ext| ext == "rno")
-                        })
-                    );
-                state.file_dialog.pick_file();
-            }
-
-            if ui.add_enabled(!state.is_in_home_sandbox,
-                egui::Button::new(t!("menu_sandbox_home_btn")))
-                .on_hover_text(egui::RichText::new(
-                    t!("menu_sandbox_home_btn_tooltip"))
-                    .strong()
-                    .heading())
-                .on_disabled_hover_text(egui::RichText::new(
-                    t!("menu_sandbox_home_btn_tooltip"))
-                    .heading())
-                .clicked() {
-                    state.reload(None);
-                };
-
-            ui.separator(); // Visual spacer
 
             let edit_resp = crate::split_button::SplitButton::new("📝 Edit")
                 .id_salt("top_panel_edit_btn")
