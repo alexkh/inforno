@@ -73,6 +73,22 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
         request_builder.frequency_penalty(fp);
     }
 
+    if let Some(pp) = query.preset.options.presence_penalty {
+        request_builder.presence_penalty(pp);
+    }
+
+    if let Some(rp) = query.preset.options.repetition_penalty {
+        request_builder.repetition_penalty(rp);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        request_builder.min_p(min_p);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        request_builder.stop(stop.clone());
+    }
+
     let request = request_builder.build()?;
 
     let response = client.send_chat_completion(&request).await?;
@@ -129,6 +145,22 @@ pub async fn do_openr_chat_sync(
     }
     if let Some(fp) = query.preset.options.frequency_penalty {
         request_builder.frequency_penalty(fp);
+    }
+
+    if let Some(pp) = query.preset.options.presence_penalty {
+        request_builder.presence_penalty(pp);
+    }
+
+    if let Some(rp) = query.preset.options.repetition_penalty {
+        request_builder.repetition_penalty(rp);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        request_builder.min_p(min_p);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        request_builder.stop(stop.clone());
     }
 
     // 5. Finalize build
@@ -238,6 +270,22 @@ pub async fn do_openr_chat_stream(
 
     if let Some(fp) = query.preset.options.frequency_penalty {
         request_builder.frequency_penalty(fp);
+    }
+
+    if let Some(pp) = query.preset.options.presence_penalty {
+        request_builder.presence_penalty(pp);
+    }
+
+    if let Some(rp) = query.preset.options.repetition_penalty {
+        request_builder.repetition_penalty(rp);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        request_builder.min_p(min_p);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        request_builder.stop(stop.clone());
     }
 
     // 5. Finalize build

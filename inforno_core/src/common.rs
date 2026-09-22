@@ -408,7 +408,11 @@ pub struct ModelOptions {
     pub max_tokens: Option<i32>,
     pub top_k: Option<i32>,
     pub frequency_penalty: Option<f64>,
-	pub stream: Option<bool>,
+    pub presence_penalty: Option<f64>,
+    pub repetition_penalty: Option<f64>,
+    pub min_p: Option<f64>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub stream: Option<bool>,
     pub openrouter_custom_url: Option<String>,
 }
 

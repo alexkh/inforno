@@ -35,6 +35,10 @@ pub struct PresetEditorState {
     pub max_tokens_entered: String,
     pub top_k_entered: String,
     pub frequency_penalty_entered: String,
+    pub presence_penalty_entered: String,
+    pub repetition_penalty_entered: String,
+    pub min_p_entered: String,
+    pub stop_sequences_entered: String,
     pub router_changed: bool,
     pub is_model_valid: bool,
     pub is_seed_valid: bool,
@@ -43,6 +47,10 @@ pub struct PresetEditorState {
     pub is_max_tokens_valid: bool,
     pub is_top_k_valid: bool,
     pub is_frequency_penalty_valid: bool,
+    pub is_presence_penalty_valid: bool,
+    pub is_repetition_penalty_valid: bool,
+    pub is_min_p_valid: bool,
+    pub is_stop_sequences_valid: bool,
     pub show_advanced: bool,
     pub ollama_only_installed: bool,
     pub ollama_model_info: Option<DbOllamaModel>,
@@ -249,6 +257,31 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                     .frequency_penalty
                     .map(|n| n.to_string())
                     .unwrap_or_default();
+                substate.presence_penalty_entered = substate
+                    .edited_preset
+                    .options
+                    .presence_penalty
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                substate.repetition_penalty_entered = substate
+                    .edited_preset
+                    .options
+                    .repetition_penalty
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                substate.min_p_entered = substate
+                    .edited_preset
+                    .options
+                    .min_p
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                substate.stop_sequences_entered = substate
+                    .edited_preset
+                    .options
+                    .stop_sequences
+                    .as_ref()
+                    .map(|v| v.join(", "))
+                    .unwrap_or_default();
                 substate.editing = true;
                 substate.router_changed = true;
             };
@@ -322,6 +355,19 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
 
             row("Freq. Penalty:", preset.options.frequency_penalty
                     .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Presence Penalty:", preset.options.presence_penalty
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Repetition Penalty:", preset.options.repetition_penalty
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Min-P:", preset.options.min_p
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Stop Sequences:", preset.options.stop_sequences
+                    .as_ref()
+                    .map_or(t!("unset").to_string(), |v| v.join(", ")));
 
             row("Stream:", preset.options.stream
                 .map_or(t!("unset").to_string(), |s| {
@@ -836,7 +882,7 @@ pub fn render_common_options(
     if substate.edited_preset.chat_router == ChatRouter::Openrouter {
         ui.horizontal(|ui| {
             ui.label("Backend:");
-            
+
             // Visualizing the original value
             let orig_text = match &original_options.openrouter_custom_url {
                 Some(nickname) => nickname.clone(),
@@ -1126,6 +1172,139 @@ pub fn render_common_options(
             {
                 substate.frequency_penalty_entered = original_options.frequency_penalty
                         .map(|f| f.to_string()).unwrap_or_default();
+            }
+        );
+
+        let presence_pen_label = if let Some(p) = original_options.presence_penalty {
+            format!("Presence Penalty ({}: {:.2}):", t!("currently"), p)
+        } else {
+            format!("Presence Penalty ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Presence Penalty using the Macro ---
+        validated_edit!(
+            ui,
+            &presence_pen_label,
+            40.0,
+            &mut substate.presence_penalty_entered,
+            substate.is_presence_penalty_valid,
+            {
+                if substate.presence_penalty_entered.is_empty() {
+                    substate.edited_preset.options.presence_penalty = None;
+                    substate.is_presence_penalty_valid = true;
+                } else {
+                    substate.edited_preset.options.presence_penalty =
+                        substate.presence_penalty_entered.parse::<f64>().ok();
+                    if let Some(p) = substate.edited_preset.options.presence_penalty {
+                        substate.is_presence_penalty_valid = (-2.0..=2.0).contains(&p);
+                    } else {
+                        substate.is_presence_penalty_valid = false;
+                    }
+                }
+            },
+            {
+                substate.presence_penalty_entered = original_options.presence_penalty
+                        .map(|p| p.to_string()).unwrap_or_default();
+            }
+        );
+
+        let repetition_pen_label = if let Some(r) = original_options.repetition_penalty {
+            format!("Repetition Penalty ({}: {:.2}):", t!("currently"), r)
+        } else {
+            format!("Repetition Penalty ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Repetition Penalty using the Macro ---
+        validated_edit!(
+            ui,
+            &repetition_pen_label,
+            40.0,
+            &mut substate.repetition_penalty_entered,
+            substate.is_repetition_penalty_valid,
+            {
+                if substate.repetition_penalty_entered.is_empty() {
+                    substate.edited_preset.options.repetition_penalty = None;
+                    substate.is_repetition_penalty_valid = true;
+                } else {
+                    substate.edited_preset.options.repetition_penalty =
+                        substate.repetition_penalty_entered.parse::<f64>().ok();
+                    if let Some(r) = substate.edited_preset.options.repetition_penalty {
+                        substate.is_repetition_penalty_valid = (0.0..=2.0).contains(&r);
+                    } else {
+                        substate.is_repetition_penalty_valid = false;
+                    }
+                }
+            },
+            {
+                substate.repetition_penalty_entered = original_options.repetition_penalty
+                        .map(|r| r.to_string()).unwrap_or_default();
+            }
+        );
+
+        let min_p_label = if let Some(m) = original_options.min_p {
+            format!("Min-P ({}: {:.2}):", t!("currently"), m)
+        } else {
+            format!("Min-P ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Min-P using the Macro ---
+        validated_edit!(
+            ui,
+            &min_p_label,
+            40.0,
+            &mut substate.min_p_entered,
+            substate.is_min_p_valid,
+            {
+                if substate.min_p_entered.is_empty() {
+                    substate.edited_preset.options.min_p = None;
+                    substate.is_min_p_valid = true;
+                } else {
+                    substate.edited_preset.options.min_p =
+                        substate.min_p_entered.parse::<f64>().ok();
+                    if let Some(m) = substate.edited_preset.options.min_p {
+                        substate.is_min_p_valid = (0.0..=1.0).contains(&m);
+                    } else {
+                        substate.is_min_p_valid = false;
+                    }
+                }
+            },
+            {
+                substate.min_p_entered = original_options.min_p
+                        .map(|m| m.to_string()).unwrap_or_default();
+            }
+        );
+
+        let stop_label = match &original_options.stop_sequences {
+            Some(v) => format!("Stop Sequences ({}: {}):", t!("currently"), v.join(", ")),
+            None => format!("Stop Sequences ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Stop Sequences using the Macro (custom width for longer text) ---
+        validated_edit!(
+            ui,
+            &stop_label,
+            200.0,
+            &mut substate.stop_sequences_entered,
+            substate.is_stop_sequences_valid,
+            {
+                if substate.stop_sequences_entered.trim().is_empty() {
+                    substate.edited_preset.options.stop_sequences = None;
+                } else {
+                    let stops: Vec<String> = substate
+                        .stop_sequences_entered
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    substate.edited_preset.options.stop_sequences = Some(stops);
+                }
+                substate.is_stop_sequences_valid = true; // comma‑separated string is always parseable
+            },
+            {
+                substate.stop_sequences_entered = original_options.stop_sequences
+                        .as_ref()
+                        .map(|v| v.join(", "))
+                        .unwrap_or_default();
             }
         );
     }

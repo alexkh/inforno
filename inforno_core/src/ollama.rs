@@ -31,6 +31,21 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
         options = options.top_k(top_k.max(0) as u32);
     }
 
+    // NOTE: ollama_rs::models::ModelOptions does not expose
+    // `presence_penalty`, so it is not applied for Ollama.
+
+    if let Some(repeat_penalty) = query.preset.options.repetition_penalty {
+        options = options.repeat_penalty(repeat_penalty as f32);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        options = options.min_p(min_p as f32);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        options = options.stop(stop.clone());
+    }
+
     // create the Request
     let request = ChatMessageRequest::new(
         query.preset.model,
@@ -81,6 +96,21 @@ pub async fn do_ollama_chat_sync(
         options = options.top_k(top_k.max(0) as u32);
     } else {
         options = options.top_k(0);
+    }
+
+    // NOTE: ollama_rs::models::ModelOptions does not expose
+    // `presence_penalty`, so it is not applied for Ollama.
+
+    if let Some(repeat_penalty) = query.preset.options.repetition_penalty {
+        options = options.repeat_penalty(repeat_penalty as f32);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        options = options.min_p(min_p as f32);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        options = options.stop(stop.clone());
     }
 
     // 2. Create the Request and attach Options
@@ -182,6 +212,21 @@ pub async fn do_ollama_chat_stream(
         options = options.top_k(top_k.max(0) as u32);
     } else {
         options = options.top_k(0);
+    }
+
+    // NOTE: ollama_rs::models::ModelOptions does not expose
+    // `presence_penalty`, so it is not applied for Ollama.
+
+    if let Some(repeat_penalty) = query.preset.options.repetition_penalty {
+        options = options.repeat_penalty(repeat_penalty as f32);
+    }
+
+    if let Some(min_p) = query.preset.options.min_p {
+        options = options.min_p(min_p as f32);
+    }
+
+    if let Some(stop) = &query.preset.options.stop_sequences {
+        options = options.stop(stop.clone());
     }
 
     // 2. Create the Request and attach Options
