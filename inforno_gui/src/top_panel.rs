@@ -107,6 +107,16 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
             }
 
             ui.menu_button(t!("menu_sandbox"), |ui| {
+                if ui.button("✨ New Realm").clicked() {
+                    state.realm_config_state.show_new_realm_wizard = true;
+                    state.realm_config_state.wizard_step = 0;
+                    state.realm_config_state.wizard_project_type = 0;
+                    state.realm_config_state.wizard_realm_name.clear();
+                    state.realm_config_state.wizard_sandbox_option = 0;
+                    ui.close();
+                }
+                ui.separator();
+
                 // 1. Dynamic Realms List
                 if !new_realms.is_empty() {
                     ui.label(egui::RichText::new("🏰 Realms").strong().color(ui.visuals().warn_fg_color));

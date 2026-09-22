@@ -78,7 +78,10 @@ pub async fn do_openr_chat_sync(
         Some(true) => {
             request_builder.reasoning_effort(Effort::High);
         }
-        Some(false) | None => {
+        Some(false) => {
+            request_builder.include_reasoning(false);
+        }
+        None => {
             // Leave default or disabled
         }
     }
@@ -167,7 +170,7 @@ pub async fn do_openr_chat_stream(
         }
         Some(false) => {
             // User explicitly wants NO reasoning -> Disable it
-            // request_builder = request_builder.reasoning(false);
+            request_builder.include_reasoning(false);
         }
         None => {
             // User explicitly set "Unset" -> Do not call any method.

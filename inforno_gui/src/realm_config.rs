@@ -77,9 +77,20 @@ pub struct RealmConfigState {
     pub needs_reload: bool,
     // Explicitly tracked realm name to guarantee saving works reliably
     pub realm_name: Option<String>,
+
+    // --- New Realm Wizard State ---
+    pub show_new_realm_wizard: bool,
+    pub wizard_step: usize,
+    pub wizard_project_type: usize,
+    pub wizard_realm_name: String,
+    pub wizard_sandbox_option: usize,
 }
 
 pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
+    if state.realm_config_state.show_new_realm_wizard {
+        ui_new_realm_wizard(ctx, state);
+    }
+
     if !state.show_realm_config {
         return;
     }
@@ -122,7 +133,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(can_save, egui::Button::new("💾 Save")).clicked() {
+                            if ui.add_enabled(can_save, egui::Button::new("💾 Save & Apply")).clicked() {
                                 trigger_save = true;
                             }
                         });
@@ -144,36 +155,36 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                                     Ok(_) => {
                                         state.realm_config_state.original_yaml = state.realm_config_state.yaml_buffer.clone();
 
-                                        if state.realm_config_state.is_fixing_broken_realm {
-                                            // Instant rescue reload!
-                                            if let Ok(new_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&state.realm_config_state.yaml_buffer) {
-                                                if let Ok(mut lock) = state.perma.active_realm_name.lock() {
-                                                    *lock = Some(realm_name.clone());
-                                                }
-
-                                                let target_sandbox = match inforno_core::realm::resolve_default_sandbox_path(&new_config) {
-                                                    Ok(resolved) => resolved,
-                                                    Err(_) => {
-                                                        if let Ok(mut lock) = state.perma.realm_awaiting_sandbox.lock() {
-                                                            *lock = Some(realm_name.clone());
-                                                        }
-                                                        state.sandbox.clone()
-                                                    }
-                                                };
-
-                                                // Cache the text so we can reinject it into the fresh state
-                                                let cached_yaml = state.realm_config_state.yaml_buffer.clone();
-
-                                                state.reload(Some(target_sandbox));
-
-                                                // Repopulate the fresh state so the window doesn't go blank!
-                                                state.realm_config_state.yaml_buffer = cached_yaml.clone();
-                                                state.realm_config_state.original_yaml = cached_yaml;
-                                                state.realm_config_state.realm_name = Some(realm_name.clone());
-                                                state.realm_config_state.is_fixing_broken_realm = false;
+                                        // Instant apply and reload!
+                                        if let Ok(new_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&state.realm_config_state.yaml_buffer) {
+                                            if let Ok(mut lock) = state.perma.active_realm_name.lock() {
+                                                *lock = Some(realm_name.clone());
                                             }
-                                        } else {
-                                            state.realm_config_state.needs_reload = true;
+
+                                            let target_sandbox = match inforno_core::realm::resolve_default_sandbox_path(&new_config) {
+                                                Ok(resolved) => resolved,
+                                                Err(_) => {
+                                                    if let Ok(mut lock) = state.perma.realm_awaiting_sandbox.lock() {
+                                                        *lock = Some(realm_name.clone());
+                                                    }
+                                                    state.sandbox.clone()
+                                                }
+                                            };
+
+                                            // Cache the text so we can reinject it into the fresh state
+                                            let cached_yaml = state.realm_config_state.yaml_buffer.clone();
+
+                                            state.reload(Some(target_sandbox));
+
+                                            // Repopulate the fresh state so the window doesn't go blank!
+                                            state.realm_config_state.yaml_buffer = cached_yaml.clone();
+                                            state.realm_config_state.original_yaml = cached_yaml;
+                                            state.realm_config_state.realm_name = Some(realm_name.clone());
+                                            state.realm_config_state.is_fixing_broken_realm = false;
+                                            state.realm_config_state.needs_reload = false;
+                                            
+                                            // Ensure window stays open
+                                            state.show_realm_config = true;
                                         }
                                     }
                                     Err(e) => {
@@ -1436,6 +1447,110 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                 substate.parse_error = Some(format!("Visual Builder Serialization Error: {}", e));
             }
         }
+    }
+}
+
+fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
+    let mut is_open = state.realm_config_state.show_new_realm_wizard;
+    egui::Window::new("✨ New Realm")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut is_open)
+        .show(ctx, |ui| {
+            if state.realm_config_state.wizard_step == 0 {
+                ui.heading("Step 1: Project Type");
+                ui.label("What type of project is this?");
+                ui.label(egui::RichText::new("Don't worry, the realm can be modified at any time later.").weak());
+                ui.add_space(10.0);
+
+                ui.radio_value(&mut state.realm_config_state.wizard_project_type, 1, "1. Brainstorming or Preliminary research");
+                ui.radio_value(&mut state.realm_config_state.wizard_project_type, 2, "2. Software Development");
+                ui.radio_value(&mut state.realm_config_state.wizard_project_type, 3, "3. Content Generation");
+                ui.radio_value(&mut state.realm_config_state.wizard_project_type, 4, "4. Other");
+
+                ui.add_space(15.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(state.realm_config_state.wizard_project_type != 0, egui::Button::new("Next ➡")).clicked() {
+                        state.realm_config_state.wizard_step = 1;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        state.realm_config_state.show_new_realm_wizard = false;
+                    }
+                });
+            } else if state.realm_config_state.wizard_step == 1 {
+                ui.heading("Step 2: Realm Configuration");
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Realm Name (lower_case_no_spaces):");
+                    ui.text_edit_singleline(&mut state.realm_config_state.wizard_realm_name);
+                });
+
+                ui.add_space(10.0);
+                ui.label("How would you like to initialize the sandbox?");
+                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 0, "Copy current sandbox into the new realm");
+                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 1, "Create a new empty sandbox (keep presets)");
+                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 2, "Create a totally empty sandbox");
+
+                ui.add_space(15.0);
+                ui.horizontal(|ui| {
+                    if ui.button("⬅ Back").clicked() {
+                        state.realm_config_state.wizard_step = 0;
+                    }
+                    let can_finish = !state.realm_config_state.wizard_realm_name.trim().is_empty();
+                    if ui.add_enabled(can_finish, egui::Button::new("✔ Create Realm")).clicked() {
+                        let realm_name = state.realm_config_state.wizard_realm_name.trim().to_string();
+                        if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
+                            let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
+                            let _ = std::fs::create_dir_all(&realm_dir);
+
+                            let sandbox_dir = proj_dirs.data_dir().join("sandboxes");
+                            let _ = std::fs::create_dir_all(&sandbox_dir);
+                            let default_sandbox_path = sandbox_dir.join(format!("{}.rno", realm_name));
+                            let path_str = default_sandbox_path.to_string_lossy().replace('\\', "/");
+                            
+                            // TODO: Handle actual SQLite sandbox file copying/creation logic here 
+                            // based on state.realm_config_state.wizard_sandbox_option
+
+                            let minimal_yaml = format!(r#"mounts: {{}}
+places: {{}}
+tiers: {{}}
+roles:
+  gui:
+    tier: 1
+sandboxes:
+  default:
+    path: {}
+    roles:
+      - gui
+"#, path_str);
+
+                            let yaml_path = realm_dir.join("realm2.yml");
+                            let _ = std::fs::write(&yaml_path, minimal_yaml.clone());
+
+                            // Set up the state BEFORE reload
+                            if let Ok(mut lock) = state.perma.active_realm_name.lock() {
+                                *lock = Some(realm_name.clone());
+                            }
+
+                            state.reload(Some(default_sandbox_path.clone()));
+
+                            state.realm_config_state.yaml_buffer = minimal_yaml.clone();
+                            state.realm_config_state.original_yaml = minimal_yaml.clone();
+                            state.realm_config_state.cached_config = None;
+                            state.realm_config_state.realm_name = Some(realm_name);
+                            
+                            state.show_realm_config = true;
+                            state.realm_config_state.show_new_realm_wizard = false;
+                        }
+                    }
+                });
+            }
+        });
+
+    if !is_open {
+        state.realm_config_state.show_new_realm_wizard = false;
     }
 }
 
