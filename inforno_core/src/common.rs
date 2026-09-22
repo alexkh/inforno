@@ -404,6 +404,8 @@ pub struct ModelOptions {
     pub include_reasoning: Option<bool>,
     pub seed: Option<i32>, // we use i32 but do not allow negative values
     pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub max_tokens: Option<i32>,
 	pub stream: Option<bool>,
     pub openrouter_custom_url: Option<String>,
 }

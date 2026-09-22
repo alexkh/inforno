@@ -21,6 +21,12 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
     if let Some(seed) = query.preset.options.seed {
         options = options.seed(seed as i32);
     }
+    if let Some(top_p) = query.preset.options.top_p {
+        options = options.top_p(top_p as f32);
+    }
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        options = options.num_predict(max_tokens);
+    }
 
     // create the Request
     let request = ChatMessageRequest::new(
@@ -56,7 +62,19 @@ pub async fn do_ollama_chat_sync(
         options = options.temperature(temp as f32);
     }
 
-    options = options.top_k(0).top_p(1.0).num_predict(4096);
+    if let Some(top_p) = query.preset.options.top_p {
+        options = options.top_p(top_p as f32);
+    } else {
+        options = options.top_p(1.0);
+    }
+
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        options = options.num_predict(max_tokens);
+    } else {
+        options = options.num_predict(4096);
+    }
+
+    options = options.top_k(0);
 
     // 2. Create the Request and attach Options
     let mut request = ChatMessageRequest::new(model_name, messages)
@@ -141,7 +159,19 @@ pub async fn do_ollama_chat_stream(
         options = options.temperature(temp as f32);
     }
 
-    options = options.top_k(0).top_p(1.0).num_predict(4096);
+    if let Some(top_p) = query.preset.options.top_p {
+        options = options.top_p(top_p as f32);
+    } else {
+        options = options.top_p(1.0);
+    }
+
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        options = options.num_predict(max_tokens);
+    } else {
+        options = options.num_predict(4096);
+    }
+
+    options = options.top_k(0);
 
     // 2. Create the Request and attach Options
     let mut request = ChatMessageRequest::new(model_name, messages)

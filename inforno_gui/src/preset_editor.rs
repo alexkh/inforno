@@ -31,10 +31,14 @@ pub struct PresetEditorState {
     pub openr_model_info: Option<DbOpenrModel>,
     pub seed_entered: String,
     pub temperature_entered: String,
+    pub top_p_entered: String,
+    pub max_tokens_entered: String,
     pub router_changed: bool,
     pub is_model_valid: bool,
     pub is_seed_valid: bool,
     pub is_temperature_valid: bool,
+    pub is_top_p_valid: bool,
+    pub is_max_tokens_valid: bool,
     pub ollama_only_installed: bool,
     pub ollama_model_info: Option<DbOllamaModel>,
     pub ollama_downloading: Arc<Mutex<OllamaDownloading>>,
@@ -216,6 +220,18 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                     .temperature
                     .map(|n| n.to_string())
                     .unwrap_or_default();
+                substate.top_p_entered = substate
+                    .edited_preset
+                    .options
+                    .top_p
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                substate.max_tokens_entered = substate
+                    .edited_preset
+                    .options
+                    .max_tokens
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
                 substate.editing = true;
                 substate.router_changed = true;
             };
@@ -276,6 +292,12 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                     t!("unset").to_string(), |s| s.to_string()));
 
             row(&t!("temperature_label"), preset.options.temperature
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Top-P:", preset.options.top_p
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Max Tokens:", preset.options.max_tokens
                     .map_or(t!("unset").to_string(), |s| s.to_string()));
 
             row("Stream:", preset.options.stream
@@ -938,6 +960,76 @@ pub fn render_common_options(
         {
             substate.temperature_entered = original_options.temperature
                     .map(|t| t.to_string()).unwrap_or_default();
+        }
+    );
+
+    let top_p_label = if let Some(p) = original_options.top_p {
+        format!("Top-P ({}: {:.2}):", t!("currently"), p)
+    } else {
+        format!("Top-P ({}: {}):", t!("currently"), t!("unset"))
+    };
+
+    // --- Top-P using the Macro ---
+    validated_edit!(
+        ui,
+        &top_p_label,
+        40.0,
+        &mut substate.top_p_entered,
+        substate.is_top_p_valid,
+        // Validation Logic
+        {
+            if substate.top_p_entered.is_empty() {
+                substate.edited_preset.options.top_p = None;
+                substate.is_top_p_valid = true;
+            } else {
+                substate.edited_preset.options.top_p =
+                    substate.top_p_entered.parse::<f64>().ok();
+                if let Some(p) = substate.edited_preset.options.top_p {
+                    substate.is_top_p_valid = (0.0..=1.0).contains(&p);
+                } else {
+                    substate.is_top_p_valid = false;
+                }
+            }
+        },
+        // Revert Logic
+        {
+            substate.top_p_entered = original_options.top_p
+                    .map(|p| p.to_string()).unwrap_or_default();
+        }
+    );
+
+    let max_tokens_label = if let Some(m) = original_options.max_tokens {
+        format!("Max Tokens ({}: {}):", t!("currently"), m)
+    } else {
+        format!("Max Tokens ({}: {}):", t!("currently"), t!("unset"))
+    };
+
+    // --- Max Tokens using the Macro ---
+    validated_edit!(
+        ui,
+        &max_tokens_label,
+        60.0,
+        &mut substate.max_tokens_entered,
+        substate.is_max_tokens_valid,
+        // Validation Logic
+        {
+            if substate.max_tokens_entered.is_empty() {
+                substate.edited_preset.options.max_tokens = None;
+                substate.is_max_tokens_valid = true;
+            } else {
+                substate.edited_preset.options.max_tokens =
+                    substate.max_tokens_entered.parse::<i32>().ok();
+                if let Some(m) = substate.edited_preset.options.max_tokens {
+                    substate.is_max_tokens_valid = m > 0;
+                } else {
+                    substate.is_max_tokens_valid = false;
+                }
+            }
+        },
+        // Revert Logic
+        {
+            substate.max_tokens_entered = original_options.max_tokens
+                    .map(|m| m.to_string()).unwrap_or_default();
         }
     );
 

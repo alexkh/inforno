@@ -48,11 +48,26 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
     let client = build_openr_client(&query)?;
 
     // Send chat completion
-    let request = ChatCompletionRequest::builder()
-    .model(query.preset.model)
-    // Pass '0' or a variable like 'current_hist_id' here
-    .messages(query.chat.to_openrouter_messages(0))
-    .build()?;
+    let mut request_builder = ChatCompletionRequest::builder();
+    request_builder
+        .model(query.preset.model)
+        // Pass '0' or a variable like 'current_hist_id' here
+        .messages(query.chat.to_openrouter_messages(0));
+
+    if let Some(seed) = query.preset.options.seed {
+        request_builder.seed(seed as u32);
+    }
+    if let Some(temp) = query.preset.options.temperature {
+        request_builder.temperature(temp);
+    }
+    if let Some(top_p) = query.preset.options.top_p {
+        request_builder.top_p(top_p);
+    }
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        request_builder.max_tokens(max_tokens as u32);
+    }
+
+    let request = request_builder.build()?;
 
     let response = client.send_chat_completion(&request).await?;
     Ok(response)
@@ -94,6 +109,14 @@ pub async fn do_openr_chat_sync(
     // 4. Conditional: Apply Temperature
     if let Some(temp) = query.preset.options.temperature {
         request_builder.temperature(temp);
+    }
+
+    if let Some(top_p) = query.preset.options.top_p {
+        request_builder.top_p(top_p);
+    }
+
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        request_builder.max_tokens(max_tokens as u32);
     }
 
     // 5. Finalize build
@@ -187,6 +210,14 @@ pub async fn do_openr_chat_stream(
     if let Some(temp) = query.preset.options.temperature {
         // APIs usually expect f32, so we cast the stored f64
         request_builder.temperature(temp);
+    }
+
+    if let Some(top_p) = query.preset.options.top_p {
+        request_builder.top_p(top_p);
+    }
+
+    if let Some(max_tokens) = query.preset.options.max_tokens {
+        request_builder.max_tokens(max_tokens as u32);
     }
 
     // 5. Finalize build
