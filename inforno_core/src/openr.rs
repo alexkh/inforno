@@ -66,6 +66,12 @@ pub async fn do_openr_chat_que(query: ChatQue) ->
     if let Some(max_tokens) = query.preset.options.max_tokens {
         request_builder.max_tokens(max_tokens as u32);
     }
+    if let Some(top_k) = query.preset.options.top_k {
+        request_builder.top_k(top_k.max(0) as u32);
+    }
+    if let Some(fp) = query.preset.options.frequency_penalty {
+        request_builder.frequency_penalty(fp);
+    }
 
     let request = request_builder.build()?;
 
@@ -117,6 +123,12 @@ pub async fn do_openr_chat_sync(
 
     if let Some(max_tokens) = query.preset.options.max_tokens {
         request_builder.max_tokens(max_tokens as u32);
+    }
+    if let Some(top_k) = query.preset.options.top_k {
+        request_builder.top_k(top_k.max(0) as u32);
+    }
+    if let Some(fp) = query.preset.options.frequency_penalty {
+        request_builder.frequency_penalty(fp);
     }
 
     // 5. Finalize build
@@ -218,6 +230,14 @@ pub async fn do_openr_chat_stream(
 
     if let Some(max_tokens) = query.preset.options.max_tokens {
         request_builder.max_tokens(max_tokens as u32);
+    }
+
+    if let Some(top_k) = query.preset.options.top_k {
+        request_builder.top_k(top_k.max(0) as u32);
+    }
+
+    if let Some(fp) = query.preset.options.frequency_penalty {
+        request_builder.frequency_penalty(fp);
     }
 
     // 5. Finalize build

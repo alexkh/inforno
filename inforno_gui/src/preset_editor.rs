@@ -33,12 +33,17 @@ pub struct PresetEditorState {
     pub temperature_entered: String,
     pub top_p_entered: String,
     pub max_tokens_entered: String,
+    pub top_k_entered: String,
+    pub frequency_penalty_entered: String,
     pub router_changed: bool,
     pub is_model_valid: bool,
     pub is_seed_valid: bool,
     pub is_temperature_valid: bool,
     pub is_top_p_valid: bool,
     pub is_max_tokens_valid: bool,
+    pub is_top_k_valid: bool,
+    pub is_frequency_penalty_valid: bool,
+    pub show_advanced: bool,
     pub ollama_only_installed: bool,
     pub ollama_model_info: Option<DbOllamaModel>,
     pub ollama_downloading: Arc<Mutex<OllamaDownloading>>,
@@ -232,6 +237,18 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                     .max_tokens
                     .map(|n| n.to_string())
                     .unwrap_or_default();
+                substate.top_k_entered = substate
+                    .edited_preset
+                    .options
+                    .top_k
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                substate.frequency_penalty_entered = substate
+                    .edited_preset
+                    .options
+                    .frequency_penalty
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
                 substate.editing = true;
                 substate.router_changed = true;
             };
@@ -298,6 +315,12 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
                     .map_or(t!("unset").to_string(), |s| s.to_string()));
 
             row("Max Tokens:", preset.options.max_tokens
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Top-K:", preset.options.top_k
+                    .map_or(t!("unset").to_string(), |s| s.to_string()));
+
+            row("Freq. Penalty:", preset.options.frequency_penalty
                     .map_or(t!("unset").to_string(), |s| s.to_string()));
 
             row("Stream:", preset.options.stream
@@ -963,41 +986,6 @@ pub fn render_common_options(
         }
     );
 
-    let top_p_label = if let Some(p) = original_options.top_p {
-        format!("Top-P ({}: {:.2}):", t!("currently"), p)
-    } else {
-        format!("Top-P ({}: {}):", t!("currently"), t!("unset"))
-    };
-
-    // --- Top-P using the Macro ---
-    validated_edit!(
-        ui,
-        &top_p_label,
-        40.0,
-        &mut substate.top_p_entered,
-        substate.is_top_p_valid,
-        // Validation Logic
-        {
-            if substate.top_p_entered.is_empty() {
-                substate.edited_preset.options.top_p = None;
-                substate.is_top_p_valid = true;
-            } else {
-                substate.edited_preset.options.top_p =
-                    substate.top_p_entered.parse::<f64>().ok();
-                if let Some(p) = substate.edited_preset.options.top_p {
-                    substate.is_top_p_valid = (0.0..=1.0).contains(&p);
-                } else {
-                    substate.is_top_p_valid = false;
-                }
-            }
-        },
-        // Revert Logic
-        {
-            substate.top_p_entered = original_options.top_p
-                    .map(|p| p.to_string()).unwrap_or_default();
-        }
-    );
-
     let max_tokens_label = if let Some(m) = original_options.max_tokens {
         format!("Max Tokens ({}: {}):", t!("currently"), m)
     } else {
@@ -1032,6 +1020,116 @@ pub fn render_common_options(
                     .map(|m| m.to_string()).unwrap_or_default();
         }
     );
+
+    // --- Advanced Section ---
+    ui.separator();
+    ui.horizontal(|ui| {
+        if ui.button(if substate.show_advanced { "▼ Advanced Options" } else { "▶ Advanced Options" }).clicked() {
+            substate.show_advanced = !substate.show_advanced;
+        }
+    });
+
+    if substate.show_advanced {
+        let top_p_label = if let Some(p) = original_options.top_p {
+            format!("Top-P ({}: {:.2}):", t!("currently"), p)
+        } else {
+            format!("Top-P ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Top-P using the Macro ---
+        validated_edit!(
+            ui,
+            &top_p_label,
+            40.0,
+            &mut substate.top_p_entered,
+            substate.is_top_p_valid,
+            {
+                if substate.top_p_entered.is_empty() {
+                    substate.edited_preset.options.top_p = None;
+                    substate.is_top_p_valid = true;
+                } else {
+                    substate.edited_preset.options.top_p =
+                        substate.top_p_entered.parse::<f64>().ok();
+                    if let Some(p) = substate.edited_preset.options.top_p {
+                        substate.is_top_p_valid = (0.0..=1.0).contains(&p);
+                    } else {
+                        substate.is_top_p_valid = false;
+                    }
+                }
+            },
+            {
+                substate.top_p_entered = original_options.top_p
+                        .map(|p| p.to_string()).unwrap_or_default();
+            }
+        );
+
+        let top_k_label = if let Some(k) = original_options.top_k {
+            format!("Top-K ({}: {}):", t!("currently"), k)
+        } else {
+            format!("Top-K ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Top-K using the Macro ---
+        validated_edit!(
+            ui,
+            &top_k_label,
+            40.0,
+            &mut substate.top_k_entered,
+            substate.is_top_k_valid,
+            {
+                if substate.top_k_entered.is_empty() {
+                    substate.edited_preset.options.top_k = None;
+                    substate.is_top_k_valid = true;
+                } else {
+                    substate.edited_preset.options.top_k =
+                        substate.top_k_entered.parse::<i32>().ok();
+                    if let Some(k) = substate.edited_preset.options.top_k {
+                        substate.is_top_k_valid = k >= 0;
+                    } else {
+                        substate.is_top_k_valid = false;
+                    }
+                }
+            },
+            {
+                substate.top_k_entered = original_options.top_k
+                        .map(|k| k.to_string()).unwrap_or_default();
+            }
+        );
+
+        let freq_pen_label = if let Some(f) = original_options.frequency_penalty {
+            format!("Freq. Penalty ({}: {:.2}):", t!("currently"), f)
+        } else {
+            format!("Freq. Penalty ({}: {}):", t!("currently"), t!("unset"))
+        };
+
+        // --- Frequency Penalty using the Macro ---
+        validated_edit!(
+            ui,
+            &freq_pen_label,
+            40.0,
+            &mut substate.frequency_penalty_entered,
+            substate.is_frequency_penalty_valid,
+            {
+                if substate.frequency_penalty_entered.is_empty() {
+                    substate.edited_preset.options.frequency_penalty = None;
+                    substate.is_frequency_penalty_valid = true;
+                } else {
+                    substate.edited_preset.options.frequency_penalty =
+                        substate.frequency_penalty_entered.parse::<f64>().ok();
+                    if let Some(f) = substate.edited_preset.options.frequency_penalty {
+                        substate.is_frequency_penalty_valid = (-2.0..=2.0).contains(&f);
+                    } else {
+                        substate.is_frequency_penalty_valid = false;
+                    }
+                }
+            },
+            {
+                substate.frequency_penalty_entered = original_options.frequency_penalty
+                        .map(|f| f.to_string()).unwrap_or_default();
+            }
+        );
+    }
+    ui.separator();
 
     // --- Stream ---
     ui.horizontal(|ui| {

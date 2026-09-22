@@ -406,6 +406,8 @@ pub struct ModelOptions {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_tokens: Option<i32>,
+    pub top_k: Option<i32>,
+    pub frequency_penalty: Option<f64>,
 	pub stream: Option<bool>,
     pub openrouter_custom_url: Option<String>,
 }

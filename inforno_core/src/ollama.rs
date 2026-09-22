@@ -27,6 +27,9 @@ pub async fn do_ollama_chat_que(query: ChatQue) ->
     if let Some(max_tokens) = query.preset.options.max_tokens {
         options = options.num_predict(max_tokens);
     }
+    if let Some(top_k) = query.preset.options.top_k {
+        options = options.top_k(top_k.max(0) as u32);
+    }
 
     // create the Request
     let request = ChatMessageRequest::new(
@@ -74,7 +77,11 @@ pub async fn do_ollama_chat_sync(
         options = options.num_predict(4096);
     }
 
-    options = options.top_k(0);
+    if let Some(top_k) = query.preset.options.top_k {
+        options = options.top_k(top_k.max(0) as u32);
+    } else {
+        options = options.top_k(0);
+    }
 
     // 2. Create the Request and attach Options
     let mut request = ChatMessageRequest::new(model_name, messages)
@@ -171,7 +178,11 @@ pub async fn do_ollama_chat_stream(
         options = options.num_predict(4096);
     }
 
-    options = options.top_k(0);
+    if let Some(top_k) = query.preset.options.top_k {
+        options = options.top_k(top_k.max(0) as u32);
+    } else {
+        options = options.top_k(0);
+    }
 
     // 2. Create the Request and attach Options
     let mut request = ChatMessageRequest::new(model_name, messages)
