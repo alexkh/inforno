@@ -1493,27 +1493,32 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 /// mic), null-sinks, combined-sinks, Bluetooth nodes. All of it is
 /// included; nothing is filtered by category.
 fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
-    let list_short = |kind: &str| -> Vec<String> {
-        std::process::Command::new("pactl")
-            .args(["list", kind, "short"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|line| line.split_whitespace().nth(1))
-                    .map(|s| s.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    // Use rodio's bundled cpal to guarantee version alignment
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    let host = rodio::cpal::default_host();
 
     let mut mics = vec!["sysdefault".to_string()];
-    mics.extend(list_short("sources"));
+    if let Ok(devices) = host.input_devices() {
+        for device in devices {
+            // cpal 0.17 returns the name directly
+            if let Ok(name) = device.name() {
+                if !mics.contains(&name) {
+                    mics.push(name);
+                }
+            }
+        }
+    }
 
     let mut speakers = vec!["sysdefault".to_string()];
-    speakers.extend(list_short("sinks"));
+    if let Ok(devices) = host.output_devices() {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                if !speakers.contains(&name) {
+                    speakers.push(name);
+                }
+            }
+        }
+    }
 
     (mics, speakers)
 }
@@ -1832,27 +1837,40 @@ fn ui_edit_device_list(ui: &mut egui::Ui, devices: &mut Vec<String>, available: 
 /// are silently ignored; there's no good place to surface an error from
 /// inside a widget click handler, and a silent no-op is the safe outcome.
 fn play_test_tone(device: &str) {
-    let device = device.to_string();
+    let device_name = device.to_string();
     std::thread::spawn(move || {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+        use rodio::cpal::traits::{DeviceTrait, HostTrait};
+        use rodio::{stream::DeviceSinkBuilder, Player};
+        use std::io::Cursor;
 
-        let mut cmd = Command::new("paplay");
-        if device != "sysdefault" {
-            cmd.args(["--device", &device]);
-        }
-        // paplay reads from stdin automatically if no filename argument is passed.
-        // Passing "-" makes it look for a file literally named "-" and fail.
+        let host = rodio::cpal::default_host();
+        let mut target_device = host.default_output_device();
 
-        // Inherit stderr so any paplay errors show up in the terminal for debugging.
-        if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(&generate_test_tone_wav());
-                // Hold the pipe open for the duration of the tone (now 1.2s for stereo) so that
-                // PipeWire/PulseAudio does not prematurely tear down the stream upon receiving EOF.
-                std::thread::sleep(std::time::Duration::from_millis(1250));
+        if device_name != "sysdefault" {
+            if let Ok(devices) = host.output_devices() {
+                for d in devices {
+                    if let Ok(name) = d.name() {
+                        if name == device_name {
+                            target_device = Some(d);
+                            break;
+                        }
+                    }
+                }
             }
-            let _ = child.wait(); // Cleanly reap the child process
+        }
+
+        if let Some(device) = target_device {
+            // from_device returns a Result that we must unwrap first
+            if let Ok(builder) = DeviceSinkBuilder::from_device(device) {
+                if let Ok(mixer_sink) = builder.open_sink_or_fallback() {
+                    let player = Player::connect_new(mixer_sink.mixer());
+                    let wav_data = generate_test_tone_wav();
+                    if let Ok(source) = rodio::Decoder::new(Cursor::new(wav_data)) {
+                        player.append(source);
+                        player.sleep_until_end(); // Wait for playback to finish before dropping stream
+                    }
+                }
+            }
         }
     });
 }
