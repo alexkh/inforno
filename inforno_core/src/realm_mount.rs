@@ -154,18 +154,18 @@ mod tests {
 
         let mut tiers = std::collections::BTreeMap::new();
         tiers.insert(2, crate::realm::TierConfig { bin: None, env: vec![], powers: vec![
-            serde_saphyr::Commented(Power {
+            serde_saphyr::Commented(Power::Fs {
                 span: GlobExpr::Pattern("**".to_string()),
                 caps: vec![Cap::Read],
                 overrides: None,
             }, " Read everything".to_string()),
-            serde_saphyr::Commented(Power {
+            serde_saphyr::Commented(Power::Fs {
                 // Intentionally exclude readonly.txt and .hidden.txt from having Write power
                 span: GlobExpr::Pattern("normal.txt".to_string()),
                 caps: vec![Cap::Write],
                 overrides: None,
             }, " Write access to normal files".to_string()),
-            serde_saphyr::Commented(Power {
+            serde_saphyr::Commented(Power::Fs {
                 span: GlobExpr::Pattern("append_only.txt".to_string()),
                 caps: vec![Cap::Append],
                 overrides: None,

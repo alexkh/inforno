@@ -112,7 +112,11 @@ pub struct CreateRule {
     pub description: String,
 }
 
-/// The kind of access a `Power` confers.
+/// The kind of access a `Power` confers. Only meaningful for `Power::Fs` —
+/// `Power::Mic` and `Power::Speaker` carry no caps at all, since a
+/// microphone is inherently capture-only and a speaker inherently
+/// playback-only on every mainstream sound stack (ALSA, PipeWire): there is
+/// no "write" to a mic or "read" from a speaker to represent.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Cap {
@@ -126,18 +130,42 @@ pub enum Cap {
     Create,
 }
 
-/// A single grant of access: a path pattern (`span`), the cap(s) it confers,
-/// and optionally an `intro` — guidance shown to an actor regardless of
-/// whether this power's outcome is permissive, e.g. steering it toward a
-/// tool ("use `cargo add`") instead of a direct filesystem write, even when
-/// direct writes are technically absent or present. `overrides` names a
-/// restriction (currently only `"dotfiles"`) this power may override.
+fn default_audio_devices() -> Vec<String> {
+    vec!["sysdefault".to_string()]
+}
+
+/// A single grant of access. `Fs` grants filesystem access over a path
+/// pattern (`span`) with the given cap(s), unchanged from before this enum
+/// existed. `Mic`/`Speaker` grant audio capture/playback over a device
+/// list, with no caps to set — the variant itself is the capability.
+/// `"sysdefault"` is the conventional name for "whatever the host's
+/// system-default device currently is", present under that exact name on
+/// every mainstream Linux sound stack, and what an omitted `mic`/`speaker`
+/// list defaults to.
+///
+/// Untagged on purpose: `Mic`'s only field is named `mic` and `Speaker`'s
+/// `speaker`, so the YAML shape alone disambiguates every variant — no
+/// internal tag, no risk of `Mic` and `Speaker` colliding despite otherwise
+/// identical shapes, and `Fs` keeps its original flat `span`/`caps`/
+/// `overrides` keys, so every config written before this enum existed still
+/// parses unchanged.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Power {
-    pub span: GlobExpr,
-    pub caps: Vec<Cap>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overrides: Option<String>,
+#[serde(untagged)]
+pub enum Power {
+    Fs {
+        span: GlobExpr,
+        caps: Vec<Cap>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overrides: Option<String>,
+    },
+    Mic {
+        #[serde(default = "default_audio_devices")]
+        mic: Vec<String>,
+    },
+    Speaker {
+        #[serde(default = "default_audio_devices")]
+        speaker: Vec<String>,
+    },
 }
 
 /// A role definition: a Tier plus any powers specific to this role alone
@@ -426,36 +454,63 @@ impl CompiledCreateRule {
     }
 }
 
-/// A compiled `Power`, ready to be matched against relative paths.
+/// A compiled `Power`, ready to be matched against relative paths (`Fs`), or
+/// simply held as a resolved device grant (`Mic`/`Speaker` — there's
+/// nothing to compile for these beyond cloning the device list, but they
+/// share the enum so `effective_powers`/`describe_role_capabilities` keep
+/// treating all three uniformly as "things a role holds").
 #[derive(Clone)]
-pub struct CompiledPower {
-    /// Raw source, kept for display purposes (`describe_role_capabilities`
-    /// via `describe_expr`) — matching always uses the compiled `span`.
-    pub span_source: GlobExpr,
-    span: Arc<CompiledExpr>,
-    pub caps: Vec<Cap>,
-    pub intro: Option<Arc<str>>,
-    pub overrides: Option<String>,
+pub enum CompiledPower {
+    Fs {
+        /// Raw source, kept for display purposes (`describe_role_capabilities`
+        /// via `describe_expr`) — matching always uses the compiled `span`.
+        span_source: GlobExpr,
+        span: Arc<CompiledExpr>,
+        caps: Vec<Cap>,
+        overrides: Option<String>,
+        intro: Option<Arc<str>>,
+    },
+    Mic {
+        devices: Vec<String>,
+        intro: Option<Arc<str>>,
+    },
+    Speaker {
+        devices: Vec<String>,
+        intro: Option<Arc<str>>,
+    },
 }
 
 impl CompiledPower {
     fn compile(power: &Power, defs: &IndexMap<String, GlobExpr>, intro: Option<String>) -> Result<Self, String> {
-        let span = Arc::new(CompiledExpr::compile(&power.span, defs)?);
-        Ok(Self {
-            span_source: power.span.clone(),
-            span,
-            caps: power.caps.clone(),
-            intro: intro.map(Into::into),
-            overrides: power.overrides.clone(),
+        let intro: Option<Arc<str>> = intro.map(Into::into);
+        Ok(match power {
+            Power::Fs { span, caps, overrides } => CompiledPower::Fs {
+                span_source: span.clone(),
+                span: Arc::new(CompiledExpr::compile(span, defs)?),
+                caps: caps.clone(),
+                overrides: overrides.clone(),
+                intro,
+            },
+            Power::Mic { mic } => CompiledPower::Mic { devices: mic.clone(), intro },
+            Power::Speaker { speaker } => CompiledPower::Speaker { devices: speaker.clone(), intro },
         })
     }
 
+    /// Only an `Fs` power can ever match a filesystem path.
     fn matches_path(&self, rel_path: &Path) -> bool {
-        self.span.is_match(rel_path)
+        match self {
+            CompiledPower::Fs { span, .. } => span.is_match(rel_path),
+            CompiledPower::Mic { .. } | CompiledPower::Speaker { .. } => false,
+        }
     }
 
+    /// Only an `Fs` power carries caps; `Mic`/`Speaker` are the capability
+    /// itself and never satisfy a filesystem cap check.
     fn has_cap(&self, cap: Cap) -> bool {
-        self.caps.contains(&cap)
+        match self {
+            CompiledPower::Fs { caps, .. } => caps.contains(&cap),
+            CompiledPower::Mic { .. } | CompiledPower::Speaker { .. } => false,
+        }
     }
 
     /// Whether this power grants `requested`. `Write` implies `Append` (a
@@ -464,6 +519,19 @@ impl CompiledPower {
     /// request for `Write`.
     fn grants(&self, requested: Cap) -> bool {
         self.has_cap(requested) || (requested == Cap::Append && self.has_cap(Cap::Write))
+    }
+
+    fn overrides(&self) -> Option<&str> {
+        match self {
+            CompiledPower::Fs { overrides, .. } => overrides.as_deref(),
+            CompiledPower::Mic { .. } | CompiledPower::Speaker { .. } => None,
+        }
+    }
+
+    fn intro(&self) -> Option<&Arc<str>> {
+        match self {
+            CompiledPower::Fs { intro, .. } | CompiledPower::Mic { intro, .. } | CompiledPower::Speaker { intro, .. } => intro.as_ref(),
+        }
     }
 }
 
@@ -903,7 +971,7 @@ impl ActiveRealm {
     fn dotfile_override_applies(&self, rel_path: &Path, role_name: &str) -> bool {
         let Some(role) = self.roles.get(role_name) else { return false };
         self.effective_powers(role).iter().any(|p| {
-            p.overrides.as_deref() == Some("dotfiles")
+            p.overrides() == Some("dotfiles")
                 && p.matches_path(rel_path)
         })
     }
@@ -1053,27 +1121,36 @@ impl ActiveRealm {
 
         let mut lines = Vec::new();
         for power in self.effective_powers(role) {
-            let verbs: Vec<&str> = power
-                .caps
-                .iter()
-                .map(|c| match c {
-                    Cap::Read => "read",
-                    Cap::Write => "write",
-                    Cap::Append => "append to",
-                    Cap::Create => "create",
-                })
-                .collect();
+            let mut line = match power {
+                CompiledPower::Fs { caps, span_source, .. } => {
+                    let verbs: Vec<&str> = caps
+                        .iter()
+                        .map(|c| match c {
+                            Cap::Read => "read",
+                            Cap::Write => "write",
+                            Cap::Append => "append to",
+                            Cap::Create => "create",
+                        })
+                        .collect();
 
-            if verbs.is_empty() {
-                continue;
-            }
+                    if verbs.is_empty() {
+                        continue;
+                    }
 
-            let mut line = format!(
-                "You may {} files {}.",
-                verbs.join(", "),
-                describe_expr(&power.span_source, &self.raw_config.expressions)
-            );
-            if let Some(ref intro) = power.intro {
+                    format!(
+                        "You may {} files {}.",
+                        verbs.join(", "),
+                        describe_expr(span_source, &self.raw_config.expressions)
+                    )
+                }
+                CompiledPower::Mic { devices, .. } => {
+                    format!("You may listen through the microphone (device: {}).", devices.join(", "))
+                }
+                CompiledPower::Speaker { devices, .. } => {
+                    format!("You may speak through the speaker (device: {}).", devices.join(", "))
+                }
+            };
+            if let Some(intro) = power.intro() {
                 line.push(' ');
                 line.push_str(intro);
             }

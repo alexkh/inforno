@@ -43,7 +43,7 @@ pub struct RealmConfigState {
     pub tier_edit_key: String,
     pub tier_edit_comment: String,
     pub tier_edit_bin: String,
-    pub tier_edit_env: String,
+    pub tier_edit_env: Vec<String>,
     pub tier_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
 
     // --- Visual Builder: Role Edit State ---
@@ -54,7 +54,7 @@ pub struct RealmConfigState {
     pub role_edit_tier: String,
     pub role_edit_boss: String,
     pub role_edit_bin: String,
-    pub role_edit_env: String,
+    pub role_edit_env: Vec<String>,
     pub role_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
 
     // --- Visual Builder: Sandbox Edit State ---
@@ -84,6 +84,18 @@ pub struct RealmConfigState {
     pub wizard_project_type: usize,
     pub wizard_realm_name: String,
     pub wizard_sandbox_option: usize,
+    pub wizard_mic_device: String,
+    pub wizard_speaker_device: String,
+    /// Lazily populated (mic devices, speaker devices) from the host,
+    /// cached for the lifetime of one wizard session so re-rendering the
+    /// step doesn't re-shell-out every frame.
+    pub wizard_audio_devices: Option<(Vec<String>, Vec<String>)>,
+
+    // --- Visual Builder: Audio Device Cache ---
+    /// Same idea as `wizard_audio_devices` but for the main Tier/Role power
+    /// editors, which can stay open far longer than a wizard step — cleared
+    /// by the "🔄 Refresh audio devices" button rather than only fetched once.
+    pub available_audio_devices: Option<(Vec<String>, Vec<String>)>,
 }
 
 pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
@@ -722,6 +734,9 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     egui::CollapsingHeader::new(format!("🎓 Tiers ({})", parsed_config.tiers.len()))
         .show(ui, |ui| {
             let available_refs: Vec<String> = parsed_config.expressions.keys().cloned().collect();
+            let (mic_devices, speaker_devices) = substate.available_audio_devices
+                .get_or_insert_with(enumerate_audio_devices)
+                .clone();
 
             if substate.is_editing_tier {
                 ui.group(|ui| {
@@ -746,14 +761,19 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             ui.text_edit_multiline(&mut substate.tier_edit_bin);
                         });
                         cols[1].vertical(|ui| {
-                            ui.label("Environment Variables (one per line):");
-                            ui.text_edit_multiline(&mut substate.tier_edit_env);
+                            ui.label("Environment Variables:");
+                            ui_edit_env_list(ui, &mut substate.tier_edit_env, 4000);
                         });
                     });
 
                     ui.separator();
 
-                    ui.label(egui::RichText::new("Powers:").strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Powers:").strong());
+                        if ui.small_button("🔄 Refresh audio devices").clicked() {
+                            substate.available_audio_devices = None;
+                        }
+                    });
                     let mut to_remove_power = None;
                     for (i, p) in substate.tier_edit_powers.iter_mut().enumerate() {
                         ui.group(|ui| {
@@ -770,39 +790,40 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                 ui.text_edit_singleline(&mut p.1);
                             });
 
-                            ui.label("Span:");
-                            ui_edit_glob_expr(ui, &mut p.0.span, &available_refs, 2000 + i);
+                            ui_edit_power_scope(ui, &mut p.0, &available_refs, &mic_devices, &speaker_devices, 2000 + i);
 
-                            ui.horizontal(|ui| {
-                                ui.label("Caps:");
-                                let mut has_read = p.0.caps.contains(&inforno_core::realm::Cap::Read);
-                                let mut has_write = p.0.caps.contains(&inforno_core::realm::Cap::Write);
-                                let mut has_append = p.0.caps.contains(&inforno_core::realm::Cap::Append);
-                                let mut has_create = p.0.caps.contains(&inforno_core::realm::Cap::Create);
+                            if let inforno_core::realm::Power::Fs { caps, overrides, .. } = &mut p.0 {
+                                ui.horizontal(|ui| {
+                                    ui.label("Caps:");
+                                    let mut has_read = caps.contains(&inforno_core::realm::Cap::Read);
+                                    let mut has_write = caps.contains(&inforno_core::realm::Cap::Write);
+                                    let mut has_append = caps.contains(&inforno_core::realm::Cap::Append);
+                                    let mut has_create = caps.contains(&inforno_core::realm::Cap::Create);
 
-                                if ui.checkbox(&mut has_read, "read").changed() {
-                                    if has_read { p.0.caps.push(inforno_core::realm::Cap::Read); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Read); }
-                                }
-                                if ui.checkbox(&mut has_write, "write").changed() {
-                                    if has_write { p.0.caps.push(inforno_core::realm::Cap::Write); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Write); }
-                                }
-                                if ui.checkbox(&mut has_append, "append").changed() {
-                                    if has_append { p.0.caps.push(inforno_core::realm::Cap::Append); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Append); }
-                                }
-                                if ui.checkbox(&mut has_create, "create").changed() {
-                                    if has_create { p.0.caps.push(inforno_core::realm::Cap::Create); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Create); }
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                let mut has_overrides = p.0.overrides.is_some();
-                                if ui.checkbox(&mut has_overrides, "Overrides dotfiles").changed() {
-                                    if has_overrides {
-                                        p.0.overrides = Some("dotfiles".to_string());
-                                    } else {
-                                        p.0.overrides = None;
+                                    if ui.checkbox(&mut has_read, "read").changed() {
+                                        if has_read { caps.push(inforno_core::realm::Cap::Read); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Read); }
                                     }
-                                }
-                            });
+                                    if ui.checkbox(&mut has_write, "write").changed() {
+                                        if has_write { caps.push(inforno_core::realm::Cap::Write); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Write); }
+                                    }
+                                    if ui.checkbox(&mut has_append, "append").changed() {
+                                        if has_append { caps.push(inforno_core::realm::Cap::Append); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Append); }
+                                    }
+                                    if ui.checkbox(&mut has_create, "create").changed() {
+                                        if has_create { caps.push(inforno_core::realm::Cap::Create); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Create); }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    let mut has_overrides = overrides.is_some();
+                                    if ui.checkbox(&mut has_overrides, "Overrides dotfiles").changed() {
+                                        if has_overrides {
+                                            *overrides = Some("dotfiles".to_string());
+                                        } else {
+                                            *overrides = None;
+                                        }
+                                    }
+                                });
+                            }
                         });
                     }
                     if let Some(i) = to_remove_power {
@@ -810,7 +831,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     }
                     if ui.button("+ Add Power").clicked() {
                         substate.tier_edit_powers.push(serde_saphyr::Commented(
-                            inforno_core::realm::Power {
+                            inforno_core::realm::Power::Fs {
                                 span: inforno_core::realm::GlobExpr::Pattern("**/*".to_string()),
                                 caps: vec![inforno_core::realm::Cap::Read],
                                 overrides: None,
@@ -832,7 +853,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                 inforno_core::realm::TierConfig {
                                     powers: substate.tier_edit_powers.clone(),
                                     bin: bin_lines,
-                                    env: substate.tier_edit_env.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+                                    env: substate.tier_edit_env.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
                                 },
                                 substate.tier_edit_comment.clone()
                             );
@@ -871,7 +892,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                     substate.tier_edit_key = tier_num.to_string();
                                     substate.tier_edit_comment = tier_cfg.1.trim().to_string();
                                     substate.tier_edit_bin = tier_inner.bin.join("\n");
-                                    substate.tier_edit_env = tier_inner.env.join("\n");
+                                    substate.tier_edit_env = tier_inner.env.clone();
                                     substate.tier_edit_powers = tier_inner.powers.clone();
                                 }
                             });
@@ -891,7 +912,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     substate.tier_edit_key = "2".to_string();
                     substate.tier_edit_comment = "".to_string();
                     substate.tier_edit_bin = "".to_string();
-                    substate.tier_edit_env = "".to_string();
+                    substate.tier_edit_env = vec![];
                     substate.tier_edit_powers = vec![];
                 }
             }
@@ -902,6 +923,9 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     egui::CollapsingHeader::new(format!("🎭 Roles ({})", parsed_config.roles.len()))
         .show(ui, |ui| {
             let available_refs: Vec<String> = parsed_config.expressions.keys().cloned().collect();
+            let (mic_devices, speaker_devices) = substate.available_audio_devices
+                .get_or_insert_with(enumerate_audio_devices)
+                .clone();
 
             if substate.is_editing_role {
                 ui.group(|ui| {
@@ -934,14 +958,19 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             ui.text_edit_multiline(&mut substate.role_edit_bin);
                         });
                         cols[1].vertical(|ui| {
-                            ui.label("Environment Variables (one per line):");
-                            ui.text_edit_multiline(&mut substate.role_edit_env);
+                            ui.label("Environment Variables:");
+                            ui_edit_env_list(ui, &mut substate.role_edit_env, 5000);
                         });
                     });
 
                     ui.separator();
 
-                    ui.label(egui::RichText::new("Powers:").strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Powers:").strong());
+                        if ui.small_button("🔄 Refresh audio devices").clicked() {
+                            substate.available_audio_devices = None;
+                        }
+                    });
                     let mut to_remove_power = None;
                     for (i, p) in substate.role_edit_powers.iter_mut().enumerate() {
                         ui.group(|ui| {
@@ -958,39 +987,40 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                 ui.text_edit_singleline(&mut p.1);
                             });
                             
-                            ui.label("Span:");
-                            ui_edit_glob_expr(ui, &mut p.0.span, &available_refs, 3000 + i);
+                            ui_edit_power_scope(ui, &mut p.0, &available_refs, &mic_devices, &speaker_devices, 3000 + i);
 
-                            ui.horizontal(|ui| {
-                                ui.label("Caps:");
-                                let mut has_read = p.0.caps.contains(&inforno_core::realm::Cap::Read);
-                                let mut has_write = p.0.caps.contains(&inforno_core::realm::Cap::Write);
-                                let mut has_append = p.0.caps.contains(&inforno_core::realm::Cap::Append);
-                                let mut has_create = p.0.caps.contains(&inforno_core::realm::Cap::Create);
+                            if let inforno_core::realm::Power::Fs { caps, overrides, .. } = &mut p.0 {
+                                ui.horizontal(|ui| {
+                                    ui.label("Caps:");
+                                    let mut has_read = caps.contains(&inforno_core::realm::Cap::Read);
+                                    let mut has_write = caps.contains(&inforno_core::realm::Cap::Write);
+                                    let mut has_append = caps.contains(&inforno_core::realm::Cap::Append);
+                                    let mut has_create = caps.contains(&inforno_core::realm::Cap::Create);
 
-                                if ui.checkbox(&mut has_read, "read").changed() {
-                                    if has_read { p.0.caps.push(inforno_core::realm::Cap::Read); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Read); }
-                                }
-                                if ui.checkbox(&mut has_write, "write").changed() {
-                                    if has_write { p.0.caps.push(inforno_core::realm::Cap::Write); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Write); }
-                                }
-                                if ui.checkbox(&mut has_append, "append").changed() {
-                                    if has_append { p.0.caps.push(inforno_core::realm::Cap::Append); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Append); }
-                                }
-                                if ui.checkbox(&mut has_create, "create").changed() {
-                                    if has_create { p.0.caps.push(inforno_core::realm::Cap::Create); } else { p.0.caps.retain(|c| *c != inforno_core::realm::Cap::Create); }
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                let mut has_overrides = p.0.overrides.is_some();
-                                if ui.checkbox(&mut has_overrides, "Overrides dotfiles").changed() {
-                                    if has_overrides {
-                                        p.0.overrides = Some("dotfiles".to_string());
-                                    } else {
-                                        p.0.overrides = None;
+                                    if ui.checkbox(&mut has_read, "read").changed() {
+                                        if has_read { caps.push(inforno_core::realm::Cap::Read); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Read); }
                                     }
-                                }
-                            });
+                                    if ui.checkbox(&mut has_write, "write").changed() {
+                                        if has_write { caps.push(inforno_core::realm::Cap::Write); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Write); }
+                                    }
+                                    if ui.checkbox(&mut has_append, "append").changed() {
+                                        if has_append { caps.push(inforno_core::realm::Cap::Append); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Append); }
+                                    }
+                                    if ui.checkbox(&mut has_create, "create").changed() {
+                                        if has_create { caps.push(inforno_core::realm::Cap::Create); } else { caps.retain(|c| *c != inforno_core::realm::Cap::Create); }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    let mut has_overrides = overrides.is_some();
+                                    if ui.checkbox(&mut has_overrides, "Overrides dotfiles").changed() {
+                                        if has_overrides {
+                                            *overrides = Some("dotfiles".to_string());
+                                        } else {
+                                            *overrides = None;
+                                        }
+                                    }
+                                });
+                            }
                         });
                     }
                     if let Some(i) = to_remove_power {
@@ -998,7 +1028,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     }
                     if ui.button("+ Add Power").clicked() {
                         substate.role_edit_powers.push(serde_saphyr::Commented(
-                            inforno_core::realm::Power {
+                            inforno_core::realm::Power::Fs {
                                 span: inforno_core::realm::GlobExpr::Pattern("**/*".to_string()),
                                 caps: vec![inforno_core::realm::Cap::Read],
                                 overrides: None,
@@ -1033,7 +1063,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             let boss_val = substate.role_edit_boss.trim().to_string();
                             
                             let bin_lines: Vec<String> = substate.role_edit_bin.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                            let env_lines: Vec<String> = substate.role_edit_env.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                            let env_lines: Vec<String> = substate.role_edit_env.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
                             let new_role = serde_saphyr::Commented(
                                 inforno_core::realm::RoleConfig {
@@ -1090,7 +1120,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                     substate.role_edit_tier = role.tier.0.to_string();
                                     substate.role_edit_boss = role.boss.clone().unwrap_or_default();
                                     substate.role_edit_bin = role.bin.join("\n");
-                                    substate.role_edit_env = role.env.join("\n");
+                                    substate.role_edit_env = role.env.clone();
                                     substate.role_edit_powers = role.powers.clone();
                                 }
                             });
@@ -1121,7 +1151,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     substate.role_edit_tier = "2".to_string();
                     substate.role_edit_boss = "".to_string();
                     substate.role_edit_bin = "".to_string();
-                    substate.role_edit_env = "".to_string();
+                    substate.role_edit_env = vec![];
                     substate.role_edit_powers = vec![];
                 }
             }
@@ -1450,6 +1480,44 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
     }
 }
 
+/// Best-effort microphone/speaker device enumeration via `pactl`, for the
+/// device pickers. Returns `(mic_devices, speaker_devices)`, each prefixed
+/// with `"sysdefault"` regardless of whether `pactl` is present or returns
+/// anything, since that name is always valid on every mainstream Linux
+/// sound stack. `pactl` reports every PulseAudio/PipeWire-level device —
+/// hardware-backed ones (named `alsa_input.*`/`alsa_output.*` by PulseAudio
+/// convention, which is just a naming scheme, not a sign they're somehow
+/// outside the Pulse/PipeWire layer) alongside purely software ones: a
+/// sink's `.monitor` source (hears whatever that output is playing —
+/// useful for an assistant reacting to system audio, not just the physical
+/// mic), null-sinks, combined-sinks, Bluetooth nodes. All of it is
+/// included; nothing is filtered by category.
+fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
+    let list_short = |kind: &str| -> Vec<String> {
+        std::process::Command::new("pactl")
+            .args(["list", kind, "short"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|line| line.split_whitespace().nth(1))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut mics = vec!["sysdefault".to_string()];
+    mics.extend(list_short("sources"));
+
+    let mut speakers = vec!["sysdefault".to_string()];
+    speakers.extend(list_short("sinks"));
+
+    (mics, speakers)
+}
+
 fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
     let mut is_open = state.realm_config_state.show_new_realm_wizard;
     egui::Window::new("✨ New Realm")
@@ -1467,11 +1535,15 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                 ui.radio_value(&mut state.realm_config_state.wizard_project_type, 1, "1. Brainstorming or Preliminary research");
                 ui.radio_value(&mut state.realm_config_state.wizard_project_type, 2, "2. Software Development");
                 ui.radio_value(&mut state.realm_config_state.wizard_project_type, 3, "3. Content Generation");
+                ui.radio_value(&mut state.realm_config_state.wizard_project_type, 5, "5. Speaking Assistant (voice conversation, kept as text)");
                 ui.radio_value(&mut state.realm_config_state.wizard_project_type, 4, "4. Other");
 
                 ui.add_space(15.0);
                 ui.horizontal(|ui| {
                     if ui.add_enabled(state.realm_config_state.wizard_project_type != 0, egui::Button::new("Next ➡")).clicked() {
+                        if state.realm_config_state.wizard_project_type == 5 && state.realm_config_state.wizard_audio_devices.is_none() {
+                            state.realm_config_state.wizard_audio_devices = Some(enumerate_audio_devices());
+                        }
                         state.realm_config_state.wizard_step = 1;
                     }
                     if ui.button("Cancel").clicked() {
@@ -1493,6 +1565,45 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                 ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 1, "Create a new empty sandbox (keep presets)");
                 ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 2, "Create a totally empty sandbox");
 
+                if state.realm_config_state.wizard_project_type == 5 {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.label(egui::RichText::new("Audio Capabilities").strong());
+                    ui.label(egui::RichText::new("No disk mounts — this Realm only hears and speaks. The conversation itself still lives in the sandbox, as text.").weak());
+
+                    let (mic_options, speaker_options) = state.realm_config_state.wizard_audio_devices
+                        .get_or_insert_with(enumerate_audio_devices)
+                        .clone();
+
+                    if state.realm_config_state.wizard_mic_device.is_empty() {
+                        state.realm_config_state.wizard_mic_device = "sysdefault".to_string();
+                    }
+                    if state.realm_config_state.wizard_speaker_device.is_empty() {
+                        state.realm_config_state.wizard_speaker_device = "sysdefault".to_string();
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("Microphone:");
+                        egui::ComboBox::from_id_salt("wizard_mic_device")
+                            .selected_text(state.realm_config_state.wizard_mic_device.clone())
+                            .show_ui(ui, |ui| {
+                                for dev in &mic_options {
+                                    ui.selectable_value(&mut state.realm_config_state.wizard_mic_device, dev.clone(), dev);
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Speaker:");
+                        egui::ComboBox::from_id_salt("wizard_speaker_device")
+                            .selected_text(state.realm_config_state.wizard_speaker_device.clone())
+                            .show_ui(ui, |ui| {
+                                for dev in &speaker_options {
+                                    ui.selectable_value(&mut state.realm_config_state.wizard_speaker_device, dev.clone(), dev);
+                                }
+                            });
+                    });
+                }
+
                 ui.add_space(15.0);
                 ui.horizontal(|ui| {
                     if ui.button("⬅ Back").clicked() {
@@ -1513,18 +1624,31 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                             // TODO: Handle actual SQLite sandbox file copying/creation logic here 
                             // based on state.realm_config_state.wizard_sandbox_option
 
+                            let audio_powers_yaml = if state.realm_config_state.wizard_project_type == 5 {
+                                format!(
+                                    r#"    powers:
+      - mic: [{}]
+      - speaker: [{}]
+"#,
+                                    state.realm_config_state.wizard_mic_device,
+                                    state.realm_config_state.wizard_speaker_device
+                                )
+                            } else {
+                                String::new()
+                            };
+
                             let minimal_yaml = format!(r#"mounts: {{}}
 places: {{}}
 tiers: {{}}
 roles:
   gui:
     tier: 1
-sandboxes:
+{}sandboxes:
   default:
     path: {}
     roles:
       - gui
-"#, path_str);
+"#, audio_powers_yaml, path_str);
 
                             let yaml_path = realm_dir.join("realm2.yml");
                             let _ = std::fs::write(&yaml_path, minimal_yaml.clone());
@@ -1554,6 +1678,225 @@ sandboxes:
     }
 }
 
+/// Renders the Filesystem/Microphone/Speaker switch for a `Power`, then the
+/// matching editor beneath it. Switching variant replaces the whole value
+/// with a fresh default for the newly-chosen kind — there's no way to
+/// "convert" a glob into a device list or vice versa.
+fn ui_edit_power_scope(
+    ui: &mut egui::Ui,
+    power: &mut inforno_core::realm::Power,
+    available_refs: &[String],
+    mic_devices: &[String],
+    speaker_devices: &[String],
+    id_salt: usize,
+) {
+    use inforno_core::realm::{GlobExpr, Power};
+
+    let current_kind = match power {
+        Power::Fs { .. } => 0,
+        Power::Mic { .. } => 1,
+        Power::Speaker { .. } => 2,
+    };
+    let mut kind = current_kind;
+
+    ui.horizontal(|ui| {
+        ui.label("Scope:");
+        if ui.selectable_label(kind == 0, "📁 Filesystem").clicked() { kind = 0; }
+        if ui.selectable_label(kind == 1, "🎙 Microphone").clicked() { kind = 1; }
+        if ui.selectable_label(kind == 2, "🔊 Speaker").clicked() { kind = 2; }
+    });
+
+    if kind != current_kind {
+        *power = match kind {
+            0 => Power::Fs { span: GlobExpr::Pattern("**/*".to_string()), caps: vec![], overrides: None },
+            1 => Power::Mic { mic: vec!["sysdefault".to_string()] },
+            _ => Power::Speaker { speaker: vec!["sysdefault".to_string()] },
+        };
+    }
+
+    match power {
+        Power::Fs { span, .. } => {
+            ui.label("Span:");
+            ui_edit_glob_expr(ui, span, available_refs, id_salt);
+        }
+        Power::Mic { mic } => {
+            ui.label("Devices:");
+            ui_edit_device_list(ui, mic, mic_devices, false, id_salt);
+        }
+        Power::Speaker { speaker } => {
+            ui.label("Devices:");
+            ui_edit_device_list(ui, speaker, speaker_devices, true, id_salt);
+        }
+    }
+}
+
+/// Names never bulk-copied by "Copy All From Host" — secrets that
+/// shouldn't casually end up baked into a Realm config, which may later be
+/// shared or committed. This is a copy-time filter only: nothing stops
+/// someone from typing the name back in manually via "+ Add Variable".
+const ENV_COPY_BLOCKLIST: &[&str] = &["OPENROUTER_API_KEY", "OPENROUTER_API_URLS"];
+
+fn ui_edit_env_list(ui: &mut egui::Ui, env_lines: &mut Vec<String>, id_salt: usize) {
+    ui.horizontal(|ui| {
+        if ui.button("📋 Copy All From Host")
+            .on_hover_text("Import every environment variable currently set on this machine as a pass-through entry (known secrets are skipped). Delete any others you don't want to keep.")
+            .clicked()
+        {
+            for (k, _) in std::env::vars() {
+                if ENV_COPY_BLOCKLIST.contains(&k.as_str()) {
+                    continue;
+                }
+                if !env_lines.iter().any(|l| l.split('=').next() == Some(k.as_str())) {
+                    env_lines.push(k);
+                }
+            }
+        }
+        if ui.button("+ Add Variable").clicked() {
+            env_lines.push(String::new());
+        }
+    });
+    let mut to_remove: Option<usize> = None;
+    for (idx, line) in env_lines.iter_mut().enumerate() {
+        let (mut name, mut value, mut is_fixed) = match line.split_once('=') {
+            Some((n, v)) => (n.to_string(), v.to_string(), true),
+            None => (line.clone(), String::new(), false),
+        };
+
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0).hint_text("VAR_NAME"));
+            egui::ComboBox::from_id_salt(("env_mode", id_salt, idx))
+                .selected_text(if is_fixed { "Fixed value" } else { "As-is" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut is_fixed, false, "As-is");
+                    if ui.selectable_value(&mut is_fixed, true, "Fixed value").clicked() && value.is_empty() {
+                        value = std::env::var(&name).unwrap_or_default();
+                    }
+                });
+            if is_fixed {
+                ui.add(egui::TextEdit::singleline(&mut value).desired_width(160.0).hint_text("value"));
+            }
+            if ui.small_button("🗑").clicked() {
+                to_remove = Some(idx);
+            }
+        });
+
+        *line = if is_fixed { format!("{}={}", name, value) } else { name };
+    }
+    if let Some(idx) = to_remove {
+        env_lines.remove(idx);
+    }
+}
+
+/// One row per selected device — a dropdown of the host's currently
+/// available devices (from `available`, populated via `pactl`) plus a
+/// delete button — and an "+ Add Device" button. Editing this way (versus
+/// free text) keeps device names accurate to what's actually plugged in
+/// right now; a stale/unplugged device that's still saved in the config
+/// just won't show up as a dropdown option here, though it stays in the
+/// YAML untouched until explicitly removed. `show_test_button` adds a "🔊
+/// Test" action per row — only meaningful for speakers, since "testing" a
+/// microphone would mean recording and playing it back, a separate feature.
+fn ui_edit_device_list(ui: &mut egui::Ui, devices: &mut Vec<String>, available: &[String], show_test_button: bool, id_salt: usize) {
+    let mut to_remove: Option<usize> = None;
+    for (idx, dev) in devices.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("power_device", id_salt, idx))
+                .selected_text(dev.clone())
+                .show_ui(ui, |ui| {
+                    for opt in available {
+                        ui.selectable_value(dev, opt.clone(), opt);
+                    }
+                });
+            if show_test_button && ui.button("🔊 Test").on_hover_text("Play a short test tone through this device").clicked() {
+                play_test_tone(dev);
+            }
+            if ui.small_button("🗑").clicked() {
+                to_remove = Some(idx);
+            }
+        });
+    }
+    if let Some(idx) = to_remove {
+        devices.remove(idx);
+    }
+    if ui.button("+ Add Device").clicked() {
+        devices.push(available.first().cloned().unwrap_or_else(|| "sysdefault".to_string()));
+    }
+}
+
+/// Best-effort test-tone playback through a specific PulseAudio/PipeWire
+/// sink. Fire-and-forget: writes a short synthesized beep to `paplay`'s
+/// stdin and drops the child immediately, so the UI thread never blocks
+/// waiting for playback to finish — writing a few KB to a pipe is
+/// effectively instant regardless of how long the tone takes to actually
+/// play. Failures (missing `paplay`, a device name that no longer exists)
+/// are silently ignored; there's no good place to surface an error from
+/// inside a widget click handler, and a silent no-op is the safe outcome.
+fn play_test_tone(device: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new("paplay");
+    if device != "sysdefault" {
+        cmd.args(["--device", device]);
+    }
+    cmd.arg("-"); // read the WAV from stdin instead of a file
+
+    if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(&generate_test_tone_wav());
+        }
+        // Deliberately not waiting on `child`: dropping it here lets
+        // playback continue as its own process instead of blocking this
+        // click handler. This can leave a harmless zombie until the
+        // process table is next reaped elsewhere -- acceptable for an
+        // occasional manual test click, not for anything called in a loop.
+    }
+}
+
+/// Synthesizes a short (600ms, 440Hz) mono 16-bit PCM WAV in memory, with a
+/// 20ms fade in/out to avoid a click at the start/end. No file, no crate —
+/// just a minimal hand-built RIFF/WAVE header followed by raw samples.
+fn generate_test_tone_wav() -> Vec<u8> {
+    const SAMPLE_RATE: u32 = 44100;
+    const DURATION_SECS: f32 = 0.6;
+    const FREQ_HZ: f32 = 440.0;
+
+    let num_samples = (SAMPLE_RATE as f32 * DURATION_SECS) as u32;
+    let fade_samples = (SAMPLE_RATE as f32 * 0.02) as u32;
+    let mut samples = Vec::with_capacity(num_samples as usize * 2);
+
+    for i in 0..num_samples {
+        let t = i as f32 / SAMPLE_RATE as f32;
+        let envelope = if i < fade_samples {
+            i as f32 / fade_samples as f32
+        } else if i > num_samples - fade_samples {
+            (num_samples - i) as f32 / fade_samples as f32
+        } else {
+            1.0
+        };
+        let sample = (t * FREQ_HZ * 2.0 * std::f32::consts::PI).sin() * envelope * 0.3;
+        let pcm = (sample * i16::MAX as f32) as i16;
+        samples.extend_from_slice(&pcm.to_le_bytes());
+    }
+
+    let data_len = samples.len() as u32;
+    let mut wav = Vec::with_capacity(44 + samples.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());   // PCM fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes());    // format = PCM
+    wav.extend_from_slice(&1u16.to_le_bytes());    // channels = mono
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes());    // block align
+    wav.extend_from_slice(&16u16.to_le_bytes());   // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&samples);
+    wav
+}
 fn ui_edit_glob_expr(
     ui: &mut egui::Ui,
     expr: &mut inforno_core::realm::GlobExpr,
