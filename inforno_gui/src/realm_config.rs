@@ -1832,25 +1832,29 @@ fn ui_edit_device_list(ui: &mut egui::Ui, devices: &mut Vec<String>, available: 
 /// are silently ignored; there's no good place to surface an error from
 /// inside a widget click handler, and a silent no-op is the safe outcome.
 fn play_test_tone(device: &str) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    let device = device.to_string();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
-    let mut cmd = Command::new("paplay");
-    if device != "sysdefault" {
-        cmd.args(["--device", device]);
-    }
-    cmd.arg("-"); // read the WAV from stdin instead of a file
-
-    if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&generate_test_tone_wav());
+        let mut cmd = Command::new("paplay");
+        if device != "sysdefault" {
+            cmd.args(["--device", &device]);
         }
-        // Deliberately not waiting on `child`: dropping it here lets
-        // playback continue as its own process instead of blocking this
-        // click handler. This can leave a harmless zombie until the
-        // process table is next reaped elsewhere -- acceptable for an
-        // occasional manual test click, not for anything called in a loop.
-    }
+        // paplay reads from stdin automatically if no filename argument is passed.
+        // Passing "-" makes it look for a file literally named "-" and fail.
+
+        // Inherit stderr so any paplay errors show up in the terminal for debugging.
+        if let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(&generate_test_tone_wav());
+                // Hold the pipe open for the duration of the tone (now 1.2s for stereo) so that
+                // PipeWire/PulseAudio does not prematurely tear down the stream upon receiving EOF.
+                std::thread::sleep(std::time::Duration::from_millis(1250));
+            }
+            let _ = child.wait(); // Cleanly reap the child process
+        }
+    });
 }
 
 /// Synthesizes a short (600ms, 440Hz) mono 16-bit PCM WAV in memory, with a
@@ -1858,25 +1862,37 @@ fn play_test_tone(device: &str) {
 /// just a minimal hand-built RIFF/WAVE header followed by raw samples.
 fn generate_test_tone_wav() -> Vec<u8> {
     const SAMPLE_RATE: u32 = 44100;
-    const DURATION_SECS: f32 = 0.6;
+    const DURATION_SECS_PER_CHANNEL: f32 = 0.6;
     const FREQ_HZ: f32 = 440.0;
 
-    let num_samples = (SAMPLE_RATE as f32 * DURATION_SECS) as u32;
+    let num_samples_per_channel = (SAMPLE_RATE as f32 * DURATION_SECS_PER_CHANNEL) as u32;
+    let total_samples = num_samples_per_channel * 2;
     let fade_samples = (SAMPLE_RATE as f32 * 0.02) as u32;
-    let mut samples = Vec::with_capacity(num_samples as usize * 2);
+    let mut samples = Vec::with_capacity(total_samples as usize * 4); // 2 channels, 2 bytes/sample
 
-    for i in 0..num_samples {
-        let t = i as f32 / SAMPLE_RATE as f32;
-        let envelope = if i < fade_samples {
-            i as f32 / fade_samples as f32
-        } else if i > num_samples - fade_samples {
-            (num_samples - i) as f32 / fade_samples as f32
+    for i in 0..total_samples {
+        let is_left_phase = i < num_samples_per_channel;
+        let phase_i = if is_left_phase { i } else { i - num_samples_per_channel };
+
+        let t = phase_i as f32 / SAMPLE_RATE as f32;
+        let envelope = if phase_i < fade_samples {
+            phase_i as f32 / fade_samples as f32
+        } else if phase_i > num_samples_per_channel - fade_samples {
+            (num_samples_per_channel - phase_i) as f32 / fade_samples as f32
         } else {
             1.0
         };
+        
         let sample = (t * FREQ_HZ * 2.0 * std::f32::consts::PI).sin() * envelope * 0.3;
         let pcm = (sample * i16::MAX as f32) as i16;
-        samples.extend_from_slice(&pcm.to_le_bytes());
+        
+        if is_left_phase {
+            samples.extend_from_slice(&pcm.to_le_bytes()); // Left
+            samples.extend_from_slice(&0i16.to_le_bytes()); // Right (Silent)
+        } else {
+            samples.extend_from_slice(&0i16.to_le_bytes()); // Left (Silent)
+            samples.extend_from_slice(&pcm.to_le_bytes()); // Right
+        }
     }
 
     let data_len = samples.len() as u32;
@@ -1887,10 +1903,10 @@ fn generate_test_tone_wav() -> Vec<u8> {
     wav.extend_from_slice(b"fmt ");
     wav.extend_from_slice(&16u32.to_le_bytes());   // PCM fmt chunk size
     wav.extend_from_slice(&1u16.to_le_bytes());    // format = PCM
-    wav.extend_from_slice(&1u16.to_le_bytes());    // channels = mono
+    wav.extend_from_slice(&2u16.to_le_bytes());    // channels = stereo
     wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
-    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
-    wav.extend_from_slice(&2u16.to_le_bytes());    // block align
+    wav.extend_from_slice(&(SAMPLE_RATE * 4).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&4u16.to_le_bytes());    // block align
     wav.extend_from_slice(&16u16.to_le_bytes());   // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
