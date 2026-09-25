@@ -196,9 +196,59 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
     fn show_input(&mut self, pin: &InPin, ui: &mut egui::Ui, snarl: &mut Snarl<InfornoNode>) -> impl SnarlPin + 'static {
         let info = self.info();
         let node = &mut snarl[pin.id.node];
-        let (name, ty) = &node_inputs(&info, node)[pin.id.input];
-        ui.label(name.as_str());
-        PinInfo::circle().with_fill(color_for_type(ty))
+        let (name, ty) = node_inputs(&info, node)[pin.id.input].clone();
+        
+        ui.horizontal(|ui| {
+            ui.label(name.as_str());
+            
+            // If the pin is completely unconnected, we display the ComfyUI parameter widget. 
+            // This natively aligns the widget vertically with the pin!
+            if pin.remotes.is_empty() {
+                if let InfornoNode::Comfy { class_type, values } = node {
+                    let entry = values.entry(name.clone()).or_default();
+                    
+                    let mut combo_choices = None;
+                    if let Some(obj) = info.get(class_type) {
+                        if let Some((_, input, _)) = obj.all_inputs().find(|(n, _, _)| n == &name) {
+                            if let Ok(val) = serde_json::to_value(input) {
+                                if let Some(arr) = val.as_array() {
+                                    if let Some(first_elem) = arr.get(0) {
+                                        if let Some(choices) = first_elem.as_array() {
+                                            combo_choices = Some(
+                                                choices.iter()
+                                                    .filter_map(|v| v.as_str().map(String::from))
+                                                    .collect::<Vec<_>>(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(choices) = combo_choices {
+                        if !choices.is_empty() && !choices.contains(entry) {
+                            *entry = choices[0].clone();
+                        }
+                        egui::ComboBox::from_id_salt((pin.id.node, pin.id.input))
+                            .width(110.0)
+                            .selected_text(entry.as_str())
+                            .show_ui(ui, |ui| {
+                                for choice in choices {
+                                    ui.selectable_value(entry, choice.clone(), choice);
+                                }
+                            });
+                    } else {
+                        ui.add_sized(
+                            egui::vec2(90.0, ui.spacing().interact_size.y),
+                            egui::TextEdit::singleline(entry),
+                        );
+                    }
+                }
+            }
+        });
+        
+        PinInfo::circle().with_fill(color_for_type(&ty))
     }
 
     fn show_output(&mut self, pin: &OutPin, ui: &mut egui::Ui, snarl: &mut Snarl<InfornoNode>) -> impl SnarlPin + 'static {
@@ -209,41 +259,32 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
         PinInfo::circle().with_fill(color_for_type(ty))
     }
 
-    fn has_body(&mut self, _node: &InfornoNode) -> bool {
-        true
+    fn has_body(&mut self, node: &InfornoNode) -> bool {
+        // Native ComfyUI nodes display parameters entirely within their input pins.
+        // We only return true (have a body) for our custom LLM Prompt nodes!
+        match node {
+            InfornoNode::Comfy { .. } => false,
+            _ => true,
+        }
     }
 
-    fn show_body(&mut self, node_id: NodeId, inputs: &[InPin], _outputs: &[OutPin], ui: &mut egui::Ui, snarl: &mut Snarl<InfornoNode>) {
-        let info = self.info();
-        // Fixed widget widths below are load-bearing, not cosmetic: an
-        // unconstrained TextEdit fills `ui.available_width()`, which inside
-        // an auto-sizing egui_snarl node body is fed by *last frame's* node
-        // width -- so it grows every frame instead of settling. Pin an
-        // explicit width and it stops.
+    fn show_body(&mut self, node_id: NodeId, _inputs: &[InPin], _outputs: &[OutPin], ui: &mut egui::Ui, snarl: &mut Snarl<InfornoNode>) {
         const FIELD_WIDTH: f32 = 140.0;
-        match &mut snarl[node_id] {
-            InfornoNode::Comfy { class_type, values } => {
-                let pins = comfy_inputs(&info, class_type);
-                for (idx, (name, _ty)) in pins.iter().enumerate() {
-                    // Once a wire is attached, ComfyUI itself hides the
-                    // inline widget for that input; we do the same.
-                    let linked = inputs.get(idx).map(|p| !p.remotes.is_empty()).unwrap_or(false);
-                    if linked { continue; }
-                    let entry = values.entry(name.clone()).or_default();
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{name}:"));
-                        ui.add(egui::TextEdit::singleline(entry).desired_width(FIELD_WIDTH));
-                    });
-                }
-            }
-            InfornoNode::OllamaPrompt { preset_id, system_prompt, user_prompt }
-            | InfornoNode::OpenRouterPrompt { preset_id, system_prompt, user_prompt } => {
-                ui.horizontal(|ui| { ui.label("preset id:"); ui.add(egui::DragValue::new(preset_id)); });
-                ui.label("system:");
-                ui.add(egui::TextEdit::multiline(system_prompt).desired_width(FIELD_WIDTH).desired_rows(2));
-                ui.label("user:");
-                ui.add(egui::TextEdit::multiline(user_prompt).desired_width(FIELD_WIDTH).desired_rows(3));
-            }
+        
+        // Comfy nodes are completely skipped here since has_body returns false for them.
+        if let InfornoNode::OllamaPrompt { preset_id, system_prompt, user_prompt }
+            | InfornoNode::OpenRouterPrompt { preset_id, system_prompt, user_prompt } = &mut snarl[node_id] {
+            ui.horizontal(|ui| { ui.label("preset id:"); ui.add(egui::DragValue::new(preset_id)); });
+            ui.label("system:");
+            ui.add_sized(
+                egui::vec2(FIELD_WIDTH, ui.spacing().interact_size.y * 2.0),
+                egui::TextEdit::multiline(system_prompt),
+            );
+            ui.label("user:");
+            ui.add_sized(
+                egui::vec2(FIELD_WIDTH, ui.spacing().interact_size.y * 3.0),
+                egui::TextEdit::multiline(user_prompt),
+            );
         }
     }
 
@@ -345,14 +386,14 @@ fn default_graph(object_info: &ObjectInfo) -> Snarl<InfornoNode> {
     let save = snarl.insert_node(egui::pos2(1150.0, 150.0),
         comfy("SaveImage", values(&[("filename_prefix", "Inforno")])));
 
-    snarl.connect(OutPinId { node: checkpoint, output: 0 }, InPinId { node: positive, input: idx("CLIPTextEncode", "clip") });
-    snarl.connect(OutPinId { node: checkpoint, output: 0 }, InPinId { node: negative, input: idx("CLIPTextEncode", "clip") });
+    snarl.connect(OutPinId { node: checkpoint, output: 1 }, InPinId { node: positive, input: idx("CLIPTextEncode", "clip") });
+    snarl.connect(OutPinId { node: checkpoint, output: 1 }, InPinId { node: negative, input: idx("CLIPTextEncode", "clip") });
     snarl.connect(OutPinId { node: checkpoint, output: 0 }, InPinId { node: sampler, input: idx("KSampler", "model") });
     snarl.connect(OutPinId { node: positive, output: 0 }, InPinId { node: sampler, input: idx("KSampler", "positive") });
     snarl.connect(OutPinId { node: negative, output: 0 }, InPinId { node: sampler, input: idx("KSampler", "negative") });
     snarl.connect(OutPinId { node: latent, output: 0 }, InPinId { node: sampler, input: idx("KSampler", "latent_image") });
     snarl.connect(OutPinId { node: sampler, output: 0 }, InPinId { node: decode, input: idx("VAEDecode", "samples") });
-    snarl.connect(OutPinId { node: checkpoint, output: 0 }, InPinId { node: decode, input: idx("VAEDecode", "vae") });
+    snarl.connect(OutPinId { node: checkpoint, output: 2 }, InPinId { node: decode, input: idx("VAEDecode", "vae") });
     snarl.connect(OutPinId { node: decode, output: 0 }, InPinId { node: save, input: idx("SaveImage", "images") });
 
     snarl
