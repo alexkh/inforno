@@ -22,6 +22,7 @@ use crate::preset_editor::{PresetEditorState, ui_preset_editor};
 use crate::realm_config::{RealmConfigState, ui_realm_config};
 use crate::side_panel::ui_side_panel;
 use crate::top_panel::ui_top_panel;
+use crate::workflow_editor::{WorkflowEditorState, ui_workflow_editor};
 use inforno_core::ollama::ollama_fetch_models;
 use inforno_core::openr::openr_fetch_models;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -140,7 +141,9 @@ pub struct State {
     pub show_key_manager: bool,
     pub show_preset_editor: bool,
     pub show_realm_config: bool,
+    pub show_workflow_editor: bool,
     pub realm_config_state: RealmConfigState,
+    pub workflow_editor_state: WorkflowEditorState,
     pub api_key_entered: String,
     pub openrouter_api_key: ApiKey,
     pub keyring_used: bool,
@@ -494,6 +497,8 @@ impl State {
             show_key_manager: false,
             show_preset_editor: false,
             show_realm_config: false,
+            show_workflow_editor: false,
+            workflow_editor_state: WorkflowEditorState::default(),
             realm_config_state: RealmConfigState {
                 yaml_buffer: broken_realm_yaml.clone(),
                 original_yaml: broken_realm_yaml,
@@ -826,6 +831,8 @@ impl eframe::App for MyApp {
         ui_agent_config(ui, state);
 
         ui_realm_config(ui, state);
+
+        ui_workflow_editor(ui, state);
 
         ui_bottom_panel(ui, state);
 

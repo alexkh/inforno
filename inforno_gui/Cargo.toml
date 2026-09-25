@@ -8,7 +8,7 @@ default-run = "inforno"
 inforno_core = { path = "../inforno_core" }
 bulat = { path = "../bulat" }
 # only used in v04_async binary:
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["blocking", "json"] }
 rand = "0.10.1"
 # walkers = "0.50.0"
 
@@ -60,6 +60,8 @@ nix = { version = "0.31.3", features = ["user", "mount", "sched", "process", "fs
 serde-saphyr = "1.2.0"
 rodio = "0.22.2"
 egui-file-dialog = "0.15.0"
+egui-snarl = "0.12.0"
+rucomfyui = { git = "https://github.com/alexkh/rucomfyui", branch = "main" }
 
 [[bin]]
 name = "inforno"

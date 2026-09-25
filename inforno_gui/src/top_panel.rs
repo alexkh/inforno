@@ -308,6 +308,15 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 state.show_preset_editor = !state.show_preset_editor;
             }
 
+            // Workflow Editor Button
+            let workflow_btn = egui::Button::new("🧩 Workflow")
+                    .selected(state.show_workflow_editor);
+            if ui.add(workflow_btn)
+                .on_hover_text("Open the ComfyUI Workflow Editor")
+                .clicked() {
+                state.show_workflow_editor = !state.show_workflow_editor;
+            }
+
             // ui.colored_label(ui.visuals().code_bg_color,"|");
 
             ui.colored_label(ui.visuals().code_bg_color,"|");
