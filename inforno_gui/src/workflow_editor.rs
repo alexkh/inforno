@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_snarl::{ui::{PinInfo, SnarlPin, SnarlViewer}, InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
@@ -41,6 +42,15 @@ pub enum InfornoNode {
     OllamaPrompt { preset_id: i64, system_prompt: String, user_prompt: String },
     /// Same idea, via OpenRouter.
     OpenRouterPrompt { preset_id: i64, system_prompt: String, user_prompt: String },
+    /// A documentation/comment node with no backend equivalent -- imported
+    /// from ComfyUI's `Note`/`MarkdownNote` widgets, which exist only in
+    /// the web frontend's canvas. Carries display text only, and stays
+    /// excluded from every ComfyUI JSON payload for the same reason the
+    /// security note above holds for API keys: `build_pre_prompt` only
+    /// ever matches `InfornoNode::Comfy`, so a node of this shape simply
+    /// cannot reach `/prompt` -- there's no separate filter to keep in
+    /// sync, and no way for this to regress silently.
+    MarkdownNote { title: String, text: String },
 }
 
 impl InfornoNode {
@@ -52,6 +62,7 @@ impl InfornoNode {
                 .unwrap_or_else(|| class_type.clone()),
             InfornoNode::OllamaPrompt { .. } => "🦙 Ollama Prompt".to_string(),
             InfornoNode::OpenRouterPrompt { .. } => "🌐 OpenRouter Prompt".to_string(),
+            InfornoNode::MarkdownNote { title, .. } => format!("📝 {}", if title.is_empty() { "Note" } else { title }),
         }
     }
 }
@@ -123,7 +134,7 @@ fn comfy_outputs(object_info: &ObjectInfo, class_type: &str) -> Vec<(String, Str
 fn node_inputs(object_info: &ObjectInfo, node: &InfornoNode) -> Vec<(String, String)> {
     match node {
         InfornoNode::Comfy { class_type, .. } => comfy_inputs(object_info, class_type),
-        InfornoNode::OllamaPrompt { .. } | InfornoNode::OpenRouterPrompt { .. } => vec![],
+        InfornoNode::OllamaPrompt { .. } | InfornoNode::OpenRouterPrompt { .. } | InfornoNode::MarkdownNote { .. } => vec![],
     }
 }
 
@@ -133,6 +144,7 @@ fn node_outputs(object_info: &ObjectInfo, node: &InfornoNode) -> Vec<(String, St
         InfornoNode::OllamaPrompt { .. } | InfornoNode::OpenRouterPrompt { .. } => {
             vec![("STRING".to_string(), "STRING".to_string())]
         }
+        InfornoNode::MarkdownNote { .. } => vec![],
     }
 }
 
@@ -169,6 +181,10 @@ fn coerce_value(object_info: &ObjectInfo, class_type: &str, input_name: &str, ra
 
 pub struct ComfyViewer {
     pub object_info: Arc<Mutex<Option<Arc<ObjectInfo>>>>,
+    /// Shared across frames (not per-node) so re-rendering a note's text
+    /// doesn't re-layout it from scratch every frame -- same reason
+    /// `State::common_mark_cache` exists for chat messages.
+    pub markdown_cache: std::rc::Rc<std::cell::RefCell<CommonMarkCache>>,
 }
 
 impl ComfyViewer {
@@ -309,6 +325,22 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
                 egui::vec2(FIELD_WIDTH, ui.spacing().interact_size.y * 3.0),
                 egui::TextEdit::multiline(user_prompt),
             );
+        } else if let InfornoNode::MarkdownNote { text, .. } = &snarl[node_id] {
+            let text = text.clone();
+            ui.push_id(node_id, |ui| {
+                egui::CollapsingHeader::new(egui::RichText::new("📖 Documentation").weak().small())
+                    .id_salt("md_note_body")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.set_max_width(360.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                let mut cache = self.markdown_cache.borrow_mut();
+                                CommonMarkViewer::new().show(ui, &mut cache, &text);
+                            });
+                    });
+            });
         }
     }
 
@@ -423,6 +455,406 @@ fn default_graph(object_info: &ObjectInfo) -> Snarl<InfornoNode> {
     snarl
 }
 
+/// Repairs "almost JSON" that has raw control characters (most commonly a
+/// bare newline) sitting inside a string literal instead of properly
+/// escaped as `\n`/`\r`/`\t`/`\u00XX`. Per the JSON spec these are illegal
+/// unescaped, so `serde_json` correctly rejects them -- but some
+/// ComfyUI exports/copy-paste paths produce exactly this (e.g. a
+/// MarkdownNote's text widget saved with literal newlines instead of
+/// escaped ones). Tracks string-open/close and existing backslash escapes
+/// char-by-char so a raw `"` or `\` already inside the string isn't
+/// mistaken for a boundary; a no-op on JSON that's already valid, so it's
+/// safe to run unconditionally before every parse in this module.
+pub fn sanitize_json_control_chars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for c in text.chars() {
+        if in_string {
+            if escape_next {
+                out.push(c);
+                escape_next = false;
+                continue;
+            }
+            match c {
+                '\\' => { out.push(c); escape_next = true; }
+                '"' => { in_string = false; out.push(c); }
+                _ if (c as u32) < 0x20 => {
+                    match c {
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        other => out.push_str(&format!("\\u{:04x}", other as u32)),
+                    }
+                }
+                _ => out.push(c),
+            }
+        } else {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+        }
+    }
+
+    out
+}
+
+/// Heuristic detection for ComfyUI's "API format" prompt JSON: an object
+/// whose every value is itself an object carrying a string `class_type`
+/// and an `inputs` object. This is exactly the shape `/prompt` expects and
+/// the shape ComfyUI's "Save (API Format)" export produces -- distinct
+/// enough from arbitrary JSON pasted into chat that it shouldn't false-
+/// positive on unrelated code blocks.
+pub fn is_comfy_api_workflow_json(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else { return false };
+    if map.is_empty() {
+        return false;
+    }
+    map.values().all(|node| {
+        node.get("class_type").and_then(|v| v.as_str()).is_some()
+            && node.get("inputs").map(|v| v.is_object()).unwrap_or(false)
+    })
+}
+
+/// A ComfyUI API-format input value is a two-element `[node_id, output_index]`
+/// array when it's a link to another node's output; anything else is a
+/// plain literal. Mirrors the convention ComfyUI's own `/prompt` endpoint
+/// uses to tell the two apart (the same convention `resolve_and_queue`
+/// produces when it serializes a graph the other direction).
+fn as_comfy_link(value: &serde_json::Value) -> Option<(String, usize)> {
+    let arr = value.as_array()?;
+    if arr.len() != 2 {
+        return None;
+    }
+    let node_id = arr[0].as_str()?.to_string();
+    let output = arr[1].as_u64()? as usize;
+    Some((node_id, output))
+}
+
+fn comfy_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Builds a graph from a ComfyUI API-format prompt JSON (e.g. from
+/// ComfyUI's "Save (API Format)" export, or a `/prompt` request body
+/// pasted back into chat). Node positions aren't part of this format, so
+/// nodes are laid out on a simple grid in ascending original-id order;
+/// connections are re-wired using `input_index` against the live schema,
+/// exactly like `default_graph` does, so a name -> pin-index mismatch
+/// can't silently misconnect a wire.
+fn build_graph_from_api_json(json_str: &str, object_info: &ObjectInfo) -> Result<Snarl<InfornoNode>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid JSON: {e}"))?;
+    let map = parsed.as_object().ok_or_else(|| "Expected a JSON object of nodes".to_string())?;
+    if map.is_empty() {
+        return Err("Workflow JSON has no nodes".to_string());
+    }
+
+    let mut ordered_ids: Vec<&String> = map.keys().collect();
+    ordered_ids.sort_by_key(|k| k.parse::<i64>().unwrap_or(i64::MAX));
+
+    let mut snarl = Snarl::new();
+    let mut id_map: HashMap<String, NodeId> = HashMap::new();
+    let cols = 5;
+
+    for (idx, orig_id) in ordered_ids.iter().enumerate() {
+        let node_val = &map[*orig_id];
+        let class_type = node_val.get("class_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("Node '{orig_id}' is missing class_type"))?
+            .to_string();
+
+        let mut values = BTreeMap::new();
+        if let Some(inputs) = node_val.get("inputs").and_then(|v| v.as_object()) {
+            for (name, val) in inputs {
+                if as_comfy_link(val).is_none() {
+                    values.insert(name.clone(), comfy_value_to_string(val));
+                }
+            }
+        }
+
+        let pos = egui::pos2((idx % cols) as f32 * 280.0, (idx / cols) as f32 * 220.0);
+        let node_id = snarl.insert_node(pos, InfornoNode::Comfy { class_type, values });
+        id_map.insert((*orig_id).clone(), node_id);
+    }
+
+    for orig_id in &ordered_ids {
+        let node_val = &map[*orig_id];
+        let Some(class_type) = node_val.get("class_type").and_then(|v| v.as_str()) else { continue };
+        let Some(inputs) = node_val.get("inputs").and_then(|v| v.as_object()) else { continue };
+        let Some(&to_node) = id_map.get(*orig_id) else { continue };
+
+        for (name, val) in inputs {
+            let Some((from_orig_id, output)) = as_comfy_link(val) else { continue };
+            let Some(&from_node) = id_map.get(&from_orig_id) else { continue };
+            let Some(input) = input_index(object_info, class_type, name) else { continue };
+            snarl.connect(OutPinId { node: from_node, output }, InPinId { node: to_node, input });
+        }
+    }
+
+    Ok(snarl)
+}
+
+/// Heuristic detection for ComfyUI's "UI format" workflow JSON (what the
+/// web frontend itself saves/loads, e.g. `workflow.json` or a graph copied
+/// from the editor via Ctrl+A/Ctrl+C): a top-level object carrying a
+/// `nodes` array and a `links` array. Unlike the API format, this one
+/// *does* carry node positions/sizes -- see the doc comment on
+/// `build_graph_from_ui_json` for why the two formats differ and how each
+/// is parsed.
+pub fn is_comfy_ui_workflow_json(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else { return false };
+    matches!(map.get("nodes"), Some(v) if v.is_array())
+        && matches!(map.get("links"), Some(v) if v.is_array())
+}
+
+/// True if `value` looks like either ComfyUI JSON format this module knows
+/// how to import (see `is_comfy_api_workflow_json` and
+/// `is_comfy_ui_workflow_json`).
+pub fn is_comfy_workflow_json(value: &serde_json::Value) -> bool {
+    is_comfy_api_workflow_json(value) || is_comfy_ui_workflow_json(value)
+}
+
+/// The input names of `class_type`, in the server's declared order,
+/// restricted to ones that actually get an on-node widget when unlinked
+/// (`ObjectInputMetaTyped::as_meta_typed()` returns `Some` for primitive/
+/// combo types like INT, FLOAT, STRING, BOOLEAN, and `None` for pure
+/// socket types like MODEL/CLIP/VAE/CONDITIONING). This is the same order
+/// the ComfyUI frontend fills `widgets_values` in, which is what makes
+/// reconstructing that array's meaning possible without a positional
+/// schema of our own.
+fn widget_eligible_input_names(object_info: &ObjectInfo, class_type: &str) -> Vec<String> {
+    object_info
+        .get(class_type)
+        .map(|obj| {
+            obj.all_inputs()
+                .filter(|(_, input, _)| input.as_meta_typed().is_some())
+                .map(|(name, _, _)| name.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A node's `pos` field, tolerating the two shapes litegraph has
+/// serialized it as across ComfyUI frontend versions: a `[x, y]` array, or
+/// an `{"0": x, "1": y}` object.
+fn parse_ui_pos(node_val: &serde_json::Value) -> Option<egui::Pos2> {
+    let pos = node_val.get("pos")?;
+    if let Some(arr) = pos.as_array() {
+        let x = arr.get(0)?.as_f64()?;
+        let y = arr.get(1)?.as_f64()?;
+        return Some(egui::pos2(x as f32, y as f32));
+    }
+    if let Some(obj) = pos.as_object() {
+        let x = obj.get("0")?.as_f64()?;
+        let y = obj.get("1")?.as_f64()?;
+        return Some(egui::pos2(x as f32, y as f32));
+    }
+    None
+}
+
+/// Builds a graph from ComfyUI's "UI format" workflow JSON -- the format
+/// the web frontend itself saves, distinct from the flattened "API
+/// format" `build_graph_from_api_json` handles. The two differ because
+/// the API format is only ever consumed by the Python backend's executor,
+/// which has no concept of a canvas -- it just needs `class_type` plus
+/// resolved input values/links, so that's all ComfyUI bothers to emit for
+/// `/prompt`. The UI format is the frontend's own editor-state dump, so it
+/// additionally carries `pos`/`size` per node, and (unlike the API format)
+/// stores literal widget values *positionally* in a `widgets_values` array
+/// rather than keyed by input name -- see `widget_eligible_input_names`
+/// for how that position is reconstructed. Connections here live in a
+/// single top-level `links` array of `[link_id, from_node, from_slot,
+/// to_node, to_slot, type]` tuples; each node's own `inputs` entries only
+/// carry a `link` id to look up in that array, not the endpoint directly.
+fn build_graph_from_ui_json(json_str: &str, object_info: &ObjectInfo) -> Result<(Snarl<InfornoNode>, Option<String>), String> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid JSON: {e}"))?;
+    let root = parsed.as_object().ok_or_else(|| "Expected a JSON object".to_string())?;
+    let nodes = root.get("nodes").and_then(|v| v.as_array())
+        .ok_or_else(|| "Missing 'nodes' array".to_string())?;
+    if nodes.is_empty() {
+        return Err("Workflow JSON has no nodes".to_string());
+    }
+    let links = root.get("links").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+    // link_id -> (origin_node_id_as_string, origin_output_slot)
+    let mut link_origins: HashMap<i64, (String, usize)> = HashMap::new();
+    for link in &links {
+        let Some(arr) = link.as_array() else { continue };
+        if arr.len() < 5 { continue; }
+        let (Some(link_id), Some(origin_id), Some(origin_slot)) =
+            (arr[0].as_i64(), arr[1].as_i64(), arr[2].as_u64()) else { continue };
+        link_origins.insert(link_id, (origin_id.to_string(), origin_slot as usize));
+    }
+
+    // Pass 0: resolve every node's InfornoNode value and raw position up
+    // front, without inserting anything yet, so the whole graph's
+    // coordinates can be normalized afterward -- a real export's positions
+    // are absolute canvas coordinates (sometimes placed far from the
+    // origin, e.g. a documentation note parked off to the side), and the
+    // editor's default viewport starts near (0, 0), so importing them
+    // verbatim can leave every node scrolled out of view even though the
+    // import itself succeeded.
+    struct PendingNode {
+        orig_id: String,
+        node: InfornoNode,
+        pos: egui::Pos2,
+    }
+
+    let mut pending = Vec::new();
+    let mut note_count = 0usize;
+    let mut grid_idx = 0usize;
+    let cols = 5;
+
+    for node_val in nodes {
+        let orig_id = node_val.get("id").and_then(|v| v.as_i64())
+            .ok_or_else(|| "Node is missing an integer 'id'".to_string())?
+            .to_string();
+        let class_type = node_val.get("type")
+            .or_else(|| node_val.get("class_type"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("Node '{orig_id}' is missing type/class_type"))?
+            .to_string();
+
+        let pos = parse_ui_pos(node_val).unwrap_or_else(|| {
+            let p = egui::pos2((grid_idx % cols) as f32 * 280.0, (grid_idx / cols) as f32 * 220.0);
+            grid_idx += 1;
+            p
+        });
+
+        // `Note`/`MarkdownNote` are frontend-only documentation widgets --
+        // there's no backend class_type for either, so sending one to
+        // /prompt always fails no matter what's installed. Rather than
+        // drop them (and lose e.g. model-download instructions), import
+        // them as a distinct, read-only `MarkdownNote` node: see the type
+        // definition for why this guarantees it can never reach a ComfyUI
+        // JSON payload.
+        if class_type == "Note" || class_type == "MarkdownNote" {
+            let title = node_val.get("title").and_then(|v| v.as_str()).unwrap_or("Note").to_string();
+            // Prefer a named lookup if the source ever provides one;
+            // otherwise fall back to the first positional widgets_values
+            // entry, which is where both Note and MarkdownNote keep their
+            // text in stock ComfyUI exports.
+            let text = node_val.get("widgets_values_named")
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    node_val.get("widgets_values")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .map(comfy_value_to_string)
+                })
+                .unwrap_or_default();
+
+            note_count += 1;
+            pending.push(PendingNode { orig_id, node: InfornoNode::MarkdownNote { title, text }, pos });
+            continue;
+        }
+
+        // Names currently carrying a link, per this node's own declared
+        // inputs -- used both to skip them when consuming widgets_values
+        // and (in the second pass) to actually wire the connection.
+        let declared_inputs = node_val.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let linked_names: std::collections::HashSet<String> = declared_inputs.iter()
+            .filter(|inp| inp.get("link").map(|l| !l.is_null()).unwrap_or(false))
+            .filter_map(|inp| inp.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+
+        let mut values = BTreeMap::new();
+        match node_val.get("widgets_values") {
+            Some(serde_json::Value::Array(arr)) => {
+                let order = widget_eligible_input_names(object_info, &class_type);
+                for (name, val) in order.into_iter().filter(|n| !linked_names.contains(n)).zip(arr.iter()) {
+                    values.insert(name, comfy_value_to_string(val));
+                }
+            }
+            Some(serde_json::Value::Object(map)) => {
+                for (name, val) in map {
+                    if !linked_names.contains(name) {
+                        values.insert(name.clone(), comfy_value_to_string(val));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        pending.push(PendingNode { orig_id, node: InfornoNode::Comfy { class_type, values }, pos });
+    }
+
+    // Normalize so the top-left of the imported graph sits near the
+    // origin, regardless of where the source canvas placed it -- fixes the
+    // "editor window looks empty" symptom for exports whose nodes were
+    // positioned far from (0, 0).
+    let min_x = pending.iter().map(|n| n.pos.x).fold(f32::INFINITY, f32::min);
+    let min_y = pending.iter().map(|n| n.pos.y).fold(f32::INFINITY, f32::min);
+    let margin = 40.0;
+
+    let mut snarl = Snarl::new();
+    let mut id_map: HashMap<String, NodeId> = HashMap::new();
+
+    for pn in pending {
+        let adjusted = egui::pos2(pn.pos.x - min_x + margin, pn.pos.y - min_y + margin);
+        let node_id = snarl.insert_node(adjusted, pn.node);
+        id_map.insert(pn.orig_id, node_id);
+    }
+
+    for node_val in nodes {
+        let Some(orig_id) = node_val.get("id").and_then(|v| v.as_i64()).map(|i| i.to_string()) else { continue };
+        let Some(class_type) = node_val.get("type").or_else(|| node_val.get("class_type")).and_then(|v| v.as_str()) else { continue };
+        // Notes have no declared inputs to wire in practice, but skip
+        // explicitly rather than rely on that -- input_index() below would
+        // simply return None for a Note's class_type anyway (it isn't a
+        // real ComfyUI class), so this is belt-and-suspenders, not load-bearing.
+        if class_type == "Note" || class_type == "MarkdownNote" { continue; }
+        let Some(&to_node) = id_map.get(&orig_id) else { continue };
+        let Some(declared_inputs) = node_val.get("inputs").and_then(|v| v.as_array()) else { continue };
+
+        for inp in declared_inputs {
+            let Some(name) = inp.get("name").and_then(|v| v.as_str()) else { continue };
+            let Some(link_id) = inp.get("link").and_then(|v| v.as_i64()) else { continue };
+            let Some((from_orig_id, from_slot)) = link_origins.get(&link_id) else { continue };
+            let Some(&from_node) = id_map.get(from_orig_id) else { continue };
+            let Some(input) = input_index(object_info, class_type, name) else { continue };
+            snarl.connect(OutPinId { node: from_node, output: *from_slot }, InPinId { node: to_node, input });
+        }
+    }
+
+    let info_msg = if note_count > 0 {
+        Some(format!(
+            "Imported {} documentation note(s) as read-only Note node(s) (kept visible, excluded from Play).",
+            note_count
+        ))
+    } else {
+        None
+    };
+
+    Ok((snarl, info_msg))
+}
+
+/// Parses whichever ComfyUI workflow JSON format `json_str` turns out to
+/// be (API or UI -- see `is_comfy_workflow_json`), dispatching to the
+/// matching builder.
+fn build_graph_from_comfy_json(json_str: &str, object_info: &ObjectInfo) -> Result<(Snarl<InfornoNode>, Option<String>), String> {
+    let sanitized = sanitize_json_control_chars(json_str);
+    let parsed: serde_json::Value = serde_json::from_str(&sanitized)
+        .map_err(|e| format!("Invalid JSON: {e}"))?;
+    if is_comfy_ui_workflow_json(&parsed) {
+        build_graph_from_ui_json(&sanitized, object_info)
+    } else {
+        build_graph_from_api_json(&sanitized, object_info).map(|snarl| (snarl, None))
+    }
+}
+
 pub struct WorkflowEditorState {
     pub snarl: Snarl<InfornoNode>,
     pub comfy_url: String,
@@ -445,6 +877,20 @@ pub struct WorkflowEditorState {
     /// `Default::default()` time -- `ui_workflow_editor` loads it in once,
     /// the first time a fetch succeeds.
     pub default_graph_loaded: bool,
+    /// Set when a chat message's "Open in Workflow Editor" button is
+    /// clicked: raw ComfyUI API-format JSON waiting to be turned into a
+    /// graph. Consumed (and cleared) by `ui_workflow_editor` as soon as
+    /// `object_info` is available, taking priority over loading the
+    /// default graph -- see the loading block there.
+    pub pending_import_json: Option<String>,
+    pub import_error: Option<String>,
+    /// Informational (not an error) note set alongside a *successful*
+    /// import -- e.g. "N documentation notes were imported as read-only
+    /// Note nodes."
+    pub import_warning: Option<String>,
+    /// Shared across every `MarkdownNote` node's rendering, so re-showing
+    /// a note's text doesn't re-lay it out from scratch each frame.
+    pub markdown_cache: std::rc::Rc<std::cell::RefCell<CommonMarkCache>>,
 }
 
 impl Default for WorkflowEditorState {
@@ -458,6 +904,10 @@ impl Default for WorkflowEditorState {
             object_info_error: Arc::new(Mutex::new(None)),
             object_info_loading: Arc::new(Mutex::new(false)),
             default_graph_loaded: false,
+            pending_import_json: None,
+            import_error: None,
+            import_warning: None,
+            markdown_cache: std::rc::Rc::new(std::cell::RefCell::new(CommonMarkCache::default())),
         }
     }
 }
@@ -529,6 +979,12 @@ fn build_pre_prompt(snarl: &Snarl<InfornoNode>, object_info: &ObjectInfo)
                         used_llm_nodes.insert(remote.node);
                         inputs.insert(name.clone(), PendingInput::PendingText(remote.node));
                     }
+                    InfornoNode::MarkdownNote { .. } => {
+                        // A documentation node has no output, so this link
+                        // shouldn't exist in a well-formed graph -- ignore
+                        // it rather than error, since it can't affect the
+                        // resulting /prompt payload either way.
+                    }
                 }
             } else if let Some(raw) = values.get(name) {
                 inputs.insert(name.clone(), PendingInput::Value(coerce_value(object_info, class_type, name, raw)));
@@ -550,7 +1006,7 @@ async fn run_llm_node(node: &InfornoNode, preset: &Preset) -> Result<String, Str
     let (router_hint, system_prompt, user_prompt) = match node {
         InfornoNode::OllamaPrompt { system_prompt, user_prompt, .. } => (ChatRouter::Ollama, system_prompt, user_prompt),
         InfornoNode::OpenRouterPrompt { system_prompt, user_prompt, .. } => (ChatRouter::Openrouter, system_prompt, user_prompt),
-        InfornoNode::Comfy { .. } => return Err("not an LLM node".to_string()),
+        InfornoNode::Comfy { .. } | InfornoNode::MarkdownNote { .. } => return Err("not an LLM node".to_string()),
     };
 
     let preset = preset.clone();
@@ -658,8 +1114,21 @@ pub fn ui_workflow_editor(ui: &mut egui::Ui, state: &mut State) {
     if !have_info && !loading {
         fetch_object_info(wf.comfy_url.clone(), wf.object_info.clone(), wf.object_info_error.clone(), wf.object_info_loading.clone());
     }
-    if !wf.default_graph_loaded {
-        if let Some(info) = wf.object_info.lock().unwrap().clone() {
+    if let Some(info) = wf.object_info.lock().unwrap().clone() {
+        if let Some(json_str) = wf.pending_import_json.take() {
+            match build_graph_from_comfy_json(&json_str, &info) {
+                Ok((snarl, warning)) => {
+                    wf.snarl = snarl;
+                    wf.import_error = None;
+                    wf.import_warning = warning;
+                }
+                Err(e) => {
+                    wf.import_error = Some(e);
+                    wf.import_warning = None;
+                }
+            }
+            wf.default_graph_loaded = true;
+        } else if !wf.default_graph_loaded {
             wf.snarl = default_graph(&info);
             wf.default_graph_loaded = true;
         }
@@ -703,7 +1172,7 @@ pub fn ui_workflow_editor(ui: &mut egui::Ui, state: &mut State) {
                             let (preset_id, router) = match &node_data.value {
                                 InfornoNode::OllamaPrompt { preset_id, .. } => (*preset_id, ChatRouter::Ollama),
                                 InfornoNode::OpenRouterPrompt { preset_id, .. } => (*preset_id, ChatRouter::Openrouter),
-                                InfornoNode::Comfy { .. } => continue,
+                                InfornoNode::Comfy { .. } | InfornoNode::MarkdownNote { .. } => continue,
                             };
                             let mut preset = state.presets.get(preset_id).cloned().unwrap_or_default();
                             preset.chat_router = router.clone();
@@ -731,6 +1200,12 @@ pub fn ui_workflow_editor(ui: &mut egui::Ui, state: &mut State) {
             if let Some(err) = &*state.workflow_editor_state.object_info_error.lock().unwrap() {
                 ui.colored_label(ui.visuals().error_fg_color, format!("Failed to load node schema: {err}"));
             }
+            if let Some(err) = &state.workflow_editor_state.import_error {
+                ui.colored_label(ui.visuals().error_fg_color, format!("Failed to import workflow: {err}"));
+            }
+            if let Some(note) = &state.workflow_editor_state.import_warning {
+                ui.colored_label(ui.visuals().weak_text_color(), note);
+            }
             if let Some(result) = &*state.workflow_editor_state.last_result.lock().unwrap() {
                 match result {
                     Ok(body) => { ui.colored_label(egui::Color32::from_rgb(90, 220, 150), format!("Queued: {body}")); }
@@ -741,7 +1216,8 @@ pub fn ui_workflow_editor(ui: &mut egui::Ui, state: &mut State) {
             ui.separator();
 
             let object_info = state.workflow_editor_state.object_info.clone();
-            state.workflow_editor_state.snarl.show(&mut ComfyViewer { object_info }, &egui_snarl::ui::SnarlStyle::default(), "workflow_snarl", ui);
+            let markdown_cache = state.workflow_editor_state.markdown_cache.clone();
+            state.workflow_editor_state.snarl.show(&mut ComfyViewer { object_info, markdown_cache }, &egui_snarl::ui::SnarlStyle::default(), "workflow_snarl", ui);
         });
 
     state.show_workflow_editor = open;

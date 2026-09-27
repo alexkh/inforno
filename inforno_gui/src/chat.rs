@@ -203,6 +203,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
     let mut draft_lost_focus = false;
     let mut llm_prompt_request = None; // NEW: Captures requests sent via Rhai `send_prompt()`
     let mut delete_requests = Vec::new(); // NEW: Queue deletions
+    let mut comfy_workflow_request: Option<String> = None; // NEW: "Open in Workflow Editor" clicks
 
     {
         // Fetch the specific chat being rendered
@@ -246,7 +247,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
                             render_msg_content(
                                 ui, cache, &fake_msg, fake_msg_ui, max_w as usize, math_cache.clone(),
-                                project_root, active_realm, &op_tx, &mut rhai_updates, &mut llm_prompt_request
+                                project_root, active_realm, &op_tx, &mut rhai_updates, &mut llm_prompt_request,
+                                &mut comfy_workflow_request
                             );
                         });
                 });
@@ -270,7 +272,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                 // Pass a clone of the cache pointer
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests,
+                                &mut comfy_workflow_request);
                                 assistant_batch.clear();
                             }
 
@@ -278,13 +281,15 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                     .or_insert(ChatMsgUi::default());
                             // Pass a clone of the cache pointer
                             render_user_msg(ui, cache, msg, msg_ui, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests,
+                                &mut comfy_workflow_request);
                         }
                         MsgRole::Developer => {
                             if !assistant_batch.is_empty() {
                                 render_assistant_grid(ui, cache, msg_pool,
                                     msg_ui_map, &assistant_batch, total_width, math_cache.clone(),
-                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
+                                project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests,
+                                &mut comfy_workflow_request);
                                 assistant_batch.clear();
                             }
 
@@ -429,7 +434,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                                                 render_msg_content(
                                                     ui, cache, msg, msg_ui, max_w as usize, math_cache.clone(),
                                                     project_root, active_realm, &op_tx,
-                                                    &mut rhai_updates, &mut llm_prompt_request
+                                                    &mut rhai_updates, &mut llm_prompt_request,
+                                                    &mut comfy_workflow_request
                                                 );
                                             }
                                         });
@@ -449,7 +455,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
                 // Pass a clone of the cache pointer
                 render_assistant_grid(ui, cache, msg_pool, msg_ui_map,
                         &assistant_batch, total_width, math_cache.clone(),
-                        project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests);
+                        project_root, active_realm, &op_tx, max_msg_width, &mut rhai_updates, &mut llm_prompt_request, &mut delete_requests,
+                        &mut comfy_workflow_request);
             }
 
             // --- NOTEBOOK APPENDER CELL ---
@@ -641,6 +648,12 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         }
     }
 
+    if let Some(json_str) = comfy_workflow_request.take() {
+        state.show_workflow_editor = true;
+        state.workflow_editor_state.pending_import_json = Some(json_str);
+        ui.ctx().request_repaint();
+    }
+
     for (id, content) in db_updates {
         let _ = inforno_core::db::mod_msg_content(&state.db_conn, id, &content);
     }
@@ -725,6 +738,7 @@ fn render_assistant_grid(
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
     delete_requests: &mut Vec<i64>,
+    comfy_workflow_request: &mut Option<String>,
 ) {
     let effective_width = total_width - 38.0;
     let item_min_width = 400.0;
@@ -755,7 +769,8 @@ fn render_assistant_grid(
                             ui.set_width(item_width);
                             render_assistant_msg(
                                     ui, cache, msg, msg_ui, item_width, math_cache.clone(),
-                                    project_root, active_realm, op_tx, rhai_updates, llm_prompt_request, delete_requests);
+                                    project_root, active_realm, op_tx, rhai_updates, llm_prompt_request, delete_requests,
+                                    comfy_workflow_request);
                         }
                     );
                 }
@@ -784,6 +799,7 @@ fn render_user_msg(
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
     delete_requests: &mut Vec<i64>,
+    comfy_workflow_request: &mut Option<String>,
 ) {
     let left_offset = 127.0; // Matches the left outer margin of the user frame
     let right_padding = 30.0;
@@ -813,7 +829,8 @@ fn render_user_msg(
                 .show(ui, |ui| {
                     render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg, delete_requests);
                     render_msg_content(ui, cache, msg, msg_ui, (max_w - 20.0) as usize, math_cache.clone(),
-                        project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
+                        project_root, active_realm, op_tx, rhai_updates, llm_prompt_request,
+                        comfy_workflow_request);
 
                     // --- Render JSON Attachments as Spoilers or Images ---
                     if let Some(details_json) = &msg.details {
@@ -919,6 +936,7 @@ fn render_assistant_msg(
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
     delete_requests: &mut Vec<i64>,
+    comfy_workflow_request: &mut Option<String>,
 ) {
     egui::Frame::default()
     .stroke(Stroke { width: 1.0, color: ui.visuals().hyperlink_color })
@@ -949,7 +967,8 @@ fn render_assistant_msg(
 
             let content_width = (item_width - 25.0).max(100.0);
             render_msg_content(ui, cache, msg, msg_ui, content_width as usize, math_cache,
-                project_root, active_realm, op_tx, rhai_updates, llm_prompt_request);
+                project_root, active_realm, op_tx, rhai_updates, llm_prompt_request,
+                comfy_workflow_request);
         });
     });
 }
@@ -1018,6 +1037,7 @@ fn render_msg_content(
     op_tx: &std::sync::mpsc::Sender<inforno_core::common::FileOpMsg>,
     rhai_updates: &mut Vec<(i64, String)>,
     llm_prompt_request: &mut Option<String>,
+    comfy_workflow_request: &mut Option<String>,
 ) {
     if msg_ui.show_raw {
         ui.label(RichText::new(format!("{}", msg.content)).strong());
@@ -1161,6 +1181,40 @@ fn render_msg_content(
                     let num_lines = code_buffer.lines().count().max(1);
 
                     ui.add_space(6.0);
+
+                    // --- ComfyUI Workflow Detection ---
+                    // Any JSON code block matching the API-format prompt
+                    // shape (see `is_comfy_api_workflow_json`) gets an
+                    // "Open in Workflow Editor" button, regardless of what
+                    // language tag the LLM put on the fence.
+                    // --- ComfyUI Workflow Detection ---
+                    // Any JSON code block matching the API-format or UI-format
+                    // prompt shape (see `is_comfy_workflow_json`) gets an
+                    // "Open in Workflow Editor" button, regardless of what
+                    // language tag the LLM put on the fence. Some real-world
+                    // exports contain raw control characters (bare newlines)
+                    // inside string values -- technically invalid JSON, but a
+                    // shape ComfyUI's own frontend tolerates on paste/copy --
+                    // so the same repair pass the importer uses is applied
+                    // here too before handing anything to `serde_json`. The
+                    // cheap `starts_with('{')` check avoids running that pass
+                    // (and a JSON parse) on every non-JSON code block on
+                    // every frame.
+                    let trimmed_code = code_buffer.trim();
+                    if trimmed_code.starts_with('{') {
+                        let sanitized_json = crate::workflow_editor::sanitize_json_control_chars(trimmed_code);
+                        if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&sanitized_json) {
+                            if crate::workflow_editor::is_comfy_workflow_json(&parsed_json) {
+                                ui.horizontal(|ui| {
+                                    crate::emoji_render::emoji_label(ui, "🧩 ComfyUI Workflow");
+                                    if ui.button("Open in Workflow Editor").clicked() {
+                                        *comfy_workflow_request = Some(sanitized_json.clone());
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    }
 
                     let mut actual_path = None;
                     let mut autocorrected = false;
