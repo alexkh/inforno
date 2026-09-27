@@ -254,9 +254,33 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
     fn show_output(&mut self, pin: &OutPin, ui: &mut egui::Ui, snarl: &mut Snarl<InfornoNode>) -> impl SnarlPin + 'static {
         let info = self.info();
         let node = &mut snarl[pin.id.node];
-        let (name, ty) = &node_outputs(&info, node)[pin.id.output];
-        ui.label(name.as_str());
-        PinInfo::circle().with_fill(color_for_type(ty))
+        let outputs = node_outputs(&info, node);
+        let (name, ty) = outputs[pin.id.output].clone();
+
+        // egui-snarl sizes this node from what it measured *last* frame, and
+        // clips this frame's output labels to that remembered width before
+        // it's allowed to grow. If the node's width was ever locked in
+        // narrower than an output name needs (e.g. on the first frames
+        // after ComfyUI's /object_info populates a longer output list than
+        // the node started with), it can get stuck permanently too narrow,
+        // silently cutting names off against the pin circle instead of
+        // wrapping or overflowing. Reserving room for the widest output
+        // name on every row keeps the node from ever locking in that small.
+        let widest = outputs
+            .iter()
+            .map(|(n, _)| {
+                egui::WidgetText::from(n.as_str())
+                    .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body)
+                    .size()
+                    .x + 35.0
+            })
+            .fold(0.0_f32, f32::max);
+
+        ui.add_sized(
+            egui::vec2(widest, ui.spacing().interact_size.y),
+            egui::Label::new(name.as_str()),
+        );
+        PinInfo::circle().with_fill(color_for_type(&ty))
     }
 
     fn has_body(&mut self, node: &InfornoNode) -> bool {
