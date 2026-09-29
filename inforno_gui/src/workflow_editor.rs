@@ -328,18 +328,9 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
         } else if let InfornoNode::MarkdownNote { text, .. } = &snarl[node_id] {
             let text = text.clone();
             ui.push_id(node_id, |ui| {
-                egui::CollapsingHeader::new(egui::RichText::new("📖 Documentation").weak().small())
-                    .id_salt("md_note_body")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.set_max_width(360.0);
-                        egui::ScrollArea::vertical()
-                            .max_height(320.0)
-                            .show(ui, |ui| {
-                                let mut cache = self.markdown_cache.borrow_mut();
-                                CommonMarkViewer::new().show(ui, &mut cache, &text);
-                            });
-                    });
+                ui.set_max_width(360.0);
+                let mut cache = self.markdown_cache.borrow_mut();
+                CommonMarkViewer::new().show(ui, &mut cache, &text);
             });
         }
     }
