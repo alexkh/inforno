@@ -10,6 +10,10 @@ use tokio::runtime::Runtime;
 
 use crate::state::MyAppPermanent;
 
+// TEMP: heap profiling (remove after debugging).
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 rust_i18n::i18n!("locales");
 
 // The flattened UI modules
@@ -50,10 +54,31 @@ struct Args {
 // 1. Force a clean, multi-threaded Tokio runtime that wraps the whole process
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> eframe::Result {
-    // Initialize Tracy profiling
-    tracing_subscriber::registry()
-        .with(tracing_tracy::TracyLayer::default())
-        .init();
+    // Tracy queues every span in RAM until a viewer attaches, and the chat
+    // view emits many spans per frame, so only enable it on demand.
+    if std::env::var_os("INFORNO_TRACY").is_some() {
+        tracing_subscriber::registry()
+            .with(tracing_tracy::TracyLayer::default())
+            .init();
+    }
+
+    // TEMP: run with DHAT=1. Close the window normally (no Ctrl+C) so
+    // dhat-heap.json gets written.
+    let _dhat = std::env::var_os("DHAT").map(|_| dhat::Profiler::new_heap());
+    if std::env::var_os("DHAT").is_some() {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let heap = dhat::HeapStats::get();
+            let rss_mb = std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
+                .map_or(0, |pages| pages * 4096 / 1_048_576);
+            eprintln!(
+                "DHAT rust_heap={} MB blocks={} rss={} MB",
+                heap.curr_bytes / 1_048_576, heap.curr_blocks, rss_mb
+            );
+        });
+    }
 
     let args = Args::parse();
 
@@ -61,6 +86,7 @@ async fn main() -> eframe::Result {
     // No more manual `let rt = ...` and NO MORE `let _enter = ...`
     let rt_handle = tokio::runtime::Handle::current();
 
+	eprintln!("WINREQ requested logical size = {:?}", saved_window_size());
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
             icon: Some(std::sync::Arc::new(egui::IconData {
@@ -72,8 +98,10 @@ async fn main() -> eframe::Result {
                 width: 512,
                 height: 512,
             })),
+            inner_size: saved_window_size(),
             ..Default::default()
         },
+        persist_window: false,
         ..Default::default()
     };
 
@@ -102,6 +130,18 @@ async fn main() -> eframe::Result {
                 }
             }
             rust_i18n::set_locale(&app_language);
+
+            // restore zoom and theme saved by MyApp::save()
+            if let Some(storage) = cc.storage {
+                if let Some(zoom) = eframe::get_value::<f32>(storage, "zoom") {
+                    cc.egui_ctx.set_zoom_factor(zoom.clamp(0.5, 4.0));
+                }
+                match eframe::get_value::<String>(storage, "theme").as_deref() {
+                    Some("light") => cc.egui_ctx.set_theme(egui::Theme::Light),
+                    Some("dark") => cc.egui_ctx.set_theme(egui::Theme::Dark),
+                    _ => {}
+                }
+            }
 
             // theme persistence
             if let Some(theme) = args.theme {
@@ -292,26 +332,22 @@ fn configure_fonts(ctx: &egui::Context) {
 
     // 2. Load the font data
     // easiest way: embed it in the binary so you don't have file path issues
-    fonts.font_data.insert(
-        "noto_emoji_regular".to_owned(),
-        egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/NotoColorEmoji.ttf")).into(),
-    );
-
-    // 3. Add it to the font families
-    // Put it *last* in the list so it acts as a fallback.
-    // Egui will try the primary font first, then fallback to this one for missing glyphs.
-
-    // Add to Proportional (Standard Text)
-    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        vec.push("noto_emoji_regular".to_owned());
-    }
-
-    // Add to Monospace (Code blocks)
-    if let Some(vec) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-        vec.push("noto_emoji_regular".to_owned());
-    }
+    // NotoColorEmoji is intentionally NOT registered here: egui cannot draw
+    // color bitmap glyphs. Color emoji go through `emoji_render` instead.
 
     // 4. Apply the new configuration
     ctx.set_fonts(fonts);
+}
+
+pub fn window_size_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "inforno")
+        .map(|d| d.config_dir().join("window_size.txt"))
+}
+
+/// Last window size in logical pixels (zoom-independent), if sane.
+fn saved_window_size() -> Option<egui::Vec2> {
+    let text = std::fs::read_to_string(window_size_path()?).ok()?;
+    let mut it = text.split_whitespace().map(|s| s.parse::<f32>().ok());
+    let (w, h) = (it.next()??, it.next()??);
+    (w >= 400.0 && h >= 300.0).then(|| egui::vec2(w, h))
 }

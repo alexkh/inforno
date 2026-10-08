@@ -62,6 +62,8 @@ rodio = "0.22.2"
 egui-file-dialog = "0.15.0"
 egui-snarl = "0.12.0"
 rucomfyui = { git = "https://github.com/alexkh/rucomfyui", branch = "main" }
+rustybuzz = "0.20.1"
+dhat = "0.3.3"
 
 [[bin]]
 name = "inforno"

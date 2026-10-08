@@ -161,6 +161,9 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
 
 #[tracing::instrument(skip_all)]
 pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
+    if std::env::var_os("NOCHAT").is_some() {
+        return;
+    }
     let _render_span = tracing::info_span!("render_chat_messages", chat_id).entered();
 
     let mut max_msg_width = *state.chat_widths.entry(chat_id).or_insert(800.0);
@@ -1054,12 +1057,17 @@ fn render_msg_content(
                     }
 
                     let local_math_cache = math_cache.clone();
+                    let emojified = crate::emoji_render::emojify_markdown(&md_text);
 
                     // Wrap the viewer in a unique egui ID context
                     ui.push_id(format!("md_{}_{}", msg.id, i), |ui| {
                         CommonMarkViewer::new()
                             .max_image_width(Some(max_image_width))
                             .render_math_fn(Some(&mut move |ui, math, is_inline| {
+                                if let Some(codes) = math.strip_prefix("emoji:") {
+                                    crate::emoji_render::emoji_inline(ui, codes);
+                                    return;
+                                }
                                 let mut cache_map = local_math_cache.borrow_mut();
                                 let svg_bytes = cache_map.entry(math.to_string()).or_insert_with(|| {
                                     let bytes = compile_math_to_svg_embedded(math, is_inline).unwrap_or_default();
@@ -1106,7 +1114,7 @@ fn render_msg_content(
 
                                 ui.add(image);
                             }))
-                            .show(ui, cache, md_text);
+                            .show(ui, cache, &emojified);
                     });
                 }
 

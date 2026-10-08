@@ -259,7 +259,7 @@ impl State {
                                         // 1. Try to grab the first globally defined Place
                                         if let Some(first_place_vpath) = realm.raw_config.places.values().next() {
                                             selected_workspace_name = Some(first_place_vpath.0.clone());
-                                            
+
                                             let mut found = false;
                                             for mount in &realm.mounts {
                                                 if first_place_vpath.0.starts_with(&mount.virtual_path) {
@@ -567,6 +567,7 @@ impl State {
 }
 
 pub struct MyApp {
+    ctx: egui::Context,
     perma: Arc<MyAppPermanent>,
     state: State,
     op_rx: Receiver<FileOpMsg>,
@@ -582,6 +583,7 @@ impl MyApp {
         let state_perma = perma_arc.clone();
 
         Self {
+            ctx: cc.egui_ctx.clone(),
             perma: perma_arc,
             state: State::new(state_perma, sandbox, tx),
             op_rx: rx,
@@ -592,12 +594,77 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "app_language", &self.perma.app_language);
+        eframe::set_value(storage, "zoom", &self.ctx.zoom_factor());
+        let theme = if self.ctx.theme() == egui::Theme::Light { "light" } else { "dark" };
+        eframe::set_value(storage, "theme", &theme.to_string());
+        /*
+        eprintln!(
+            "WINPROBE native_ppp={:?} zoom={} ppp={} inner_rect={:?} monitor={:?}",
+            self.ctx.input(|i| i.viewport().native_pixels_per_point),
+            self.ctx.zoom_factor(),
+            self.ctx.pixels_per_point(),
+            self.ctx.input(|i| i.viewport().inner_rect),
+            self.ctx.input(|i| i.viewport().monitor_size),
+        );
+        {
+            // points -> logical pixels
+            let size = self.ctx.content_rect().size() * self.ctx.zoom_factor();
+            match crate::window_size_path() {
+                Some(path) => {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    match std::fs::write(&path, format!("{} {}", size.x, size.y)) {
+                        Ok(()) => eprintln!("WINSIZE saved {:?} to {:?}", size, path),
+                        Err(e) => eprintln!("WINSIZE write failed: {e}"),
+                    }
+                }
+                None => eprintln!("WINSIZE no config dir"),
+            }
+        }
+        */
+
+        // Wipe the stale egui Memory blob left by earlier versions
+        // (scroll offsets, cursor states, ~7.5 MB).
+        storage.set_string("egui", String::new());
+    }
+
+    // Widget state (scroll, cursors, collapsing headers) is not worth keeping.
+    fn persist_egui_memory(&self) -> bool {
+        false
     }
 
     #[tracing::instrument(skip_all, name = "MyApp::ui")]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        /*
+        // TEMP probe: window size history in logical pixels (points * zoom).
+        {
+            let size = ctx.content_rect().size() * ctx.zoom_factor();
+            let id = egui::Id::new("win_size_probe");
+            let last: Option<egui::Vec2> = ctx.data(|d| d.get_temp(id));
+            if last != Some(size) {
+                ctx.data_mut(|d| d.insert_temp(id, size));
+                eprintln!(
+                    "WINCHG t={:.2}s logical={:?} zoom={}",
+                    ctx.input(|i| i.time), size, ctx.zoom_factor()
+                );
+            }
+        }
 
+        // TEMP probe: how big is egui's persisted Memory?
+        {
+            let t = ui.input(|i| i.time);
+            let last = ctx.data(|d| d.get_temp::<f64>(egui::Id::new("mem_probe_t")).unwrap_or(0.0));
+            if t - last > 5.0 {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("mem_probe_t"), t));
+                if let Ok(s) = ctx.memory(|m| ron::to_string(m)) {
+                    eprintln!("MEMPROBE egui_memory_ron={} KB", s.len() / 1024);
+                    let _ = std::fs::write("/tmp/egui_mem.ron", s);
+                }
+            }
+        }
+        */
         // --- SYNC GLOBAL COLORS ---
         {
             let visuals = ui.visuals().clone();
@@ -978,7 +1045,7 @@ impl eframe::App for MyApp {
                                 state.error_msg = None;
                                 state.is_modal_open = false;
                             }
-                            
+
                             if state.realm_config_state.is_fixing_broken_realm {
                                 if ui.button("🔧 Fix Configuration").clicked() {
                                     state.error_msg = None;
