@@ -40,6 +40,9 @@ where
     }
 }
 
+// Builder API kept complete on purpose (vendored widget); not every option
+// is used by current call sites.
+#[allow(dead_code)]
 impl<T, S> AutoCompleteTextEdit<'_, T>
 where
     T: IntoIterator<Item = S>,

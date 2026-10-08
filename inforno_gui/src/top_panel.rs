@@ -2,7 +2,7 @@ use egui::{Color32, RichText};
 use rust_i18n::t;
 
 use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_sandbox_db};
-use crate::{emoji_render::{emoji_button, emoji_image, emoji_label}, state::{State, err_color}};
+use crate::{emoji_render::emoji_label, state::{State, err_color}};
 use crate::mybtn;
 
 fn switch_to_realm_sandbox(state: &mut State, realm_name: &str, sandbox_key: &str) {

@@ -18,7 +18,7 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     let uid = getuid();
     let gid = getgid();
     let cmd_str = cmd.to_string();
-    
+
     // Setup FHS-compliant paths on the host.
     // `global_bin_dir` (~/.local/share/inforno/mounts/bin) and
     // `realm_bin_dir` (~/.local/share/inforno/realms/<realm>/mounts/bin)
@@ -30,16 +30,14 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
     // yet; extra binaries are now placed by mirroring their real host
     // location instead (see step 6b below). Only the directories get
     // created here so the paths exist once that mounting lands.
-    let mut global_bin_dir = std::path::PathBuf::new();
     let mut realm_etc = std::path::PathBuf::new();
-    let mut realm_bin_dir = std::path::PathBuf::new();
     if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
         let data_dir = proj_dirs.data_dir();
-        global_bin_dir = data_dir.join("mounts").join("bin");
+        let global_bin_dir = data_dir.join("mounts").join("bin");
         let realm_vfs_dir = data_dir.join("realms").join(realm_name).join("vfs");
         realm_etc = realm_vfs_dir.join("etc");
-        realm_bin_dir = data_dir.join("realms").join(realm_name).join("mounts").join("bin");
-        
+        let realm_bin_dir = data_dir.join("realms").join(realm_name).join("mounts").join("bin");
+
         let _ = std::fs::create_dir_all(&global_bin_dir);
         let _ = std::fs::create_dir_all(&realm_etc);
         let _ = std::fs::create_dir_all(&realm_bin_dir);
@@ -58,7 +56,7 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
             c.arg("-c").arg(cmd_str);
             c
         };
-        
+
         // Clear all inherited environment variables first
         command.env_clear();
 
@@ -81,12 +79,10 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
         command.pre_exec(move || {
             // 1. Unshare User, Mount, and UTS namespaces (UTS allows hostname spoofing)
             unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS)?;
-            
+
             let name = b"realm";
-            unsafe {
-                if libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+            if libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) != 0 {
+                return Err(std::io::Error::last_os_error());
             }
 
             // 2. Map current UID/GID to the SAME UID/GID inside the new namespace.
@@ -96,10 +92,10 @@ pub fn build_masked_command(mount_path: &Path, cmd: &str, realm_name: &str, extr
 
             let none: Option<&str> = None;
 
-            // 2.5 Mark root as PRIVATE so unprivileged bind-mounts don't propagate 
+            // 2.5 Mark root as PRIVATE so unprivileged bind-mounts don't propagate
             mount(Some("none"), Path::new("/"), none, MsFlags::MS_PRIVATE | MsFlags::MS_REC, none)?;
 
-            // 3. Mount tmpfs over structural synthetic directories. 
+            // 3. Mount tmpfs over structural synthetic directories.
             // This gives us kernel-memory scratchpads to build our FHS tree, completely bypassing FUSE!
             for dir in &["tmp", "bin", "usr"] {
                 let target = mount_path.join(dir);

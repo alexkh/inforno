@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use tokio::runtime::Handle;
 use egui::Color32;
 use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, OllamaDownloading, Presets, load_presets};
-use inforno_core::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, is_table_empty, mod_msg_content_reasoning};
-use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_installed, get_ollama_model_names, get_openr_model_names, populate_ollama_installed, populate_openr_model};
+use inforno_core::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, mod_msg_content_reasoning};
+use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_names, get_openr_model_names};
 use crate::agent_config::{AgentConfigState, ui_agent_config};
 use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
 use crate::chat::ui_chat;
@@ -23,8 +23,6 @@ use crate::realm_config::{RealmConfigState, ui_realm_config};
 use crate::side_panel::ui_side_panel;
 use crate::top_panel::ui_top_panel;
 use crate::workflow_editor::{WorkflowEditorState, ui_workflow_editor};
-use inforno_core::ollama::ollama_fetch_models;
-use inforno_core::openr::openr_fetch_models;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 
@@ -112,11 +110,6 @@ pub struct ChatStreamingState {
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub rx: Receiver<ChatStreamEvent>,
     pub tx: Sender<ChatStreamEvent>,
- }
-
- pub struct ActiveMerge {
-    pub app: bulat::DiffApp,
-    pub path: PathBuf,
 }
 
 //#[derive(serde::Deserialize, serde::Serialize)]
@@ -129,7 +122,6 @@ pub struct State {
     // chat: common::Chat,
     pub open_chats: HashMap<i64, common::Chat>,
     pub active_chat_id: Option<i64>,
-    pub dragging_chat: Option<i64>,
     pub chat_msg_ui: HashMap<i64, ChatMsgUi>,
     pub chat_to_rename: Option<i64>,
     pub chat_rename_buffer: String,
@@ -175,8 +167,6 @@ pub struct State {
     pub project_root: Option<PathBuf>,
     pub active_realm: Option<inforno_core::realm::ActiveRealm>,
     pub active_workspace_name: Option<String>,
-    pub workspace_search_buffer: String,
-    pub show_workspace_selector: bool,
     pub merge_apps: std::collections::HashMap<egui_tiles::TileId, bulat::DiffApp>,
     pub editor_apps: std::collections::HashMap<egui_tiles::TileId, bulat::BulatEditorApp>,
     pub file_dialog: egui_file_dialog::FileDialog,
@@ -200,7 +190,7 @@ impl State {
         }
         let mut openr_model_names: Vec<String> = vec![];
         let mut ollama_model_names: Vec<String> = vec![];
-        let mut ollama_model_names_installed: Vec<String> = vec![];
+        let ollama_model_names_installed: Vec<String> = vec![];
 
         // --- 1. Main Database Connection ---
 
@@ -335,7 +325,7 @@ impl State {
         });
 
         let mut open_chats: HashMap<i64, common::Chat> = HashMap::new();
-        let mut active_chat_id: Option<i64> = None;
+        let active_chat_id: Option<i64>;
         if let Some(first_chat_info) = chats.first() {
             let chat = fetch_chat(&conn, first_chat_info.id, &presets)
                 .unwrap_or_else(|e| {
@@ -485,7 +475,6 @@ impl State {
             chat_locations: std::collections::HashMap::new(),
             open_chats,
             active_chat_id,
-            dragging_chat: None,
             chat_msg_ui: HashMap::new(),
             chat_to_rename: None,
             chat_rename_buffer: String::new(),
@@ -547,8 +536,6 @@ impl State {
             project_root,
             active_realm,
             active_workspace_name,
-            workspace_search_buffer: String::new(),
-            show_workspace_selector: false,
             merge_apps: std::collections::HashMap::new(),
             editor_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
@@ -1229,6 +1216,9 @@ fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crat
 }
 
 // Call this function whenever you want to save the current window layout
+// TODO: not wired up yet — `load_layout_from_ron` reads layout.ron on startup,
+// but nothing ever writes it, so pane layouts don't currently persist.
+#[allow(dead_code)]
 pub fn save_layout_to_ron(state: &State) {
     if let Some(path) = get_layout_path(&state.project_root) {
         if let Ok(ron_string) = ron::ser::to_string_pretty(&state.pane_tree, ron::ser::PrettyConfig::default()) {

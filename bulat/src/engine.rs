@@ -115,7 +115,7 @@ pub fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
             block = &block[..block.len() - 1];
         }
         block
-    };
+    }
 
     for caps in re_diff.captures_iter(snippet) {
         diff_block_found = true;

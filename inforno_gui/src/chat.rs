@@ -196,7 +196,7 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         return; // Chat not loaded yet
     };
 
-    let msg_pool = &chat.msg_pool;
+    let _msg_pool = &chat.msg_pool;
 
 
     let mut content_updates = Vec::new();
@@ -218,8 +218,8 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
 
         if msg_pool.is_empty() {
             let _welcome_span = tracing::info_span!("render_welcome_message").entered();
-            let mut welcome_text = t!("welcome_tour").to_string();
-            let num_lines = welcome_text.lines().count().max(1);
+            let welcome_text = t!("welcome_tour").to_string();
+            let _num_lines = welcome_text.lines().count().max(1);
             let note_margin_offset = 40.0;
             let effective_width = (total_width - note_margin_offset).max(400.0);
             let max_w = effective_width.min(max_msg_width);
@@ -1131,7 +1131,7 @@ fn render_msg_content(
                     }
 
                     if mime_type == "application/x-rhai" {
-                        let mut code_buffer = code.to_string();
+                        let code_buffer = code.to_string();
                         ui.add_space(6.0);
                         egui::Frame::default()
                             .inner_margin(8.0)
@@ -1185,8 +1185,8 @@ fn render_msg_content(
                         ui.add_space(6.0);
                         continue;
                     }
-                    let mut code_buffer = code.to_string();
-                    let num_lines = code_buffer.lines().count().max(1);
+                    let code_buffer = code.to_string();
+                    let _num_lines = code_buffer.lines().count().max(1);
 
                     ui.add_space(6.0);
 

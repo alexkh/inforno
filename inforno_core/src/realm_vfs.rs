@@ -18,7 +18,6 @@ const TTL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 struct VNode {
-    ino: u64,
     host_path: Option<PathBuf>,
     is_dir: bool,
 }
@@ -89,7 +88,6 @@ impl RealmFuseFS {
         }
 
         let node = VNode {
-            ino,
             host_path,
             is_dir,
         };
@@ -105,11 +103,11 @@ impl RealmFuseFS {
             if let Ok(meta) = fs::metadata(hp) {
                 use std::os::unix::fs::PermissionsExt;
                 let host_perm = (meta.permissions().mode() & 0o777) as u16;
-                
+
                 let atime = meta.accessed().unwrap_or(UNIX_EPOCH);
                 let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
                 let crtime = meta.created().unwrap_or(UNIX_EPOCH);
-                
+
                 // If protected, strip write bits. Otherwise, mirror host permissions (including +x).
                 (meta.len(), if is_protected { host_perm & 0o555 } else { host_perm }, atime, mtime, mtime, crtime)
             } else {
@@ -130,7 +128,7 @@ impl RealmFuseFS {
             kind: if is_dir { FileType::Directory } else { FileType::RegularFile },
             perm,
             nlink: 1,
-            // MAGIC TRICK: If protected, claim UID/GID 0 (root). 
+            // MAGIC TRICK: If protected, claim UID/GID 0 (root).
             // In our User Namespace mapping, 0 is unmapped, which renders to the jailed bash shell as `nobody`.
             uid: if is_protected { 0 } else { unsafe { libc::getuid() } },
             gid: if is_protected { 0 } else { unsafe { libc::getgid() } },
@@ -227,7 +225,7 @@ impl Filesystem for RealmFuseFS {
 
             let vpath = self.ino_to_path.get(&ino).cloned();
             let is_protected = vpath.map(|p| self.realm.is_path_read_only(&p)).unwrap_or(false);
-            
+
             let attr = self.stat_to_attr(ino, &node.host_path, node.is_dir, is_protected);
             reply.attr(&TTL, &attr);
         } else {
@@ -238,14 +236,14 @@ impl Filesystem for RealmFuseFS {
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
         if self.inodes.contains_key(&ino) {
             let vpath = self.ino_to_path.get(&ino).cloned();
-            
+
             if let Some(p) = vpath {
                 let is_write_access = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
-                
+
                 if is_write_access {
                     let can_write = self.realm.can_access(&p, Cap::Write, &self.role).is_ok();
                     let can_append = self.realm.can_access(&p, Cap::Append, &self.role).is_ok();
-                    
+
                     if !can_write && !can_append {
                         reply.error(EACCES);
                         return;
@@ -415,7 +413,7 @@ impl Filesystem for RealmFuseFS {
                 reply.error(EACCES);
                 return;
             }
-            
+
             if let Some(ref host_path) = node.host_path {
                 if _atime.is_some() || _mtime.is_some() {
                     if let Ok(file) = fs::File::open(host_path) {
@@ -475,7 +473,7 @@ impl Filesystem for RealmFuseFS {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        flags: i32,
+        _flags: i32,
         reply: ReplyCreate,
     ) {
         let name_str = match name.to_str() {
@@ -833,7 +831,7 @@ impl Filesystem for RealmFuseFS {
 
             for mount in &self.realm.mounts {
                 let m_vpath = mount.virtual_path.trim_matches('/');
-                
+
                 if parent_clean.is_empty() {
                     // We are at root, add the first component of the mount
                     if !m_vpath.is_empty() {
@@ -856,7 +854,7 @@ impl Filesystem for RealmFuseFS {
                 let child_ino = self.get_or_create_ino(&child_vpath, None, true);
                 entries.push((child_ino, FileType::Directory, child_name));
             }
-            
+
             // Populate synthetic OS directories in root
             if parent_vpath == Path::new("/") {
                 for &sys_dir in &[

@@ -53,8 +53,8 @@ pub enum TokenType {
     Unknown,
 }
 
-// Added Hash and Eq to Syntax
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+// PartialEq, Eq and Hash are implemented manually below because of the fn pointer field
+#[derive(Clone, Debug)]
 pub struct Syntax {
     pub language: &'static str,
     pub case_sensitive: bool,
@@ -66,6 +66,41 @@ pub struct Syntax {
     pub special: BTreeSet<&'static str>,
     pub dynamic_rules: Option<Vec<DynamicRule>>,
     pub native_parser: Option<NativeParser>,
+}
+
+impl PartialEq for Syntax {
+    fn eq(&self, other: &Self) -> bool {
+        self.language == other.language
+            && self.case_sensitive == other.case_sensitive
+            && self.comment == other.comment
+            && self.comment_multiline == other.comment_multiline
+            && self.hyperlinks == other.hyperlinks
+            && self.keywords == other.keywords
+            && self.types == other.types
+            && self.special == other.special
+            && self.dynamic_rules == other.dynamic_rules
+            && match (self.native_parser, other.native_parser) {
+                (Some(a), Some(b)) => std::ptr::fn_addr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+impl Eq for Syntax {}
+
+impl Hash for Syntax {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.language.hash(state);
+        self.case_sensitive.hash(state);
+        self.comment.hash(state);
+        self.comment_multiline.hash(state);
+        self.hyperlinks.hash(state);
+        self.keywords.hash(state);
+        self.types.hash(state);
+        self.special.hash(state);
+        self.dynamic_rules.hash(state);
+        // native_parser intentionally omitted: fn addresses are not stable identities
+    }
 }
 
 impl Default for Syntax {

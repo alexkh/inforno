@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
-use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// A trust tier, 0-9. `0` and `1` are hardcoded and reserved:
 /// - `0` (`NONE`): no power, of any kind, can ever apply. Provably zero access.
@@ -394,65 +393,6 @@ pub fn sandbox_path_is_valid(path: &Path, realms_dir: &Path) -> bool {
     !canon_parent.starts_with(&canon_realms)
 }
 
-/// A compiled `CreateRule`, ready to be matched against relative paths.
-#[derive(Clone)]
-pub struct CompiledCreateRule {
-    scope_set: Arc<GlobSet>,
-    allow_expr: Option<Arc<CompiledExpr>>,
-    deny_expr: Option<Arc<CompiledExpr>>,
-    pub description: Arc<str>,
-}
-
-impl CompiledCreateRule {
-    fn compile(rule: &CreateRule, defs: &IndexMap<String, GlobExpr>) -> Result<Self, String> {
-        let mut builder = GlobSetBuilder::new();
-        if rule.scope.is_empty() {
-            builder.add(Glob::new("**").map_err(|e| e.to_string())?);
-        } else {
-            for g in &rule.scope {
-                builder.add(Glob::new(g).map_err(|e| format!("Invalid glob '{}': {}", g, e))?);
-            }
-        }
-        let scope_set = builder.build().map_err(|e| e.to_string())?;
-
-        let allow_expr = if let Some(ref expr) = rule.allow_if {
-            Some(Arc::new(CompiledExpr::compile(expr, defs)?))
-        } else {
-            None
-        };
-        let deny_expr = if let Some(ref expr) = rule.deny_if {
-            Some(Arc::new(CompiledExpr::compile(expr, defs)?))
-        } else {
-            None
-        };
-
-        Ok(Self {
-            scope_set: scope_set.into(),
-            allow_expr,
-            deny_expr,
-            description: rule.description.as_str().into(),
-        })
-    }
-
-    fn in_scope(&self, rel_path: &Path) -> bool {
-        self.scope_set.is_match(rel_path)
-    }
-
-    /// Assumes `in_scope` was already checked. Returns true if creation should be denied.
-    fn forbids(&self, rel_path: &Path) -> bool {
-        if let Some(ref allow) = self.allow_expr {
-            if !allow.is_match(rel_path) {
-                return true;
-            }
-        }
-        if let Some(ref deny) = self.deny_expr {
-            if deny.is_match(rel_path) {
-                return true;
-            }
-        }
-        false
-    }
-}
 
 /// A compiled `Power`, ready to be matched against relative paths (`Fs`), or
 /// simply held as a resolved device grant (`Mic`/`Speaker` — there's
@@ -1241,7 +1181,7 @@ pub fn get_relative_path(
 
 pub fn resolve_filepath(
     realm: &Option<ActiveRealm>,
-    role_name: &str,
+    _role_name: &str,
     project_root: &Option<std::path::PathBuf>,
     requested_path: &str
 ) -> Option<(std::path::PathBuf, bool)> {

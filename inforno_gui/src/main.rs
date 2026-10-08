@@ -5,8 +5,6 @@ use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use clap::Parser;
-use egui::ViewportBuilder;
-use tokio::runtime::Runtime;
 
 use crate::state::MyAppPermanent;
 
@@ -160,7 +158,7 @@ async fn main() -> eframe::Result {
 
             let sandbox_string = args.sandbox;
             let mut sandbox: Option<PathBuf> = sandbox_string.map(PathBuf::from);
-            let mut pending_project_init: Option<PathBuf> = None;
+            let pending_project_init: Option<PathBuf> = None;
             let mut active_realm_name: Option<String> = None;
 
             // Determine target realm (CLI arg or positional argument takes top priority over global config)

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
@@ -12,13 +12,8 @@ use secrecy::SecretString;
 use strum::{Display, EnumString};
 use thiserror::Error;
 use crate::db::{CURRENT_SANDBOX_VERSION, mk_agent};
-//use crate::openr::do_openr_chat_que;
-//use crate::ollama::{do_ollama_chat_que};
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::images::Image;
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use globset::{Glob, GlobSet, GlobSetBuilder};
 
 pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
 

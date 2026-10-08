@@ -3,6 +3,7 @@ use eframe::egui::{self, Rect, Sense, Ui, Response};
 pub struct SplitButtonResponse {
     pub main_clicked: bool,
     pub arrow_clicked: bool,
+    #[allow(dead_code)] // kept for API symmetry; callers currently use `left_response`
     pub left_clicked: bool,
     pub left_response: Option<Response>, // Used to anchor egui menus/popups!
 }
@@ -67,6 +68,7 @@ impl SplitButton {
     }
 
     /// Set the width of the left tool (Defaults to the button's height)
+    #[allow(dead_code)] // builder option kept for symmetry with `arrow_width`
     pub fn left_width(mut self, width: f32) -> Self {
         self.left_width = Some(width);
         self

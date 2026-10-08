@@ -319,7 +319,6 @@ pub struct DiffApp {
     left_diff_map: BTreeMap<usize, Color32>,
     right_diff_map: BTreeMap<usize, Color32>,
 
-    scroll_offset: f32,
     hscroll_ratio: f32,
     left_max_hscroll: f32,
     right_max_hscroll: f32,
@@ -374,7 +373,6 @@ impl DiffApp {
             theme,
             left_diff_map: std::collections::BTreeMap::new(),
             right_diff_map: BTreeMap::new(),
-            scroll_offset: 0.0,
             hscroll_ratio: 0.0,
             left_max_hscroll: 0.0,
             right_max_hscroll: 0.0,

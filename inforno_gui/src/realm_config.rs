@@ -1,4 +1,4 @@
-use egui::{Color32, RichText, ScrollArea};
+use egui::{Color32, ScrollArea};
 use crate::state::State;
 use bulat::editor::{CodeEditor, Syntax, ColorTheme};
 
@@ -10,8 +10,6 @@ pub struct RealmConfigState {
     pub original_yaml: String,
     // If the user made a typo in the YAML, we store the error here
     pub parse_error: Option<String>,
-    // Tracks if changes in the form need to be serialized back to the text buffer
-    pub sync_to_yaml_needed: bool,
 
     // --- Visual Builder: Mount Edit State ---
     pub is_editing_mount: bool,
@@ -289,7 +287,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
         });
 
     // Intercept window close event to apply and reload
-    let mut close_requested = state.show_realm_config && !is_open;
+    let close_requested = state.show_realm_config && !is_open;
 
     if close_requested {
         let is_dirty = state.realm_config_state.yaml_buffer.trim() != state.realm_config_state.original_yaml.trim();
@@ -1500,8 +1498,9 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     let mut mics = vec!["sysdefault".to_string()];
     if let Ok(devices) = host.input_devices() {
         for device in devices {
-            // cpal 0.17 returns the name directly
-            if let Ok(name) = device.name() {
+            // `DeviceTrait::name()` is deprecated in cpal 0.17 (removed in 0.18);
+            // the human-readable name now lives on the structured description.
+            if let Ok(name) = device.description().map(|d| d.name().to_string()) {
                 if !mics.contains(&name) {
                     mics.push(name);
                 }
@@ -1512,7 +1511,7 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     let mut speakers = vec!["sysdefault".to_string()];
     if let Ok(devices) = host.output_devices() {
         for device in devices {
-            if let Ok(name) = device.name() {
+            if let Ok(name) = device.description().map(|d| d.name().to_string()) {
                 if !speakers.contains(&name) {
                     speakers.push(name);
                 }
@@ -1849,7 +1848,7 @@ fn play_test_tone(device: &str) {
         if device_name != "sysdefault" {
             if let Ok(devices) = host.output_devices() {
                 for d in devices {
-                    if let Ok(name) = d.name() {
+                    if let Ok(name) = d.description().map(|desc| desc.name().to_string()) {
                         if name == device_name {
                             target_device = Some(d);
                             break;

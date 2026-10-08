@@ -55,7 +55,7 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                     egui::Color32::TRANSPARENT).size().x;
                 let button_padding = ui.spacing().button_padding;
                 let text_height = ui.text_style_height(&egui::TextStyle::Button);
-                let height = text_height + button_padding.y * 2.0;
+                let _height = text_height + button_padding.y * 2.0;
 
                 // Base text width + extra allocated space for the double-wide arrow
                 let desired_width = text_width + button_padding.x * 2.0;

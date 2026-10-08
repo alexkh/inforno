@@ -1,8 +1,7 @@
 use super::Editor;
 
-use super::syntax::{TokenType, rust::RustToken};
+use super::syntax::{TokenType};
 use super::Syntax;
-use logos::Logos;
 
 use crate::editor::syntax::DynamicRule;
 
