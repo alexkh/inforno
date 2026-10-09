@@ -26,6 +26,11 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                         .desired_width(ui.available_width() - 80.0)
                 );
 
+                // Emptying the search box also removes the highlights from opened chats
+                if response.changed() && state.search_query.trim().is_empty() {
+                    state.chat_highlights.clear();
+                }
+
                 // Allow triggering search on button click OR pressing Enter
                 let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 

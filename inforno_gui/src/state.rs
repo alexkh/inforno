@@ -173,6 +173,8 @@ pub struct State {
     pub pane_tree: egui_tiles::Tree<crate::panes::Pane>,
     pub search_query: String,
     pub chat_widths: std::collections::HashMap<i64, f32>,
+    /// Search term highlighted in a chat opened from the search results, by chat id
+    pub chat_highlights: std::collections::HashMap<i64, crate::search_highlight::ChatHighlight>,
 }
 
 impl State {
@@ -542,6 +544,7 @@ impl State {
             pane_tree,
             search_query: String::new(),
             chat_widths: std::collections::HashMap::new(),
+            chat_highlights: std::collections::HashMap::new(),
         }
     }
 

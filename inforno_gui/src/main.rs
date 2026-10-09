@@ -23,6 +23,7 @@ mod emoji_render;
 mod key_manager;
 mod panes;
 mod preset_editor;
+mod search_highlight;
 mod side_panel;
 mod split_button;
 mod state;

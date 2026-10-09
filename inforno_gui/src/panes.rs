@@ -207,14 +207,20 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             .stick_to_bottom(true)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                let mut highlight = self.state.chat_highlights.remove(chat_id);
                                 bulat::editor::selectable_scroll_contents(ui, |ui| {
-                                    crate::chat::render_chat_messages(
-                                        ui,
-                                        self.state,
-                                        *chat_id,
-                                        ui.available_width(),
-                                    );
+                                    crate::search_highlight::highlight_contents(ui, highlight.as_mut(), |ui| {
+                                        crate::chat::render_chat_messages(
+                                            ui,
+                                            self.state,
+                                            *chat_id,
+                                            ui.available_width(),
+                                        );
+                                    });
                                 });
+                                if let Some(highlight) = highlight {
+                                    self.state.chat_highlights.insert(*chat_id, highlight);
+                                }
                             });
                     }
 
@@ -290,17 +296,17 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                                 .arrow_tooltip("Open in right pane")
                                                 .show(ui);
 
-                                            if btn_resp.main_clicked {
-                                                self.open_chat_requests.push((res.chat_id, false));
-                                            }
-
-                                            if btn_resp.arrow_clicked {
-                                                self.open_chat_requests.push((res.chat_id, true));
+                                            if btn_resp.main_clicked || btn_resp.arrow_clicked {
+                                                self.state.chat_highlights.insert(
+                                                    res.chat_id,
+                                                    crate::search_highlight::ChatHighlight::new(query),
+                                                );
+                                                self.open_chat_requests.push((res.chat_id, btn_resp.arrow_clicked));
                                             }
                                             // -------------------------------
 
                                             // grep-style snippet
-                                            ui.label(egui::RichText::new(&res.snippet).weak());
+                                            ui.label(crate::search_highlight::snippet_job(ui, &res.snippet, query));
                                         });
                                     }
                                 });
