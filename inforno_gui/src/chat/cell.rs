@@ -78,6 +78,29 @@ fn syntax_for(is_rhai: bool) -> Syntax {
     if is_rhai { Syntax::rhai() } else { Syntax::from_mime("text/markdown") }
 }
 
+/// Ctrl+S (Cmd+S on macOS) while a cell's editor has focus: saves a note
+/// cell and switches it back to View mode, or commits the appender.
+const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+
+/// Into Edit mode: remembers the text Esc goes back to, and asks for the
+/// editor to be focused once it's shown.
+fn enter_edit_mode(ui: &egui::Ui, edit_mode_id: egui::Id, content: &str) {
+    ui.data_mut(|d| {
+        d.insert_temp(edit_mode_id, true);
+        d.insert_temp(edit_mode_id.with("original"), content.to_string());
+        d.insert_temp(edit_mode_id.with("focus"), true);
+    });
+}
+
+/// Back to View mode, forgetting the Edit-mode snapshot.
+fn leave_edit_mode(ui: &egui::Ui, edit_mode_id: egui::Id) {
+    ui.data_mut(|d| {
+        d.insert_temp(edit_mode_id, false);
+        d.remove::<String>(edit_mode_id.with("original"));
+        d.remove::<bool>(edit_mode_id.with("focus"));
+    });
+}
+
 // --- Cells ---
 
 /// Fake note shown in an empty chat. Uses a fixed temporary id (-1) so its
@@ -113,7 +136,7 @@ pub(super) fn render_welcome(
 
 /// A Developer message: rendered like any message in View mode, editable
 /// as Markdown/Rhai in Edit mode. Saved on switching back to View, on focus
-/// loss, or on Ctrl+Enter.
+/// loss, or on Ctrl+S; Esc returns to View, discarding the edit.
 pub(super) fn render_note_cell(
     ui: &mut egui::Ui,
     ctx: &mut RenderCtx,
@@ -150,11 +173,15 @@ pub(super) fn render_note_cell(
                     }
 
                     let toggle_label = if is_edit_mode { "👁 View" } else { "📝 Edit" };
-                    if ui.toggle_value(&mut is_edit_mode, toggle_label).clicked() {
-                        ui.data_mut(|d| d.insert_temp(edit_mode_id, is_edit_mode));
-
-                        // Explicitly save when switching back to View mode
-                        if !is_edit_mode {
+                    if ui.toggle_value(&mut is_edit_mode, toggle_label)
+                        .on_hover_text("While editing: Ctrl+S saves and returns to View, Esc discards the changes")
+                        .clicked()
+                    {
+                        if is_edit_mode {
+                            enter_edit_mode(ui, edit_mode_id, &note_content);
+                        } else {
+                            // Explicitly save when switching back to View mode
+                            leave_edit_mode(ui, edit_mode_id);
                             actions.db_updates.push((msg.id, note_content.clone()));
                             actions.content_updates.push((msg.id, note_content.clone(), false));
                         }
@@ -198,19 +225,42 @@ fn render_note_editor(
     let out = show_padded_editor(ui, editor, note_content);
     let response = &out.output.response;
 
+    // Just switched to Edit mode: focus the editor, cursor at the start
+    if ui.data_mut(|d| d.remove_temp::<bool>(edit_mode_id.with("focus"))).unwrap_or(false) {
+        response.request_focus();
+        let mut state = out.output.state.clone();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+        state.store(ui.ctx(), response.id);
+    }
+
+    // Esc: back to View mode with the text from before Edit was pressed.
+    // egui drops the focus on Esc itself, so it shows up as a focus loss
+    // here, and must be caught before the focus-loss save below. The old
+    // text is written to the database too, since a focus loss earlier in
+    // this edit may have saved a draft.
+    if response.lost_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        let original = ui.data(|d| d.get_temp::<String>(edit_mode_id.with("original")))
+            .unwrap_or_else(|| note_content.clone());
+        msg_ui.is_rhai = Some(is_likely_rhai(&original));
+        actions.db_updates.push((msg_id, original.clone()));
+        actions.content_updates.push((msg_id, original.clone(), false));
+        *note_content = original;
+        leave_edit_mode(ui, edit_mode_id);
+        return;
+    }
+
     // Mark as unsaved while typing
     if response.changed() {
         msg_ui.is_rhai = Some(sticky_rhai(is_rhai, note_content));
         actions.content_updates.push((msg_id, note_content.clone(), true));
     }
 
-    // Ctrl+Enter: save and switch back to View mode
-    let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Enter);
+    // Ctrl+S: save and switch back to View mode
     let mut force_save = false;
-    if response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&shortcut)) {
+    if response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&SAVE_SHORTCUT)) {
         force_save = true;
         response.surrender_focus();
-        ui.data_mut(|d| d.insert_temp(edit_mode_id, false));
+        leave_edit_mode(ui, edit_mode_id);
     }
 
     // Commit to the database and mark as saved on focus loss
@@ -222,7 +272,7 @@ fn render_note_editor(
 
 /// The always-present empty cell at the bottom of a chat. Its text lives in
 /// `chat.draft_note`; it is committed (see `commit_draft`) on focus loss or
-/// Ctrl+Enter.
+/// Ctrl+S.
 pub(super) fn render_appender(
     ui: &mut egui::Ui,
     ctx: &RenderCtx,
@@ -268,8 +318,7 @@ pub(super) fn render_appender(
                     );
                 }
 
-                let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Enter);
-                if response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&shortcut)) {
+                if response.has_focus() && ui.input_mut(|i| i.consume_shortcut(&SAVE_SHORTCUT)) {
                     response.surrender_focus();
                     actions.draft_lost_focus = true; // Force commit immediately
                 }

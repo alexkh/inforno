@@ -331,6 +331,9 @@ pub struct DiffApp {
     pub line_offset: usize,
     // Bring the first change into view on the first frames (not when embedded)
     scroll_to_first_change: bool,
+    /// Whether this merge tool takes keyboard shortcuts (Ctrl+F). A host with
+    /// several panes sets it for the active pane only. Never when embedded.
+    pub active: bool,
 }
 
 #[cfg(feature = "gui")]
@@ -384,6 +387,7 @@ impl DiffApp {
             embedded: false,
             line_offset: 0,
             scroll_to_first_change: true,
+            active: true,
         };
 
         // compute initial diffs
@@ -552,7 +556,8 @@ impl DiffApp {
         let search_id = self.search_state_id.unwrap_or_else(|| ui.id().with("search"));
 
         render_settings_window(ui.ctx(), &mut self.show_settings, &mut self.theme);
-        let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
+        let request_search_focus = self.active && !self.embedded
+            && ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
 
         ui.horizontal(|ui| {
             if ui.button("🔧").on_hover_text("Open Settings").clicked() {
@@ -902,6 +907,9 @@ pub struct BulatEditorApp {
     pub current_theme: crate::editor::ColorTheme,
     pub active_mime: Option<String>,
     pub is_dirty: bool,
+    /// Whether this editor takes keyboard shortcuts (Ctrl+S, Ctrl+F). A host
+    /// with several panes sets it for the active pane only.
+    pub active: bool,
 }
 
 impl BulatEditorApp {
@@ -923,6 +931,7 @@ impl BulatEditorApp {
             current_theme: active_theme,
             active_mime: None,
             is_dirty: false,
+            active: true,
         }
     }
 
@@ -933,7 +942,8 @@ impl BulatEditorApp {
         // because `ui.id()` differs inside the toolbar's nested layouts.
         let search_id = egui::Id::new("bulat_search").with(ui.id());
         let editor_id = ui.id().with("bulat_editor");
-        let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
+        let request_search_focus = self.active
+            && ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
 
         ui.horizontal(|ui| {
             // 1. Wrench Menu (Left)
@@ -1045,7 +1055,7 @@ impl BulatEditorApp {
         }
 
         // 8. Restore Ctrl+S functionality
-        if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
+        if self.active && ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
             self.is_dirty = false;
             action = Some(EditorAction::SaveRequested);
         }

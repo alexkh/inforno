@@ -634,12 +634,33 @@ fn norm(s: &str) -> String {
     s.replace("\r\n", "\n").trim().to_string()
 }
 
-/// A replacement found in the file is trusted to be *our* applied snippet
-/// only if it isn't a tiny generic one-liner, or if it contains the search
-/// block itself.
-fn replacement_is_distinctive(replace_norm: &str, search_norm: &str) -> bool {
-    replace_norm.contains(search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20
+/// `text` with its only occurrence of `from` replaced by `to`; None when
+/// `from` is missing or occurs more than once.
+fn swap_unique(text: &str, from: &str, to: &str) -> Option<String> {
+    let mut found = text.match_indices(from);
+    let (idx, _) = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some(format!("{}{}{}", &text[..idx], to, &text[idx + from.len()..]))
 }
+
+/// The file with a merged edit taken back out (its REPLACE text swapped back
+/// for SEARCH), if that can be done cleanly: the edit is applied and REPLACE
+/// occurs exactly once, matched the way a merge writes it (verbatim, or with
+/// normalized line endings). A pure deletion leaves nothing to anchor the
+/// restored text to, so it can't be undone.
+fn undo_merge_text(file: &str, search_block: &str, replace_block: &str) -> Option<String> {
+    if norm(replace_block).is_empty() || !bulat::engine::is_diff_applied(file, search_block, replace_block) {
+        return None;
+    }
+    match file.matches(replace_block).count() {
+        1 => swap_unique(file, replace_block, search_block),
+        0 => swap_unique(&file.replace("\r\n", "\n"), &norm(replace_block), &norm(search_block)),
+        _ => None, // ambiguous
+    }
+}
+
 
 struct DiffLocation {
     search_found: bool,
@@ -703,6 +724,48 @@ fn locate_diff(original: &str, search_block: &str, replace_block: &str) -> DiffL
     loc
 }
 
+/// What the live file says about one inline diff snippet.
+struct DiffStatus {
+    search_block: String,
+    replace_block: String,
+    loc: DiffLocation,
+    applied: bool,
+    can_undo: bool,
+}
+
+/// `status` is None when the snippet holds no `<<<< ==== >>>>` diff.
+#[derive(Clone)]
+struct CachedDiffStatus {
+    file_stamp: Option<(Option<std::time::SystemTime>, u64)>,
+    status: Option<std::sync::Arc<DiffStatus>>,
+}
+
+/// The diff status of a code block, recomputed only when the file's
+/// modification time or size changes (or the snippet does, as it's part of
+/// the key), so the frame loop doesn't read and search the file every frame.
+fn inline_diff_status(ui: &egui::Ui, code: &str, path: &Path) -> Option<std::sync::Arc<DiffStatus>> {
+    let id = egui::Id::new(("inline_diff_status", path, code));
+    let file_stamp = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
+    if let Some(cached) = ui.data(|d| d.get_temp::<CachedDiffStatus>(id)) {
+        if cached.file_stamp == file_stamp {
+            return cached.status;
+        }
+    }
+
+    let status = bulat::engine::extract_raw_diff_blocks(code).map(|(search_block, replace_block)| {
+        let file = std::fs::read_to_string(path).unwrap_or_default();
+        std::sync::Arc::new(DiffStatus {
+            loc: locate_diff(&file, &search_block, &replace_block),
+            applied: bulat::engine::is_diff_applied(&file, &search_block, &replace_block),
+            can_undo: undo_merge_text(&file, &search_block, &replace_block).is_some(),
+            search_block,
+            replace_block,
+        })
+    });
+    ui.data_mut(|d| d.insert_temp(id, CachedDiffStatus { file_stamp, status: status.clone() }));
+    status
+}
+
 /// Right side of a code block header. If the snippet is a single
 /// `<<<< ==== >>>>` diff that matches the live file, this mounts an
 /// embedded DiffApp for the chunk and shows Save / Quick Merge, or
@@ -716,25 +779,21 @@ fn render_inline_diff_controls(
     project_root: &Option<PathBuf>,
     active_realm: &Option<ActiveRealm>,
 ) {
-    let Some((search_block, replace_block)) = bulat::engine::extract_raw_diff_blocks(code) else { return };
-
-    let original_content = std::fs::read_to_string(path).unwrap_or_default();
-    let loc = locate_diff(&original_content, &search_block, &replace_block);
+    let Some(status) = inline_diff_status(ui, code, path) else { return };
+    let loc = &status.loc;
     if !loc.search_found && !loc.replace_found {
         return;
     }
 
     msg_ui.inline_diffs.entry(chunk_idx).or_insert_with(|| {
-        let mut app = bulat::DiffApp::new(search_block.clone(), replace_block.clone())
+        let mut app = bulat::DiffApp::new(status.search_block.clone(), status.replace_block.clone())
             .with_line_offset(loc.line_offset);
         app.embedded = true; // full height inside the chat
         app.left_filepath = Some(inforno_core::realm::get_relative_path(active_realm, project_root, path));
         app
     });
 
-    if loc.replace_found
-        && (!loc.search_found || replacement_is_distinctive(&loc.replace_norm, &loc.search_norm))
-    {
+    if loc.replace_found && status.applied {
         msg_ui.inline_diffs_saved.insert(chunk_idx, true);
     }
 
@@ -742,6 +801,23 @@ fn render_inline_diff_controls(
 
     ui.add_space(10.0);
     if is_saved {
+        if status.can_undo {
+            let undo = ui.small_button("↶ Undo")
+                .on_hover_text("Put the original text back. Offered only while the merged text is in the file exactly once.");
+            if undo.clicked() {
+                // Built from the file as it is now, not as it was when cached
+                let file = std::fs::read_to_string(path).unwrap_or_default();
+                match undo_merge_text(&file, &status.search_block, &status.replace_block) {
+                    Some(undone) => match std::fs::write(path, undone) {
+                        Ok(()) => {
+                            msg_ui.inline_diffs_saved.insert(chunk_idx, false);
+                        }
+                        Err(e) => eprintln!("Failed to undo merge: {}", e),
+                    },
+                    None => eprintln!("Undo skipped: the file changed and the merge can no longer be undone cleanly."),
+                }
+            }
+        }
         ui.label(RichText::new("✔ Merged").color(egui::Color32::GREEN));
         return;
     }
@@ -756,7 +832,7 @@ fn render_inline_diff_controls(
         } else {
             diff_app.left_code_real.clone()
         };
-        if quick_merge_to_disk(path, &search_block, replacement) {
+        if quick_merge_to_disk(path, &status.search_block, replacement) {
             msg_ui.inline_diffs_saved.insert(chunk_idx, true);
         }
     }
@@ -778,12 +854,8 @@ fn quick_merge_to_disk(path: &Path, search_block: &str, mut replacement: String)
     }
 
     // Prevent double-apply on fast clicks
-    let replace_norm = norm(&replacement);
     let search_norm = norm(search_block);
-    if !replace_norm.is_empty()
-        && latest.replace("\r\n", "\n").contains(&replace_norm)
-        && replacement_is_distinctive(&replace_norm, &search_norm)
-    {
+    if bulat::engine::is_diff_applied(&latest, search_block, &replacement) {
         return true;
     }
 

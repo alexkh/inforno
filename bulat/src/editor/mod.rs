@@ -229,6 +229,54 @@ pub fn selectable_scroll_contents<R>(
     result
 }
 
+/// A small round "jump to bottom" button floating over the bottom-left corner
+/// of a vertical scroll area. It fades in only while the pointer is near that
+/// corner and the view isn't already at the bottom. Call right after
+/// `ScrollArea::show`, with its output.
+pub fn scroll_to_bottom_button<R>(ui: &egui::Ui, scroll: &egui::scroll_area::ScrollAreaOutput<R>) {
+    const SIZE: f32 = 18.0; // fits in the chat's side padding
+    const INSET: f32 = 3.0;
+    const REACH: f32 = 90.0; // how close the pointer must come to the corner
+
+    let viewport = scroll.inner_rect;
+    let max_offset = (scroll.content_size.y - viewport.height()).max(0.0);
+    let at_bottom = scroll.state.offset.y >= max_offset - 1.0;
+    let corner = viewport.left_bottom();
+    let near = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| viewport.contains(p) && p.distance(corner) < REACH);
+
+    let id = scroll.id.with("scroll_to_bottom");
+    let opacity = ui.ctx().animate_bool_with_time(id, near && !at_bottom, 0.15);
+    if opacity == 0.0 {
+        return;
+    }
+
+    let pos = corner + egui::vec2(INSET, -INSET - SIZE);
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |ui| {
+            ui.multiply_opacity(opacity);
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+            let visuals = ui.style().interact(&response);
+            let painter = ui.painter();
+            painter.circle(rect.center(), SIZE / 2.0, visuals.weak_bg_fill, visuals.bg_stroke);
+            // Down-pointing chevron, drawn rather than a glyph so no font is needed
+            let c = rect.center();
+            let stroke = egui::Stroke::new(1.5, visuals.fg_stroke.color);
+            painter.line_segment([c + egui::vec2(-4.0, -2.0), c + egui::vec2(0.0, 2.0)], stroke);
+            painter.line_segment([c + egui::vec2(0.0, 2.0), c + egui::vec2(4.0, -2.0)], stroke);
+
+            if response.on_hover_text("Scroll to the bottom").clicked() {
+                let mut state = scroll.state;
+                state.offset.y = max_offset;
+                state.store(ui.ctx(), scroll.id);
+                ui.ctx().request_repaint();
+            }
+        });
+}
+
 pub trait Editor: Hash {
     fn append(&self, job: &mut LayoutJob, token: &Token);
     fn syntax(&self) -> &Syntax;

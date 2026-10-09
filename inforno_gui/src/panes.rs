@@ -202,7 +202,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
                 match pane {
                     Pane::Chat { chat_id } => {
-                        egui::ScrollArea::vertical()
+                        let scroll = egui::ScrollArea::vertical()
                             .id_salt(format!("pane_scroll_{:?}", tile_id))
                             .stick_to_bottom(true)
                             .auto_shrink([false, false])
@@ -222,12 +222,15 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                     self.state.chat_highlights.insert(*chat_id, highlight);
                                 }
                             });
+                        bulat::editor::scroll_to_bottom_button(ui, &scroll);
                     }
 
                     Pane::Editor { path, content: _ } => {
                         // Note: You must store `BulatEditorApp` in your Inforno State
                         // exactly like you currently store `merge_apps`.
+                        let is_active_pane = self.state.active_tile_id == Some(tile_id);
                         if let Some(app) = self.state.editor_apps.get_mut(&tile_id) {
+                            app.active = is_active_pane;
                             if let Some(action) = app.show(ui) {
                                 match action {
                                     bulat::EditorAction::SaveRequested => {
@@ -257,6 +260,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             app.left_filepath = Some(relative_path(path));
                             app.right_filepath = None;
                             app.search_state_id = Some(egui::Id::new("tab_search").with(tile_id));
+                            app.active = self.state.active_tile_id == Some(tile_id);
 
                             let (save_left, _) = app.show(ui);
 

@@ -76,6 +76,26 @@ impl BulatEngine {
 }
 
 
+/// Whether a SEARCH/REPLACE edit is already applied to `text`. Whitespace differences
+/// (line endings, indentation, re-wrapping) are ignored.
+///
+/// REPLACE being present is not enough: when the edit deletes something, REPLACE is
+/// usually just the context lines kept around the deleted text, which are present before
+/// the edit too. So unless REPLACE contains SEARCH (the edit only adds text), SEARCH must
+/// also be gone.
+pub fn is_diff_applied(text: &str, search: &str, replace: &str) -> bool {
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (text, search, replace) = (collapse(text), collapse(search), collapse(replace));
+    if replace.is_empty() {
+        // Pure deletion
+        return !search.is_empty() && !text.contains(&search);
+    }
+    if !text.contains(&replace) {
+        return false;
+    }
+    search.is_empty() || replace.contains(&search) || !text.contains(&search)
+}
+
 pub fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
     static RE_DIFF: OnceLock<Regex> = OnceLock::new();
     let re_diff = RE_DIFF.get_or_init(|| {
@@ -128,16 +148,8 @@ pub fn apply_llm_diffs(original: &str, snippet: &str) -> Option<String> {
         }
 
         // --- 0. Prevent Double Application ---
-        let replace_norm = replace_block.replace("\r\n", "\n").trim().to_string();
-        let search_norm = search_block.replace("\r\n", "\n").trim().to_string();
-        let orig_norm = current_text.replace("\r\n", "\n");
-
-        if !replace_norm.is_empty() && orig_norm.contains(&replace_norm) {
-            // If the replacement is already in the text, and it's substantial or contains the search block
-            // (which is the classic cause of infinite duplication), we skip it!
-            if replace_norm.contains(&search_norm) || replace_norm.lines().count() > 1 || replace_norm.len() > 20 {
-                continue;
-            }
+        if is_diff_applied(&current_text, search_block, replace_block) {
+            continue;
         }
 
         // 1. Try exact match
