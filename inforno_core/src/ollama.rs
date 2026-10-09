@@ -4,56 +4,61 @@ use crate::common::{ChatQue, ChatStreamEvent, DbOllamaModel};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::Sender};
 use tokio_stream::StreamExt;
 
-pub async fn do_ollama_chat_que(query: ChatQue) ->
-        Result<ChatMessageResponse, OllamaError> {
-    let ollama = Ollama::default();
-
+/// Translates Inforno's preset options into ollama_rs options.
+/// Only options set in the preset are forwarded; anything unset is left
+/// out of the request so the model's own default applies.
+fn build_options(opts: &crate::common::ModelOptions) -> ModelOptions {
     let mut options = ModelOptions::default();
-        //.temperature(query.preset.options.temperature)
-        //.repeat_penalty(1.5)
-        //.top_k(0)
-        //.top_p(1.0);
-    if let Some(t) = query.preset.options.temperature {
-        if t >= 0.0 && t <= 2.0 {
-            options = options.temperature(t as f32);
-        }
+
+    if let Some(seed) = opts.seed {
+        options = options.seed(seed);
     }
-    if let Some(seed) = query.preset.options.seed {
-        options = options.seed(seed as i32);
+    if let Some(t) = opts.temperature {
+        options = options.temperature(t as f32);
     }
-    if let Some(top_p) = query.preset.options.top_p {
+    if let Some(top_p) = opts.top_p {
         options = options.top_p(top_p as f32);
     }
-    if let Some(max_tokens) = query.preset.options.max_tokens {
+    if let Some(max_tokens) = opts.max_tokens {
         options = options.num_predict(max_tokens);
     }
-    if let Some(top_k) = query.preset.options.top_k {
+    if let Some(top_k) = opts.top_k {
         options = options.top_k(top_k.max(0) as u32);
     }
 
     // NOTE: ollama_rs::models::ModelOptions does not expose
     // `presence_penalty`, so it is not applied for Ollama.
 
-    if let Some(repeat_penalty) = query.preset.options.repetition_penalty {
+    if let Some(repeat_penalty) = opts.repetition_penalty {
         options = options.repeat_penalty(repeat_penalty as f32);
     }
-
-    if let Some(min_p) = query.preset.options.min_p {
+    if let Some(min_p) = opts.min_p {
         options = options.min_p(min_p as f32);
     }
-
-    if let Some(stop) = &query.preset.options.stop_sequences {
+    if let Some(stop) = &opts.stop_sequences {
         options = options.stop(stop.clone());
     }
 
-    // create the Request
-    let request = ChatMessageRequest::new(
-        query.preset.model,
-        query.chat.to_ollama_messages(0),
-    ).options(options);
+    options
+}
 
-    // send
-    ollama.send_chat_messages(request).await
+/// Request shared by all Ollama entry points (que, sync, stream).
+fn build_chat_request(query: &ChatQue) -> ChatMessageRequest {
+    let mut request = ChatMessageRequest::new(
+        query.preset.model.clone(),
+        query.chat.to_ollama_messages(query.agent_ind),
+    ).options(build_options(&query.preset.options));
+
+    // Unset leaves the decision to the server/model default.
+    if let Some(think) = query.preset.options.include_reasoning {
+        request = request.think(think);
+    }
+    request
+}
+
+pub async fn do_ollama_chat_que(query: ChatQue) ->
+        Result<ChatMessageResponse, OllamaError> {
+    Ollama::default().send_chat_messages(build_chat_request(&query)).await
 }
 
 #[tracing::instrument(skip_all)]
@@ -64,64 +69,7 @@ pub async fn do_ollama_chat_sync(
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ollama = Ollama::default();
-    let model_name = query.preset.model.clone();
-    let messages = query.chat.to_ollama_messages(query.agent_ind);
-
-    // 1. Prepare the ModelOptions (Seed & Temperature)
-    let mut options = ModelOptions::default();
-
-    if let Some(seed) = query.preset.options.seed {
-        // ollama_rs uses i32 for seeds
-        options = options.seed(seed as i32);
-    }
-
-    if let Some(temp) = query.preset.options.temperature {
-        // ollama_rs uses f32 for temperature
-        options = options.temperature(temp as f32);
-    }
-
-    if let Some(top_p) = query.preset.options.top_p {
-        options = options.top_p(top_p as f32);
-    } else {
-        options = options.top_p(1.0);
-    }
-
-    if let Some(max_tokens) = query.preset.options.max_tokens {
-        options = options.num_predict(max_tokens);
-    } else {
-        options = options.num_predict(4096);
-    }
-
-    if let Some(top_k) = query.preset.options.top_k {
-        options = options.top_k(top_k.max(0) as u32);
-    } else {
-        options = options.top_k(0);
-    }
-
-    // NOTE: ollama_rs::models::ModelOptions does not expose
-    // `presence_penalty`, so it is not applied for Ollama.
-
-    if let Some(repeat_penalty) = query.preset.options.repetition_penalty {
-        options = options.repeat_penalty(repeat_penalty as f32);
-    }
-
-    if let Some(min_p) = query.preset.options.min_p {
-        options = options.min_p(min_p as f32);
-    }
-
-    if let Some(stop) = &query.preset.options.stop_sequences {
-        options = options.stop(stop.clone());
-    }
-
-    // 2. Create the Request and attach Options
-    let mut request = ChatMessageRequest::new(model_name, messages)
-        .options(options);
-
-    match query.preset.options.include_reasoning {
-        Some(true) => { request = request.think(true); }
-        Some(false) => { request = request.think(false); }
-        None => {}
-    }
+    let request = build_chat_request(&query);
 
     // Wait for the ENTIRE response to generate
     match ollama.send_chat_messages(request).await {
@@ -137,26 +85,10 @@ pub async fn do_ollama_chat_sync(
             // -----------------------------
 
             let msg = response.message;
-
-            // 1. Send the reasoning block all at once (if present)
             if let Some(thinking) = &msg.thinking {
-                if !thinking.is_empty() {
-                    let _ = tx.send(ChatStreamEvent::Reasoning(
-                        query.agent_ind,
-                        thinking.to_string(),
-                    ));
-                    wakeup();
-                }
+                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, thinking);
             }
-
-            // 2. Send the actual answer all at once
-            if !msg.content.is_empty() {
-                let _ = tx.send(ChatStreamEvent::Content(
-                    query.agent_ind,
-                    msg.content
-                ));
-                wakeup();
-            }
+            crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, &msg.content);
         }
         Err(e) => {
             let _ = tx.send(ChatStreamEvent::Error(
@@ -266,21 +198,9 @@ pub async fn do_ollama_chat_stream(
         match res {
             Ok(response) => {
                 let msg = response.message;
-                if !msg.content.is_empty() {
-                    let _ = tx.send(ChatStreamEvent::Content(
-                        query.agent_ind,
-                        msg.content
-                    ));
-                    wakeup();
-                }
+                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, &msg.content);
                 if let Some(thinking) = &msg.thinking {
-                    if !thinking.is_empty() {
-                        let _ = tx.send(ChatStreamEvent::Reasoning(
-                            query.agent_ind,
-                            thinking.to_string(),
-                        ));
-                        wakeup();
-                    }
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, thinking);
                 }
             }
             Err(e) => {

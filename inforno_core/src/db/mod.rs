@@ -457,6 +457,14 @@ pub fn normalize_code_blocks(markdown: &str) -> String {
         let last_newline = before_match.rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line_start = &before_match[last_newline..];
 
+        // Inside a table row, padding would split the row into paragraphs
+        // and break the table: leave the formula where it is.
+        if line_start.trim_start().starts_with('|') {
+            step7.push_str(full_match.as_str());
+            last_end = full_match.end();
+            continue;
+        }
+
         let mut prefix = String::new();
         for c in line_start.chars() {
             if c == ' ' || c == '\t' || c == '>' {

@@ -32,6 +32,23 @@ pub enum ChatStreamEvent {
     Error(usize, String),
 }
 
+/// Sends one Content/Reasoning chunk to the GUI and wakes it up.
+/// Empty chunks are skipped, same as every backend did before.
+/// `event` is the variant constructor, e.g. `ChatStreamEvent::Content`.
+pub(crate) fn emit_text(
+    tx: &Sender<ChatStreamEvent>,
+    wakeup: &(dyn Fn() + Send + Sync),
+    event: fn(usize, String) -> ChatStreamEvent,
+    agent_ind: usize,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let _ = tx.send(event(agent_ind, text.to_string()));
+    wakeup();
+}
+
 #[derive(Default, Clone)]
 pub enum FileOp {
     #[default]

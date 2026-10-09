@@ -21,7 +21,6 @@ mod bottom_panel;
 mod chat;
 mod emoji_render;
 mod key_manager;
-mod math_render;
 mod panes;
 mod preset_editor;
 mod side_panel;

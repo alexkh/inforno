@@ -41,55 +41,63 @@ fn build_openr_client(query: &ChatQue) -> Result<OpenRouterClient, String> {
     builder.build().map_err(|e| e.to_string())
 }
 
+/// Builds the chat request shared by every OpenRouter entry point.
+fn build_chat_request(query: &ChatQue) -> Result<ChatCompletionRequest, String> {
+    let opts = &query.preset.options;
+    let mut request_builder = ChatCompletionRequest::builder();
+    request_builder
+        .model(query.preset.model.clone())
+        .messages(query.chat.to_openrouter_messages(query.agent_ind));
+
+    match opts.include_reasoning {
+        // Explicit yes -> force high effort; explicit no -> disable;
+        // unset -> the service provider decides.
+        Some(true) => { request_builder.reasoning_effort(Effort::High); }
+        Some(false) => { request_builder.include_reasoning(false); }
+        None => {}
+    }
+
+    if let Some(seed) = opts.seed {
+        request_builder.seed(seed as u32);
+    }
+    if let Some(temp) = opts.temperature {
+        request_builder.temperature(temp);
+    }
+    if let Some(top_p) = opts.top_p {
+        request_builder.top_p(top_p);
+    }
+    if let Some(max_tokens) = opts.max_tokens {
+        request_builder.max_tokens(max_tokens as u32);
+    }
+    if let Some(top_k) = opts.top_k {
+        request_builder.top_k(top_k.max(0) as u32);
+    }
+    if let Some(fp) = opts.frequency_penalty {
+        request_builder.frequency_penalty(fp);
+    }
+    if let Some(pp) = opts.presence_penalty {
+        request_builder.presence_penalty(pp);
+    }
+    if let Some(rp) = opts.repetition_penalty {
+        request_builder.repetition_penalty(rp);
+    }
+    if let Some(min_p) = opts.min_p {
+        request_builder.min_p(min_p);
+    }
+    if let Some(stop) = &opts.stop_sequences {
+        request_builder.stop(stop.clone());
+    }
+
+    request_builder.build().map_err(|e| e.to_string())
+}
+
 // simple request without streaming or history
 pub async fn do_openr_chat_que(query: ChatQue) ->
         Result<CompletionsResponse, Box<dyn std::error::Error>> {
 
     let client = build_openr_client(&query)?;
 
-    // Send chat completion
-    let mut request_builder = ChatCompletionRequest::builder();
-    request_builder
-        .model(query.preset.model)
-        // Pass '0' or a variable like 'current_hist_id' here
-        .messages(query.chat.to_openrouter_messages(0));
-
-    if let Some(seed) = query.preset.options.seed {
-        request_builder.seed(seed as u32);
-    }
-    if let Some(temp) = query.preset.options.temperature {
-        request_builder.temperature(temp);
-    }
-    if let Some(top_p) = query.preset.options.top_p {
-        request_builder.top_p(top_p);
-    }
-    if let Some(max_tokens) = query.preset.options.max_tokens {
-        request_builder.max_tokens(max_tokens as u32);
-    }
-    if let Some(top_k) = query.preset.options.top_k {
-        request_builder.top_k(top_k.max(0) as u32);
-    }
-    if let Some(fp) = query.preset.options.frequency_penalty {
-        request_builder.frequency_penalty(fp);
-    }
-
-    if let Some(pp) = query.preset.options.presence_penalty {
-        request_builder.presence_penalty(pp);
-    }
-
-    if let Some(rp) = query.preset.options.repetition_penalty {
-        request_builder.repetition_penalty(rp);
-    }
-
-    if let Some(min_p) = query.preset.options.min_p {
-        request_builder.min_p(min_p);
-    }
-
-    if let Some(stop) = &query.preset.options.stop_sequences {
-        request_builder.stop(stop.clone());
-    }
-
-    let request = request_builder.build()?;
+    let request = build_chat_request(&query)?;
 
     let response = client.send_chat_completion(&request).await?;
     Ok(response)
@@ -104,67 +112,7 @@ pub async fn do_openr_chat_sync(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = build_openr_client(&query)?;
 
-    // 1. Start the builder with mandatory fields
-    let mut request_builder = ChatCompletionRequest::builder();
-    request_builder
-        .model(query.preset.model)
-        .messages(query.chat.to_openrouter_messages(query.agent_ind));
-
-    // 2. Conditional: Apply Reasoning
-    match query.preset.options.include_reasoning {
-        Some(true) => {
-            request_builder.reasoning_effort(Effort::High);
-        }
-        Some(false) => {
-            request_builder.include_reasoning(false);
-        }
-        None => {
-            // Leave default or disabled
-        }
-    }
-
-    // 3. Conditional: Apply Seed
-    if let Some(seed) = query.preset.options.seed {
-        request_builder.seed(seed as u32);
-    }
-
-    // 4. Conditional: Apply Temperature
-    if let Some(temp) = query.preset.options.temperature {
-        request_builder.temperature(temp);
-    }
-
-    if let Some(top_p) = query.preset.options.top_p {
-        request_builder.top_p(top_p);
-    }
-
-    if let Some(max_tokens) = query.preset.options.max_tokens {
-        request_builder.max_tokens(max_tokens as u32);
-    }
-    if let Some(top_k) = query.preset.options.top_k {
-        request_builder.top_k(top_k.max(0) as u32);
-    }
-    if let Some(fp) = query.preset.options.frequency_penalty {
-        request_builder.frequency_penalty(fp);
-    }
-
-    if let Some(pp) = query.preset.options.presence_penalty {
-        request_builder.presence_penalty(pp);
-    }
-
-    if let Some(rp) = query.preset.options.repetition_penalty {
-        request_builder.repetition_penalty(rp);
-    }
-
-    if let Some(min_p) = query.preset.options.min_p {
-        request_builder.min_p(min_p);
-    }
-
-    if let Some(stop) = &query.preset.options.stop_sequences {
-        request_builder.stop(stop.clone());
-    }
-
-    // 5. Finalize build
-    let chat_request = request_builder.build()?;
+    let chat_request = build_chat_request(&query)?;
 
     // Wait for the ENTIRE response to generate synchronously
     match client.send_chat_completion(&chat_request).await {
@@ -175,28 +123,12 @@ pub async fn do_openr_chat_sync(
                 return Ok(()); 
             }
 
-            // Extract content and send to UI
             if let Some(choice) = response.choices.first() {
-                // 1. Send reasoning if present
                 if let Some(reasoning) = choice.reasoning() {
-                    if !reasoning.is_empty() {
-                        let _ = tx.send(ChatStreamEvent::Reasoning(
-                            query.agent_ind, 
-                            reasoning.to_string()
-                        ));
-                        wakeup();
-                    }
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, reasoning);
                 }
-                
-                // 2. Send actual content
                 if let Some(content) = choice.content() {
-                    if !content.is_empty() {
-                        let _ = tx.send(ChatStreamEvent::Content(
-                            query.agent_ind, 
-                            content.to_string()
-                        ));
-                        wakeup();
-                    }
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, content);
                 }
             }
         }
@@ -304,18 +236,10 @@ pub async fn do_openr_chat_stream(
             Ok(event) => {
                 if let Some(choice) = event.choices.first() {
                     if let Some(reasoning) = choice.reasoning() {
-                        if !reasoning.is_empty() {
-                            let _ = tx.send(ChatStreamEvent::Reasoning(
-                                    query.agent_ind, reasoning.to_string()));
-                            wakeup();
-                        }
+                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, reasoning);
                     }
                     if let Some(content) = choice.content() {
-                        if !content.is_empty() {
-                            let _ = tx.send(ChatStreamEvent::Content(
-                                    query.agent_ind, content.to_string()));
-                            wakeup();
-                        }
+                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, content);
                     }
                 }
             }
