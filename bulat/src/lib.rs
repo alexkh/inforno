@@ -329,6 +329,8 @@ pub struct DiffApp {
     pub search_state_id: Option<egui::Id>,
     pub embedded: bool,
     pub line_offset: usize,
+    // Bring the first change into view on the first frames (not when embedded)
+    scroll_to_first_change: bool,
 }
 
 #[cfg(feature = "gui")]
@@ -381,6 +383,7 @@ impl DiffApp {
             search_state_id: None,
             embedded: false,
             line_offset: 0,
+            scroll_to_first_change: true,
         };
 
         // compute initial diffs
@@ -546,6 +549,7 @@ impl DiffApp {
     pub fn show(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
         let mut save_left = false;
         let mut save_right = false;
+        let search_id = self.search_state_id.unwrap_or_else(|| ui.id().with("search"));
 
         render_settings_window(ui.ctx(), &mut self.show_settings, &mut self.theme);
         let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
@@ -590,7 +594,6 @@ impl DiffApp {
                     if ui.button("💾 Save Left").clicked() { save_left = true; }
                 }
 
-                let search_id = self.search_state_id.unwrap_or_else(|| ui.id().with("search"));
                 render_search_bar(ui, search_id, request_search_focus);
             });
         });
@@ -607,6 +610,11 @@ impl DiffApp {
         let mut left_changed = false;
         let mut right_changed = false;
         let row_height = self.calculated_row_height;
+        let mut row_height_settled = true;
+        let mut first_change_rect: Option<Rect> = None;
+        if self.embedded {
+            self.scroll_to_first_change = false; // would scroll the host instead
+        }
 
         // prepare the horizontal offset we will apply next frame
         let mut next_hscroll_ratio = self.hscroll_ratio;
@@ -676,13 +684,10 @@ impl DiffApp {
 
                         let expected_left_offset = self.hscroll_ratio * self.left_max_hscroll;
 
-                        let mut left_editor = CodeEditor::default()
+                        let left_editor = CodeEditor::default()
                             .id_source("left_editor")
-                            .with_rows(self.left_line_map.len());
-
-                        if let Some(id) = self.search_state_id {
-                            left_editor = left_editor.with_search_state_id(id);
-                        }
+                            .with_rows(self.left_line_map.len())
+                            .with_search_state_id(search_id);
 
                         let left_out = left_editor
                             //.with_fontsize(14.0)
@@ -714,8 +719,25 @@ impl DiffApp {
                             // update it and immediately ask egui to draw the next frame.
                             if (self.calculated_row_height - measured_row_height).abs() > 0.05 {
                                 self.calculated_row_height = measured_row_height;
+                                row_height_settled = false;
                                 ui.ctx().request_repaint();
                                 // println!("Calculated row height: {}", self.calculated_row_height);
+                            }
+                        }
+
+                        // Where the first change block starts, from this frame's layout
+                        if self.scroll_to_first_change {
+                            if let Some(block) = self.diff_blocks.first() {
+                                let chars: usize = self.left_view
+                                    .lines()
+                                    .take(block.visual_line_idx)
+                                    .map(|l| l.chars().count() + 1)
+                                    .sum();
+                                first_change_rect = Some(
+                                    left_out.output.galley
+                                        .pos_from_cursor(egui::text::CCursor::new(chars))
+                                        .translate(left_out.output.galley_pos.to_vec2()),
+                                );
                             }
                         }
 
@@ -802,13 +824,10 @@ impl DiffApp {
 
                         let expected_right_offset = self.hscroll_ratio * self.right_max_hscroll;
 
-                        let mut right_editor = CodeEditor::default()
+                        let right_editor = CodeEditor::default()
                             .id_source("right_editor")
-                            .with_rows(self.right_line_map.len());
-
-                        if let Some(id) = self.search_state_id {
-                            right_editor = right_editor.with_search_state_id(id);
-                        }
+                            .with_rows(self.right_line_map.len())
+                            .with_search_state_id(search_id);
 
                         let right_out = right_editor
                             //.with_fontsize(14.0)
@@ -838,6 +857,19 @@ impl DiffApp {
                         }
                     });
                 });
+
+                // Bring the first change into view once the row height has settled
+                // (positions laid out with the initial guess would be off).
+                if self.scroll_to_first_change && row_height_settled {
+                    if let Some(rect) = first_change_rect {
+                        ui.scroll_to_rect_animation(
+                            Rect::from_x_y_ranges(ui.clip_rect().x_range(), rect.y_range()),
+                            Some(egui::Align::Center),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                    }
+                    self.scroll_to_first_change = false; // also when there are no changes
+                }
         });
 
         self.hscroll_ratio = next_hscroll_ratio.clamp(0.0, 1.0);
@@ -866,7 +898,6 @@ pub enum EditorAction {
 pub struct BulatEditorApp {
     pub filepath: Option<PathBuf>,
     pub content: String,
-    pub search_term: String,
     pub show_settings: bool,
     pub current_theme: crate::editor::ColorTheme,
     pub active_mime: Option<String>,
@@ -888,7 +919,6 @@ impl BulatEditorApp {
         Self {
             filepath,
             content,
-            search_term: String::new(),
             show_settings: false,
             current_theme: active_theme,
             active_mime: None,
@@ -898,6 +928,12 @@ impl BulatEditorApp {
 
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<EditorAction> {
         let mut action = None;
+
+        // One id shared by the search bar and the editor; taken from the outer ui,
+        // because `ui.id()` differs inside the toolbar's nested layouts.
+        let search_id = egui::Id::new("bulat_search").with(ui.id());
+        let editor_id = ui.id().with("bulat_editor");
+        let request_search_focus = ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
 
         ui.horizontal(|ui| {
             // 1. Wrench Menu (Left)
@@ -943,8 +979,7 @@ impl BulatEditorApp {
                     action = Some(EditorAction::SaveRequested);
                 }
 
-                // Embed the exact same render_search_bar logic here, but using `self.search_term`
-                // self.render_search_bar(ui);
+                render_search_bar(ui, search_id, request_search_focus);
             });
         });
 

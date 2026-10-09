@@ -207,12 +207,14 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             .stick_to_bottom(true)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                crate::chat::render_chat_messages(
-                                    ui,
-                                    self.state,
-                                    *chat_id,
-                                    ui.available_width(),
-                                );
+                                bulat::editor::selectable_scroll_contents(ui, |ui| {
+                                    crate::chat::render_chat_messages(
+                                        ui,
+                                        self.state,
+                                        *chat_id,
+                                        ui.available_width(),
+                                    );
+                                });
                             });
                     }
 

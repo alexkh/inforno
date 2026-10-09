@@ -95,6 +95,140 @@ pub struct CodeEditorState {
     pub scroll_to_match: bool,
 }
 
+/// Keeps the enclosing vertical ScrollArea scrolling while a drag that
+/// started inside it (a text selection) is held above or below it, faster
+/// the further away the pointer is. Call it at the END of the ScrollArea's
+/// content, after any nested ScrollAreas: it works through a scroll delta,
+/// which nested horizontal ScrollAreas let through (unlike `scroll_to_rect`
+/// requests, which egui's ScrollArea always consumes on both axes), but a
+/// nested vertical one that finishes later would take it.
+pub fn autoscroll_while_dragging(ui: &egui::Ui) {
+    let viewport = ui.clip_rect();
+    let (origin, pos, down, dt) = ui.input(|i| {
+        (i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down(), i.stable_dt.min(0.1))
+    });
+    let (Some(origin), Some(pos)) = (origin, pos) else { return };
+
+    // Ignore drags that started on the scroll bar.
+    let content = viewport.with_max_x(viewport.max.x - ui.spacing().scroll.allocated_width());
+    if !down || !content.contains(origin) {
+        return;
+    }
+
+    let beyond = if pos.y < viewport.min.y {
+        pos.y - viewport.min.y
+    } else if pos.y > viewport.max.y {
+        pos.y - viewport.max.y
+    } else {
+        return;
+    };
+
+    let speed = (beyond * 12.0).clamp(-3000.0, 3000.0); // points per second
+    ui.scroll_with_delta(egui::vec2(0.0, -speed * dt));
+    ui.ctx().request_repaint();
+}
+
+/// Content-space y of both ends of a label drag-selection in one scroll area.
+#[derive(Clone, Copy)]
+struct SelectionSpan {
+    anchor: f32,
+    end: f32,
+}
+
+/// Wraps the contents of a vertical `ScrollArea` so that selecting text with the
+/// mouse works across the visible area:
+/// - dragging past the top or bottom edge scrolls (see `autoscroll_while_dragging`);
+/// - a label selection whose ends are scrolled out of view is kept.
+///
+/// egui drops a label selection as soon as one of its ends isn't drawn in a frame,
+/// and labels outside the clip rect aren't drawn. So while a selection is active, the
+/// clip rect is stretched over both ends; the shapes painted there are clipped back to
+/// the viewport afterwards. Widgets in the stretched part would also capture clicks
+/// meant for the panels around the scroll area, so the contents are disabled while the
+/// pointer is outside the viewport.
+pub fn selectable_scroll_contents<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let viewport = ui.clip_rect();
+    let origin = ui.max_rect().top(); // moves with the scroll offset
+    let id = ui.id().with("selection_span");
+    let scrollbar = ui.spacing().scroll.allocated_width();
+    let content = viewport.with_max_x(viewport.max.x - scrollbar);
+    let (press, pos, down, pressed) = ui.input(|i| {
+        (
+            i.pointer.press_origin(),
+            i.pointer.interact_pos(),
+            i.pointer.primary_down(),
+            i.pointer.primary_pressed(),
+        )
+    });
+    let started_here = press.is_some_and(|p| content.contains(p));
+    let dragging_here = down && started_here;
+    let has_selection = ui
+        .ctx()
+        .plugin::<egui::text_selection::LabelSelectionState>()
+        .lock()
+        .has_selection();
+
+    let mut span: Option<SelectionSpan> = ui.data(|d| d.get_temp(id));
+    if let (true, Some(press), Some(pos)) = (dragging_here, press, pos) {
+        let anchor = if pressed {
+            press.y - origin
+        } else {
+            span.map_or(press.y - origin, |s| s.anchor)
+        };
+        span = Some(SelectionSpan { anchor, end: pos.y - origin });
+    } else if !has_selection || (pressed && !started_here) {
+        span = None;
+    }
+    ui.data_mut(|d| match span {
+        Some(s) => {
+            d.insert_temp(id, s);
+        }
+        None => d.remove::<SelectionSpan>(id),
+    });
+
+    let stretch = span.and_then(|s| {
+        let top = origin + s.anchor.min(s.end) - 1.0;
+        let bottom = origin + s.anchor.max(s.end) + 1.0;
+        (top < viewport.min.y || bottom > viewport.max.y).then(|| {
+            egui::Rect::from_x_y_ranges(
+                viewport.x_range(),
+                top.min(viewport.min.y)..=bottom.max(viewport.max.y),
+            )
+        })
+    });
+
+    let layer = ui.layer_id();
+    let first_shape = stretch.map(|clip| {
+        ui.set_clip_rect(clip);
+        if !dragging_here && pos.is_some_and(|p| !viewport.contains(p)) {
+            ui.style_mut().visuals.disabled_alpha = 1.0; // disabled, but not faded
+            ui.disable();
+        }
+        ui.ctx().graphics_mut(|g| g.entry(layer).next_idx())
+    });
+
+    let result = add_contents(ui);
+
+    if let Some(first) = first_shape {
+        ui.ctx().graphics_mut(|g| {
+            let list = g.entry(layer);
+            for idx in first.0..list.next_idx().0 {
+                list.mutate_shape(egui::layers::ShapeIdx(idx), |s| {
+                    s.clip_rect = s.clip_rect.intersect(viewport);
+                });
+            }
+        });
+        ui.set_clip_rect(viewport);
+    }
+    if dragging_here {
+        autoscroll_while_dragging(ui);
+    }
+    result
+}
+
 pub trait Editor: Hash {
     fn append(&self, job: &mut LayoutJob, token: &Token);
     fn syntax(&self) -> &Syntax;
@@ -548,7 +682,12 @@ impl CodeEditor {
                         self.numlines_show(h, text.as_str());
                     }
 
-                                        let mut h_scroll = egui::ScrollArea::horizontal()
+                    // Scroll requests made inside the horizontal ScrollArea below are
+                    // swallowed by it on both axes (egui's ScrollArea consumes both
+                    // targets), so the vertical part is re-issued after it ends.
+                    let mut forward_scroll: Option<(egui::Rect, Option<egui::Align>)> = None;
+
+                    let mut h_scroll = egui::ScrollArea::horizontal()
                         .id_salt(format!("{}_inner_scroll", self.id))
                         .min_scrolled_height(0.0); // <-- CRUSH THE 200PX BLACK BOX HERE
 
@@ -624,6 +763,22 @@ impl CodeEditor {
                                     .layouter(&mut layouter)
                                     .show(ui);
 
+                                // Keep the cursor in view while typing, moving it or
+                                // drag-selecting. TextEdit asks for this itself, but its
+                                // request never gets past the horizontal ScrollArea.
+                                let cursor_key = egui::Id::new(&self.id).with("last_cursor_range");
+                                let last_cursor = ui.data(|d| d.get_temp::<Option<egui::text::CCursorRange>>(cursor_key)).flatten();
+                                if output.response.has_focus()
+                                    && (output.response.changed() || output.cursor_range != last_cursor)
+                                {
+                                    if let Some(range) = output.cursor_range {
+                                        let rect = output.galley.pos_from_cursor(range.primary)
+                                            .translate(output.galley_pos.to_vec2());
+                                        forward_scroll = Some((rect, None));
+                                    }
+                                }
+                                ui.data_mut(|d| d.insert_temp(cursor_key, output.cursor_range));
+
                                 // Scroll ONLY if this specific editor contains the active match
                                 if state.scroll_to_match {
                                     if let Some(char_idx) = active_char_idx {
@@ -631,6 +786,7 @@ impl CodeEditor {
                                         let cursor_rect = output.galley.pos_from_cursor(ccursor);
                                         let absolute_rect = cursor_rect.translate(output.galley_pos.to_vec2());
                                         ui.scroll_to_rect(absolute_rect, Some(egui::Align::Center));
+                                        forward_scroll = Some((absolute_rect, Some(egui::Align::Center)));
                                     }
                                 }
 
@@ -638,11 +794,24 @@ impl CodeEditor {
                     });
             });
 
+                    if let Some((rect, align)) = forward_scroll {
+                        // Only the vertical range: the inner area already handled x.
+                        let rect = egui::Rect::from_x_y_ranges(h.clip_rect().x_range(), rect.y_range());
+                        h.scroll_to_rect(rect, align);
+                    }
+
                     current_hscroll_offset = h_scroll_output.state.offset.x;
                     max_hscroll_offset = (h_scroll_output.content_size.x -
                             h_scroll_output.inner_rect.width()).max(0.0);
                 });
             }); // Closes Frame::show
+
+            // While drag-selecting past the top or bottom edge, keep scrolling.
+            // Only when this editor owns the vertical ScrollArea; otherwise the
+            // host's ScrollArea does it.
+            if vscroll {
+                autoscroll_while_dragging(ui);
+            }
         }; // Closes code_editor
 
         // Scroll Logic
