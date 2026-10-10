@@ -83,6 +83,24 @@ struct StandaloneBulat {
 
 impl eframe::App for StandaloneBulat {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Draw at most ~60 frames a second. egui redraws on every input event,
+        // and presenting a frame (wgpu/Vulkan) costs several ms of CPU, so a
+        // fast mouse alone kept a core busy. Events arriving while we wait are
+        // handled together in the next frame. Only the first pass of a frame
+        // waits: a second pass (requested for layout) belongs to the same frame.
+        let ctx = ui.ctx().clone();
+        if ctx.current_pass_index() == 0 {
+            const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+            let id = egui::Id::new("frame_cap_last");
+            if let Some(last) = ctx.data(|d| d.get_temp::<std::time::Instant>(id)) {
+                let elapsed = last.elapsed();
+                if elapsed < MIN_FRAME {
+                    std::thread::sleep(MIN_FRAME - elapsed);
+                }
+            }
+            ctx.data_mut(|d| d.insert_temp(id, std::time::Instant::now()));
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             match &mut self.mode {
                 AppMode::Editor(app) => {
