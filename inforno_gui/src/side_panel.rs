@@ -5,6 +5,10 @@ use rust_i18n::t;
 use split_button::SplitButton;
 
 pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
+    // Testing aid: NOSIDE=1 skips the side panel entirely (like NOCHAT)
+    if std::env::var_os("NOSIDE").is_some() {
+        return;
+    }
     egui::Panel::left("panel").show(ui, |ui| {
         // Disable main UI if a modal/rename is open to force focus
         if state.is_modal_open || state.chat_to_rename.is_some() {

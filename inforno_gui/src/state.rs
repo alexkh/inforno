@@ -625,8 +625,45 @@ impl eframe::App for MyApp {
     }
 
     #[tracing::instrument(skip_all, name = "MyApp::ui")]
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Testing aid: FRAMESTATS=1 prints, once a second, the frame rate and the
+        // CPU time eframe measured per frame (UI code and tessellation, not GPU work)
+        if std::env::var_os("FRAMESTATS").is_some() {
+            let id = egui::Id::new("frame_stats");
+            let now = ctx.input(|i| i.time);
+            let (start, frames, cpu) = ctx.data(|d| d.get_temp::<(f64, u32, f32)>(id)).unwrap_or((now, 0, 0.0));
+            let (frames, cpu) = (frames + 1, cpu + frame.info().cpu_usage.unwrap_or(0.0));
+            if now - start >= 1.0 {
+                eprintln!(
+                    "FRAMESTATS {:.0} frames/s, {:.1} ms CPU per frame, {:.0}% of a core",
+                    frames as f64 / (now - start),
+                    cpu * 1000.0 / frames as f32,
+                    cpu as f64 / (now - start) * 100.0,
+                );
+                ctx.data_mut(|d| d.insert_temp(id, (now, 0u32, 0.0f32)));
+            } else {
+                ctx.data_mut(|d| d.insert_temp(id, (start, frames, cpu)));
+            }
+        }
+
+        // Draw at most ~60 frames a second. egui redraws on every input event,
+        // and presenting a frame (wgpu/Vulkan) costs several ms of CPU, so a
+        // fast mouse alone kept a core busy. Events arriving while we wait are
+        // handled together in the next frame. Only the first pass of a frame
+        // waits: a second pass (requested for layout) belongs to the same frame.
+        if ctx.current_pass_index() == 0 {
+            const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+            let id = egui::Id::new("frame_cap_last");
+            if let Some(last) = ctx.data(|d| d.get_temp::<std::time::Instant>(id)) {
+                let elapsed = last.elapsed();
+                if elapsed < MIN_FRAME {
+                    std::thread::sleep(MIN_FRAME - elapsed);
+                }
+            }
+            ctx.data_mut(|d| d.insert_temp(id, std::time::Instant::now()));
+        }
         /*
         // TEMP probe: window size history in logical pixels (points * zoom).
         {
