@@ -137,23 +137,22 @@ mod tests {
 
         // 2. Configure the Powers Policy
         let mut mounts = IndexMap::new();
-        mounts.insert("/workspace".to_string(), RealmMountConfig {
+        mounts.insert("/workspace".to_string(), serde_saphyr::Commented(RealmMountConfig {
             host: host_dir.path().to_path_buf(),
             read_only: false,
-            intro: None,
-        });
+        }, String::new()));
 
         let mut roles = IndexMap::new();
-        roles.insert("tester".to_string(), RoleConfig {
+        roles.insert("tester".to_string(), serde_saphyr::Commented(RoleConfig {
             tier: Tier(2),
-            intro: "Test Role".to_string(),
             boss: None,
             powers: vec![],
-            bin: None,
-        });
+            bin: vec![],
+            env: vec![],
+        }, " Test Role".to_string()));
 
         let mut tiers = std::collections::BTreeMap::new();
-        tiers.insert(2, crate::realm::TierConfig { bin: None, env: vec![], powers: vec![
+        tiers.insert(2u32, serde_saphyr::Commented(crate::realm::TierConfig { bin: vec![], env: vec![], powers: vec![
             serde_saphyr::Commented(Power::Fs {
                 span: GlobExpr::Pattern("**".to_string()),
                 caps: vec![Cap::Read],
@@ -170,7 +169,7 @@ mod tests {
                 caps: vec![Cap::Append],
                 overrides: None,
             }, " Append access to logs".to_string())
-        ]});
+        ]}, String::new()));
 
         let config = RealmConfig {
             expressions: IndexMap::new(),
@@ -179,7 +178,8 @@ mod tests {
             sandboxes: IndexMap::new(),
             roles,
             tiers,
-            bin: None,
+            bin: vec![],
+            env: vec![],
         };
 
         // 3. Compile Realm and Spawn FUSE Driver

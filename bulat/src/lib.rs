@@ -1041,7 +1041,7 @@ impl BulatEditorApp {
 
         let editor_output = crate::editor::CodeEditor::default()
             .with_search_state_id(egui::Id::new("bulat_search").with(ui.id()))
-            .id_source(format!("{:?}", ui.id().with("bulat_editor")))
+            .id_source(format!("{:?}", editor_id))
             .with_theme(self.current_theme.clone())
             .with_syntax(syntax)
             .vscroll(true)

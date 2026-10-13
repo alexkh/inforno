@@ -27,6 +27,10 @@ futures-util = "0.3.32"
 tracing = "0.1.44"
 ron = "0.12.1"
 serde-saphyr = "1.2.0"
+chacha20poly1305 = "0.11.0"
+argon2 = "0.6.0"
+getrandom = "0.4.3"
+hex = "0.4.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.14.0"
