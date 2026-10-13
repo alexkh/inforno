@@ -64,6 +64,14 @@ egui-snarl = "0.12.0"
 rucomfyui = { git = "https://github.com/alexkh/rucomfyui", branch = "main" }
 rustybuzz = "0.20.1"
 dhat = "0.3.3"
+ctap-hid-fido2 = "3.6.0"
+chacha20poly1305 = "0.11.0"
+hkdf = "0.13.0"
+sha2 = "0.11.1"
+getrandom = "0.4.3"
+rpassword = "7.5.4"
+hex = "0.4.3"
+anyhow = "1.0.104"
 
 [[bin]]
 name = "inforno"
