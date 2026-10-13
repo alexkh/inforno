@@ -1,62 +1,36 @@
-//! Encrypted on-disk store for API keys (the "vault").
+//! API keys on disk, encrypted (the "vault").
 //!
-//! The secrets (provider name → API key) are encrypted with a random 32-byte
-//! *data key*. Each way of unlocking is a *slot* holding its own encrypted
-//! copy of that data key:
+//! All keys (provider name → key) are stored as one blob sealed to this
+//! machine and user, so the file is useless anywhere else (e.g. if it ends
+//! up in a backup or a git repository), and needs no password: it unseals
+//! silently, on this machine, for this user. The sealing is per platform
+//! (see [`platform_sealer`]):
 //!
-//! - a sealed slot: the data key sealed by the machine, by default with
-//!   `systemd-creds` (TPM2 when the machine has one, otherwise the root-only
-//!   host key). Unlocks without any user interaction, but only on this
-//!   machine and for this user;
-//! - a passphrase slot: the data key wrapped with a key derived from a
-//!   passphrase by Argon2id. For recovery (a passphrase kept on paper),
-//!   e.g. after a TPM reset, a motherboard swap or a move to a new machine.
+//! - Linux: `systemd-creds --user`, bound to the TPM2 when the machine has
+//!   one (otherwise to its root-only host key) and to the user;
+//! - Windows: DPAPI, bound to the Windows user account.
 //!
-//! Any slot unlocks the vault; slots can be added and removed without
-//! re-encrypting the secrets. The sealing mechanism is behind the [`Sealer`]
-//! trait; [`SystemdCreds`] is the real one.
-//!
-//! Encryption is XChaCha20-Poly1305 with random nonces. The file is JSON;
-//! nothing in it is readable without one of the slots.
+//! There is deliberately no recovery path. If the TPM is reset or the
+//! machine replaced, the file can't be decrypted any more and the keys are
+//! entered again (API keys are easy to re-issue).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 
-const VERSION: u32 = 1;
-/// Associated data: binds every ciphertext to this format and its role.
-const AAD_SECRETS: &[u8] = b"inforno-vault-v1 secrets";
-const AAD_SLOT: &[u8] = b"inforno-vault-v1 slot";
-
-/// Argon2id cost for passphrase slots: 64 MiB, 3 passes (~0.3–0.5 s on a
-/// desktop). Stored per slot, so it can be raised later without breaking
-/// existing vaults.
-const ARGON2_M_KIB: u32 = 64 * 1024;
-const ARGON2_T: u32 = 3;
-const ARGON2_P: u32 = 1;
+/// Bound into the sealed file: it can't be unsealed as any other credential.
+pub const CREDENTIAL_NAME: &str = "inforno-api-keys";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
-    #[error("could not read or write the vault file: {0}")]
+    #[error("could not read or write the key file: {0}")]
     Io(#[from] std::io::Error),
-    #[error("the vault file is damaged or not a vault: {0}")]
-    Format(String),
-    #[error("unsupported vault version {0}")]
-    Version(u32),
-    #[error("wrong passphrase, or the vault was tampered with")]
-    WrongKey,
-    #[error("sealing or unsealing failed: {0}")]
+    #[error("could not decrypt or encrypt the keys: {0}")]
     Seal(String),
-    #[error("no such slot")]
-    NoSuchSlot,
-    #[error("the last slot can't be removed: the vault could never be opened again")]
-    LastSlot,
-    #[error("key derivation failed: {0}")]
-    Kdf(String),
+    #[error("the decrypted key file is damaged: {0}")]
+    Format(String),
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;
@@ -65,21 +39,31 @@ pub type Result<T> = std::result::Result<T, VaultError>;
 // Sealing
 // ---------------------------------------------------------------------------
 
-/// Seals small secrets to this machine (and user), so only it can unseal
-/// them. `name` is bound into the sealed blob; unsealing with another name
-/// fails, so a blob can't be passed off as a different credential.
+/// Seals data to this machine and user. `name` is bound into the sealed
+/// blob, so unsealing it under another name fails.
 pub trait Sealer {
-    /// Identifies the mechanism in the vault file, e.g. "systemd-creds".
-    fn method(&self) -> &'static str;
+    /// What protects the file, in words (for settings and security reports).
+    fn description(&self) -> &'static str;
     fn seal(&self, name: &str, plain: &[u8]) -> Result<Vec<u8>>;
     fn unseal(&self, name: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
 }
 
-/// Seals with `systemd-creds --user` (systemd 256 or newer): bound to the
-/// TPM2 when the machine has one, and to the calling user. Runs the
-/// `systemd-creds` command, which talks to systemd's credential service.
+/// The sealer for this platform, or None where there is none yet (the
+/// caller then keeps keys elsewhere, e.g. in memory only).
+pub fn platform_sealer() -> Option<Box<dyn Sealer>> {
+    #[cfg(target_os = "linux")]
+    return Some(Box::new(SystemdCreds));
+    #[cfg(windows)]
+    return Some(Box::new(Dpapi));
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Seals with `systemd-creds --user` (systemd 256 or newer).
+#[cfg(target_os = "linux")]
 pub struct SystemdCreds;
 
+#[cfg(target_os = "linux")]
 impl SystemdCreds {
     fn run(&self, action: &str, name: &str, input: &[u8]) -> Result<Vec<u8>> {
         use std::io::Write;
@@ -92,9 +76,13 @@ impl SystemdCreds {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| VaultError::Seal(format!("could not run systemd-creds: {e}")))?;
-        // A few hundred bytes at most: fits the pipe, no deadlock risk.
-        child.stdin.take().expect("stdin is piped").write_all(input)?;
+        // Write stdin from another thread: with many keys the input could
+        // exceed the pipe buffer while systemd-creds is already writing.
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let input = input.to_vec();
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
         let output = child.wait_with_output()?;
+        writer.join().expect("stdin writer panicked")?;
         if !output.status.success() {
             return Err(VaultError::Seal(format!(
                 "systemd-creds {action} failed: {}",
@@ -105,9 +93,10 @@ impl SystemdCreds {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Sealer for SystemdCreds {
-    fn method(&self) -> &'static str {
-        "systemd-creds"
+    fn description(&self) -> &'static str {
+        "systemd-creds: bound to this machine's TPM2 (or root-only host key) and this user"
     }
 
     fn seal(&self, name: &str, plain: &[u8]) -> Result<Vec<u8>> {
@@ -119,273 +108,151 @@ impl Sealer for SystemdCreds {
     }
 }
 
-// ---------------------------------------------------------------------------
-// File format
-// ---------------------------------------------------------------------------
+/// Seals with Windows DPAPI (`CryptProtectData`): encrypted for the
+/// logged-in Windows user, without any prompt, and unreadable for other
+/// users and on other machines. `name` is passed as DPAPI's optional
+/// entropy, so a blob only unseals under the same name.
+#[cfg(windows)]
+pub struct Dpapi;
 
-/// A vault as stored on disk. Load it with [`VaultFile::load`], then unlock
-/// it with one of its slots.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct VaultFile {
-    version: u32,
-    slots: Vec<Slot>,
-    /// Hex: the secrets map (JSON), encrypted with the data key.
-    nonce: String,
-    ciphertext: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Slot {
-    /// Shown to the user, e.g. "This computer" or "Paper backup".
-    pub label: String,
-    pub kind: SlotKind,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SlotKind {
-    /// The data key (hex) sealed by `method` under the credential `name`.
-    Sealed {
-        method: String,
-        name: String,
-        #[serde(with = "hex_bytes")]
-        blob: Vec<u8>,
-    },
-    /// The data key encrypted with an Argon2id-derived key.
-    Passphrase {
-        #[serde(with = "hex_array")]
-        salt: [u8; 16],
-        m_kib: u32,
-        t: u32,
-        p: u32,
-        nonce: String,
-        wrapped_key: String,
-    },
-}
-
-impl VaultFile {
-    pub fn load(path: &Path) -> Result<Self> {
-        let file: VaultFile = serde_json::from_str(&std::fs::read_to_string(path)?)
-            .map_err(|e| VaultError::Format(e.to_string()))?;
-        if file.version != VERSION {
-            return Err(VaultError::Version(file.version));
+#[cfg(windows)]
+impl Dpapi {
+    fn blob(data: &[u8]) -> windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
+        windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
+            cbData: u32::try_from(data.len()).expect("a key file is far below 4 GiB"),
+            // DPAPI only reads input blobs; the C API just isn't const-correct.
+            pbData: data.as_ptr().cast_mut(),
         }
-        Ok(file)
     }
 
-    pub fn slots(&self) -> &[Slot] {
-        &self.slots
-    }
+    /// Calls `CryptProtectData` (`protect`) or `CryptUnprotectData`, then
+    /// copies the output, wipes DPAPI's buffer (it may hold plain text) and
+    /// frees it.
+    fn call(protect: bool, name: &str, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        use secrecy::zeroize::Zeroize;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Cryptography::{
+            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+        };
 
-    pub fn has_sealed_slot(&self, sealer: &dyn Sealer) -> bool {
-        self.slots.iter().any(|s| matches!(&s.kind, SlotKind::Sealed { method, .. } if method == sealer.method()))
-    }
-
-    /// Unlocks with this machine's sealed slot, without user interaction.
-    pub fn unlock_sealed(&self, sealer: &dyn Sealer) -> Result<Vault> {
-        let mut last_error = VaultError::NoSuchSlot;
-        for slot in &self.slots {
-            let SlotKind::Sealed { method, name, blob } = &slot.kind else { continue };
-            if method != sealer.method() {
-                continue;
+        let input = Self::blob(data);
+        let entropy = Self::blob(name.as_bytes());
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        // SAFETY: every pointer is valid for the duration of the call; the
+        // optional description/reserved/prompt arguments are null.
+        let ok = unsafe {
+            if protect {
+                CryptProtectData(&input, std::ptr::null(), &entropy, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), &entropy, std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
             }
-            // A vault copied from another machine has a slot this one can't
-            // unseal: try the next one.
-            match sealer.unseal(name, blob).and_then(|hex_key| parse_data_key(&hex_key)) {
-                Ok(data_key) => return self.open(data_key),
-                Err(e) => last_error = e,
-            }
+        };
+        if ok == 0 || out.pbData.is_null() {
+            let what = if protect { "CryptProtectData" } else { "CryptUnprotectData" };
+            return Err(VaultError::Seal(format!("{what} failed: {}", std::io::Error::last_os_error())));
         }
-        Err(last_error)
-    }
-
-    /// Tries every passphrase slot. Slow by design (Argon2id per slot): call
-    /// it off the UI thread.
-    pub fn unlock_with_passphrase(&self, passphrase: &str) -> Result<Vault> {
-        for slot in &self.slots {
-            let SlotKind::Passphrase { salt, m_kib, t, p, nonce, wrapped_key } = &slot.kind else { continue };
-            let key = passphrase_key(passphrase, salt, *m_kib, *t, *p)?;
-            match decrypt(&key, nonce, wrapped_key, AAD_SLOT) {
-                Ok(raw) => {
-                    let data_key = raw.as_slice().try_into().map_err(|_| VaultError::Format("data key length".into()))?;
-                    return self.open(Zeroizing::new(data_key));
-                }
-                Err(VaultError::WrongKey) => continue,
-                Err(e) => return Err(e),
-            }
+        // SAFETY: on success DPAPI returns a LocalAlloc'd buffer of cbData bytes,
+        // to be released with LocalFree.
+        unsafe {
+            let bytes = std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize);
+            let copy = Zeroizing::new(bytes.to_vec());
+            bytes.zeroize();
+            LocalFree(out.pbData.cast());
+            Ok(copy)
         }
-        Err(VaultError::WrongKey)
+    }
+}
+
+#[cfg(windows)]
+impl Sealer for Dpapi {
+    fn description(&self) -> &'static str {
+        "Windows DPAPI: bound to this Windows user account"
     }
 
-    fn open(&self, data_key: Zeroizing<[u8; 32]>) -> Result<Vault> {
-        let plain = decrypt(&data_key, &self.nonce, &self.ciphertext, AAD_SECRETS)?;
-        let secrets = parse_secrets(&plain)?;
-        Ok(Vault { file: self.clone(), data_key, secrets })
+    fn seal(&self, name: &str, plain: &[u8]) -> Result<Vec<u8>> {
+        Self::call(true, name, plain).map(|sealed| sealed.to_vec())
+    }
+
+    fn unseal(&self, name: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        Self::call(false, name, sealed)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Unlocked vault
+// Vault
 // ---------------------------------------------------------------------------
 
-/// An unlocked vault: the secrets in memory, plus what's needed to save
-/// changes. The data key and secrets are wiped from memory on drop.
+/// The API keys, decrypted in memory (wiped on drop).
+#[derive(Default)]
 pub struct Vault {
-    file: VaultFile,
-    data_key: Zeroizing<[u8; 32]>,
-    secrets: BTreeMap<String, SecretString>,
+    keys: BTreeMap<String, SecretString>,
 }
 
 impl Vault {
-    /// A new, empty vault. It needs at least one slot before [`Vault::save`].
-    pub fn create() -> Self {
-        Vault {
-            file: VaultFile { version: VERSION, slots: Vec::new(), nonce: String::new(), ciphertext: String::new() },
-            data_key: Zeroizing::new(random()),
-            secrets: BTreeMap::new(),
+    /// Reads and decrypts the key file. A missing file is an empty vault.
+    pub fn load(path: &Path, sealer: &dyn Sealer) -> Result<Self> {
+        let sealed = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let plain = sealer.unseal(CREDENTIAL_NAME, &sealed)?;
+        let map: BTreeMap<String, String> =
+            serde_json::from_slice(&plain).map_err(|e| VaultError::Format(e.to_string()))?;
+        // Each String moves (buffer and all) into its SecretString, which
+        // wipes it on drop.
+        let keys = map.into_iter().map(|(k, v)| (k, SecretString::from(v))).collect();
+        Ok(Vault { keys })
+    }
+
+    /// Encrypts and writes the key file atomically (temp file + rename),
+    /// readable by the owner only. With no keys left, removes the file.
+    pub fn save(&self, path: &Path, sealer: &dyn Sealer) -> Result<()> {
+        if self.keys.is_empty() {
+            return match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            };
         }
-    }
+        let exposed: BTreeMap<&str, &str> = self
+            .keys
+            .iter()
+            .map(|(k, v)| {
+                let value: &str = v.expose_secret(); // &str or &String, depending on the secrecy version
+                (k.as_str(), value)
+            })
+            .collect();
+        let plain = Zeroizing::new(serde_json::to_vec(&exposed).expect("a string map always serializes"));
+        let sealed = sealer.seal(CREDENTIAL_NAME, &plain)?;
 
-    pub fn get(&self, name: &str) -> Option<&SecretString> {
-        self.secrets.get(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.secrets.keys().map(String::as_str)
-    }
-
-    pub fn set(&mut self, name: &str, value: SecretString) {
-        self.secrets.insert(name.to_string(), value);
-    }
-
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.secrets.remove(name).is_some()
-    }
-
-    pub fn slots(&self) -> &[Slot] {
-        &self.file.slots
-    }
-
-    /// Adds a slot sealed to this machine. `credential_name` is bound into
-    /// the sealed blob (e.g. "inforno-vault").
-    pub fn add_sealed_slot(&mut self, label: &str, sealer: &dyn Sealer, credential_name: &str) -> Result<()> {
-        let hex_key = Zeroizing::new(hex::encode(self.data_key.as_slice()));
-        let blob = sealer.seal(credential_name, hex_key.as_bytes())?;
-        self.file.slots.push(Slot {
-            label: label.to_string(),
-            kind: SlotKind::Sealed { method: sealer.method().to_string(), name: credential_name.to_string(), blob },
-        });
-        Ok(())
-    }
-
-    /// Adds a passphrase slot. Slow by design (Argon2id).
-    pub fn add_passphrase_slot(&mut self, label: &str, passphrase: &str) -> Result<()> {
-        let salt: [u8; 16] = random();
-        let key = passphrase_key(passphrase, &salt, ARGON2_M_KIB, ARGON2_T, ARGON2_P)?;
-        let (nonce, wrapped_key) = encrypt(&key, self.data_key.as_slice(), AAD_SLOT);
-        self.file.slots.push(Slot {
-            label: label.to_string(),
-            kind: SlotKind::Passphrase { salt, m_kib: ARGON2_M_KIB, t: ARGON2_T, p: ARGON2_P, nonce, wrapped_key },
-        });
-        Ok(())
-    }
-
-    pub fn remove_slot(&mut self, index: usize) -> Result<()> {
-        if index >= self.file.slots.len() {
-            return Err(VaultError::NoSuchSlot);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
         }
-        if self.file.slots.len() == 1 {
-            return Err(VaultError::LastSlot);
-        }
-        self.file.slots.remove(index);
-        Ok(())
-    }
-
-    /// Re-encrypts the secrets and writes the vault atomically (temp file +
-    /// rename), readable by the owner only on Unix.
-    pub fn save(&mut self, path: &Path) -> Result<()> {
-        if self.file.slots.is_empty() {
-            return Err(VaultError::LastSlot);
-        }
-        let plain = Zeroizing::new(serialize_secrets(&self.secrets));
-        let (nonce, ciphertext) = encrypt(&self.data_key, &plain, AAD_SECRETS);
-        self.file.nonce = nonce;
-        self.file.ciphertext = ciphertext;
-
-        let json = serde_json::to_string_pretty(&self.file).map_err(|e| VaultError::Format(e.to_string()))?;
         let tmp = path.with_extension("tmp");
-        write_private(&tmp, json.as_bytes())?;
+        write_private(&tmp, &sealed)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
-}
 
-// ---------------------------------------------------------------------------
-// Crypto helpers
-// ---------------------------------------------------------------------------
+    pub fn get(&self, provider: &str) -> Option<&SecretString> {
+        self.keys.get(provider)
+    }
 
-/// The data key is sealed as hex text, so the sealing tool only ever handles
-/// printable ASCII (no binary or newline quirks).
-fn parse_data_key(hex_key: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    let mut key = Zeroizing::new([0u8; 32]);
-    let text = std::str::from_utf8(hex_key).map_err(|_| VaultError::Format("sealed key is not text".into()))?;
-    hex::decode_to_slice(text.trim(), key.as_mut_slice())
-        .map_err(|_| VaultError::Format("sealed key is not a 32-byte hex key".into()))?;
-    Ok(key)
-}
+    pub fn providers(&self) -> impl Iterator<Item = &str> {
+        self.keys.keys().map(String::as_str)
+    }
 
-fn passphrase_key(passphrase: &str, salt: &[u8; 16], m_kib: u32, t: u32, p: u32) -> Result<Zeroizing<[u8; 32]>> {
-    let params = argon2::Params::new(m_kib, t, p, Some(32)).map_err(|e| VaultError::Kdf(e.to_string()))?;
-    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut key = Zeroizing::new([0u8; 32]);
-    argon
-        .hash_password_into(passphrase.as_bytes(), salt, key.as_mut_slice())
-        .map_err(|e| VaultError::Kdf(e.to_string()))?;
-    Ok(key)
-}
+    pub fn set(&mut self, provider: &str, key: SecretString) {
+        self.keys.insert(provider.to_string(), key);
+    }
 
-/// Returns (nonce, ciphertext) as hex.
-fn encrypt(key: &[u8; 32], plain: &[u8], aad: &[u8]) -> (String, String) {
-    let nonce: [u8; 24] = random();
-    let ciphertext = XChaCha20Poly1305::new(key.into())
-        .encrypt(&XNonce::from(nonce), Payload { msg: plain, aad })
-        .expect("XChaCha20-Poly1305 encryption cannot fail for in-memory data");
-    (hex::encode(nonce), hex::encode(ciphertext))
-}
+    pub fn remove(&mut self, provider: &str) -> bool {
+        self.keys.remove(provider).is_some()
+    }
 
-fn decrypt(key: &[u8; 32], nonce_hex: &str, ciphertext_hex: &str, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    let mut nonce = [0u8; 24];
-    hex::decode_to_slice(nonce_hex, &mut nonce).map_err(|_| VaultError::Format("nonce".into()))?;
-    let ciphertext = hex::decode(ciphertext_hex).map_err(|e| VaultError::Format(e.to_string()))?;
-    XChaCha20Poly1305::new(key.into())
-        .decrypt(&XNonce::from(nonce), Payload { msg: &ciphertext, aad })
-        .map(Zeroizing::new)
-        .map_err(|_| VaultError::WrongKey)
-}
-
-fn serialize_secrets(secrets: &BTreeMap<String, SecretString>) -> Vec<u8> {
-    let exposed: BTreeMap<&str, &str> = secrets
-        .iter()
-        .map(|(k, v)| {
-            let value: &str = v.expose_secret(); // &str or &String, depending on the secrecy version
-            (k.as_str(), value)
-        })
-        .collect();
-    serde_json::to_vec(&exposed).expect("a string map always serializes")
-}
-
-fn parse_secrets(plain: &[u8]) -> Result<BTreeMap<String, SecretString>> {
-    let map: BTreeMap<String, String> =
-        serde_json::from_slice(plain).map_err(|e| VaultError::Format(e.to_string()))?;
-    // Each value String moves (buffer and all) into its SecretString,
-    // which wipes it on drop; nothing is left behind to zeroize.
-    Ok(map.into_iter().map(|(k, v)| (k, SecretString::from(v))).collect())
-}
-
-fn random<const N: usize>() -> [u8; N] {
-    let mut buf = [0u8; N];
-    getrandom::fill(&mut buf).expect("the OS random generator failed");
-    buf
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -402,29 +269,6 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-mod hex_bytes {
-    pub fn serialize<S: serde::Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(v))
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let s: String = serde::Deserialize::deserialize(d)?;
-        hex::decode(s).map_err(serde::de::Error::custom)
-    }
-}
-
-mod hex_array {
-    pub fn serialize<S: serde::Serializer, const N: usize>(v: &[u8; N], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(v))
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>, const N: usize>(d: D) -> Result<[u8; N], D::Error> {
-        let s: String = serde::Deserialize::deserialize(d)?;
-        hex::decode(s)
-            .map_err(serde::de::Error::custom)?
-            .try_into()
-            .map_err(|_| serde::de::Error::custom(format!("expected {N} bytes")))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -433,147 +277,79 @@ mod hex_array {
 mod tests {
     use super::*;
 
-    /// Stands in for systemd-creds: "seals" by encrypting with a fixed
-    /// machine key, binding the name like the real thing does.
+    /// Stands in for systemd-creds: scrambles the data with a per-machine
+    /// byte and records the machine and name, which unsealing checks.
     struct FakeSealer {
-        machine_key: [u8; 32],
+        machine: u8,
     }
 
     impl Sealer for FakeSealer {
-        fn method(&self) -> &'static str {
-            "systemd-creds"
+        fn description(&self) -> &'static str {
+            "test"
         }
         fn seal(&self, name: &str, plain: &[u8]) -> Result<Vec<u8>> {
-            let (n, c) = encrypt(&self.machine_key, plain, name.as_bytes());
-            Ok(format!("{n}:{c}").into_bytes())
+            let mut out = format!("{}:{name}:", self.machine).into_bytes();
+            out.extend(plain.iter().map(|b| b ^ self.machine));
+            Ok(out)
         }
         fn unseal(&self, name: &str, sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-            let text = String::from_utf8(sealed.to_vec()).unwrap();
-            let (n, c) = text.split_once(':').unwrap();
-            decrypt(&self.machine_key, n, c, name.as_bytes()).map_err(|_| VaultError::Seal("cannot unseal".into()))
+            let header = format!("{}:{name}:", self.machine).into_bytes();
+            let body = sealed.strip_prefix(header.as_slice()).ok_or_else(|| VaultError::Seal("cannot unseal".into()))?;
+            Ok(Zeroizing::new(body.iter().map(|b| b ^ self.machine).collect()))
         }
     }
 
-    const THIS_MACHINE: FakeSealer = FakeSealer { machine_key: [1u8; 32] };
-    const OTHER_MACHINE: FakeSealer = FakeSealer { machine_key: [2u8; 32] };
+    const THIS_MACHINE: FakeSealer = FakeSealer { machine: 0x5a };
+    const OTHER_MACHINE: FakeSealer = FakeSealer { machine: 0x33 };
 
-    fn sample_vault() -> Vault {
-        let mut v = Vault::create();
+    fn sample() -> Vault {
+        let mut v = Vault::default();
         v.set("openrouter", SecretString::from("sk-or-v1-abc".to_string()));
         v.set("anthropic", SecretString::from("sk-ant-xyz".to_string()));
         v
     }
 
-    fn saved(v: &mut Vault) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("secrets.vault");
-        v.save(&path).unwrap();
-        (dir, path)
-    }
-
     #[test]
-    fn sealed_round_trip() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("This computer", &THIS_MACHINE, "inforno-vault").unwrap();
-        let (_dir, path) = saved(&mut v);
+    fn round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.cred");
+        sample().save(&path, &THIS_MACHINE).unwrap();
 
-        let file = VaultFile::load(&path).unwrap();
-        assert!(file.has_sealed_slot(&THIS_MACHINE));
-        let v = file.unlock_sealed(&THIS_MACHINE).unwrap();
+        let v = Vault::load(&path, &THIS_MACHINE).unwrap();
         assert_eq!(v.get("openrouter").unwrap().expose_secret(), "sk-or-v1-abc");
-        assert_eq!(v.names().collect::<Vec<_>>(), ["anthropic", "openrouter"]);
+        assert_eq!(v.providers().collect::<Vec<_>>(), ["anthropic", "openrouter"]);
     }
 
     #[test]
-    fn other_machine_needs_the_passphrase() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("This computer", &THIS_MACHINE, "inforno-vault").unwrap();
-        v.add_passphrase_slot("Paper backup", "correct horse battery staple").unwrap();
-        let (_dir, path) = saved(&mut v);
-
-        let file = VaultFile::load(&path).unwrap();
-        assert!(matches!(file.unlock_sealed(&OTHER_MACHINE), Err(VaultError::Seal(_))));
-
-        // Recover on the new machine: unlock with the passphrase, seal to it.
-        let mut v = file.unlock_with_passphrase("correct horse battery staple").unwrap();
-        v.add_sealed_slot("New computer", &OTHER_MACHINE, "inforno-vault").unwrap();
-        v.save(&path).unwrap();
-        let v = VaultFile::load(&path).unwrap().unlock_sealed(&OTHER_MACHINE).unwrap();
-        assert_eq!(v.get("anthropic").unwrap().expose_secret(), "sk-ant-xyz");
-    }
-
-    #[test]
-    fn changes_are_seen_through_every_slot() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("This computer", &THIS_MACHINE, "inforno-vault").unwrap();
-        v.add_passphrase_slot("Paper backup", "pw").unwrap();
-        let (_dir, path) = saved(&mut v);
-
-        let mut v = VaultFile::load(&path).unwrap().unlock_sealed(&THIS_MACHINE).unwrap();
-        v.set("openrouter", SecretString::from("sk-or-v1-new".to_string()));
-        v.remove("anthropic");
-        v.save(&path).unwrap();
-
-        let v = VaultFile::load(&path).unwrap().unlock_with_passphrase("pw").unwrap();
-        assert_eq!(v.get("openrouter").unwrap().expose_secret(), "sk-or-v1-new");
-        assert!(v.get("anthropic").is_none());
-    }
-
-    #[test]
-    fn credential_name_is_bound() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("This computer", &THIS_MACHINE, "inforno-vault").unwrap();
-        let mut file = v.file.clone();
-        if let SlotKind::Sealed { name, .. } = &mut file.slots[0].kind {
-            *name = "something-else".into();
-        }
-        assert!(matches!(file.unlock_sealed(&THIS_MACHINE), Err(VaultError::Seal(_))));
-    }
-
-    #[test]
-    fn wrong_passphrase_is_rejected() {
-        let mut v = sample_vault();
-        v.add_passphrase_slot("Paper backup", "right").unwrap();
-        let (_dir, path) = saved(&mut v);
-        let file = VaultFile::load(&path).unwrap();
-        assert!(matches!(file.unlock_with_passphrase("wrong"), Err(VaultError::WrongKey)));
-        assert!(matches!(file.unlock_sealed(&THIS_MACHINE), Err(VaultError::NoSuchSlot)));
-    }
-
-    #[test]
-    fn slot_rules() {
-        let mut v = sample_vault();
+    fn missing_file_is_empty_and_emptying_removes_it() {
         let dir = tempfile::tempdir().unwrap();
-        // No slot yet: refusing to save avoids an unopenable vault.
-        assert!(matches!(v.save(&dir.path().join("v")), Err(VaultError::LastSlot)));
-        v.add_sealed_slot("a", &THIS_MACHINE, "inforno-vault").unwrap();
-        assert!(matches!(v.remove_slot(0), Err(VaultError::LastSlot)));
-        v.add_passphrase_slot("b", "pw").unwrap();
-        v.remove_slot(0).unwrap();
-        assert_eq!(v.slots()[0].label, "b");
-        assert!(matches!(v.remove_slot(5), Err(VaultError::NoSuchSlot)));
+        let path = dir.path().join("sub/keys.cred"); // parent created on save
+        assert!(Vault::load(&path, &THIS_MACHINE).unwrap().is_empty());
+
+        sample().save(&path, &THIS_MACHINE).unwrap();
+        let mut v = Vault::load(&path, &THIS_MACHINE).unwrap();
+        v.remove("openrouter");
+        v.remove("anthropic");
+        v.save(&path, &THIS_MACHINE).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
-    fn tampered_secrets_are_rejected() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("a", &THIS_MACHINE, "inforno-vault").unwrap();
-        let (_dir, path) = saved(&mut v);
-
-        let mut file = VaultFile::load(&path).unwrap();
-        let mut ct = hex::decode(&file.ciphertext).unwrap();
-        ct[0] ^= 1;
-        file.ciphertext = hex::encode(ct);
-        assert!(matches!(file.unlock_sealed(&THIS_MACHINE), Err(VaultError::WrongKey)));
+    fn other_machine_cannot_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.cred");
+        sample().save(&path, &THIS_MACHINE).unwrap();
+        assert!(matches!(Vault::load(&path, &OTHER_MACHINE), Err(VaultError::Seal(_))));
     }
 
     #[test]
     fn file_is_private_and_holds_no_plaintext() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("a", &THIS_MACHINE, "inforno-vault").unwrap();
-        let (_dir, path) = saved(&mut v);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.cred");
+        sample().save(&path, &THIS_MACHINE).unwrap();
 
-        let text = std::fs::read_to_string(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
         assert!(!text.contains("sk-or-v1-abc") && !text.contains("openrouter"));
         #[cfg(unix)]
         {
@@ -582,15 +358,50 @@ mod tests {
         }
     }
 
-    /// Uses the real systemd-creds (systemd 256+ with `--user` support).
-    /// Run with: cargo test --release -p inforno_core vault -- --ignored
+    /// Uses the real systemd-creds (systemd 256+ with `--user`).
+    /// Run with: cargo test --release -p inforno_core vault -- --include-ignored
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
-    fn real_systemd_creds_round_trip() {
-        let mut v = sample_vault();
-        v.add_sealed_slot("This computer", &SystemdCreds, "inforno-vault-test").unwrap();
-        let (_dir, path) = saved(&mut v);
-        let v = VaultFile::load(&path).unwrap().unlock_sealed(&SystemdCreds).unwrap();
-        assert_eq!(v.get("openrouter").unwrap().expose_secret(), "sk-or-v1-abc");
+    fn real_systemd_creds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.cred");
+        sample().save(&path, &SystemdCreds).unwrap();
+
+        let v = Vault::load(&path, &SystemdCreds).unwrap();
+        assert_eq!(v.get("anthropic").unwrap().expose_secret(), "sk-ant-xyz");
+
+        // No plain text on disk, and a damaged file is rejected
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("sk-ant-xyz"));
+        let mid = bytes.len() / 2;
+        bytes[mid] = if bytes[mid] == b'A' { b'B' } else { b'A' };
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(Vault::load(&path, &SystemdCreds).is_err());
+    }
+
+    /// Uses the real DPAPI. Run on Windows with:
+    /// cargo test --release -p inforno_core vault -- --include-ignored
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn real_dpapi() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.cred");
+        sample().save(&path, &Dpapi).unwrap();
+
+        let v = Vault::load(&path, &Dpapi).unwrap();
+        assert_eq!(v.get("anthropic").unwrap().expose_secret(), "sk-ant-xyz");
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("sk-ant-xyz"));
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(Vault::load(&path, &Dpapi).is_err());
+
+        // Bound to the name, like systemd-creds
+        let sealed = Dpapi.seal("one-name", b"data").unwrap();
+        assert!(Dpapi.unseal("another-name", &sealed).is_err());
     }
 }

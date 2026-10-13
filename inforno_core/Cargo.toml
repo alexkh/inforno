@@ -37,3 +37,6 @@ fuser = "0.14.0"
 libc = "0.2.189"
 nix = { version = "0.31.3", features = ["user", "mount", "sched", "process", "fs"] }
 tempfile = "3.27.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
