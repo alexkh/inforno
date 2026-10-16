@@ -23,6 +23,13 @@ use secrecy::{ExposeSecret, SecretString};
 /// Bound into the sealed file: it can't be unsealed as any other credential.
 pub const CREDENTIAL_NAME: &str = "inforno-api-keys";
 
+/// Inforno's key file: `api-keys.cred` in the user's local data directory
+/// (`~/.local/share/inforno` on Linux, `%LOCALAPPDATA%\inforno\data` on
+/// Windows). Local rather than roaming: the file is bound to this machine.
+pub fn default_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("", "", "inforno").map(|d| d.data_local_dir().join("api-keys.cred"))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     #[error("could not read or write the key file: {0}")]

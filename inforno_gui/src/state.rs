@@ -7,11 +7,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use dotenv::dotenv;
 use eframe::egui::{self};
 use egui_commonmark::CommonMarkCache;
-use keyring::Entry;
 use rusqlite::Connection;
 use tokio::runtime::Handle;
 use egui::Color32;
-use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, KEYRING_INFO, OllamaDownloading, Presets, load_presets};
+use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, OllamaDownloading, Presets, load_presets};
 use inforno_core::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, mod_msg_content_reasoning};
 use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_names, get_openr_model_names};
 use crate::agent_config::{AgentConfigState, ui_agent_config};
@@ -138,7 +137,10 @@ pub struct State {
     pub workflow_editor_state: WorkflowEditorState,
     pub api_key_entered: String,
     pub openrouter_api_key: ApiKey,
-    pub keyring_used: bool,
+    /// The active OpenRouter key is saved in the encrypted key file.
+    pub key_saved: bool,
+    /// Why the encrypted key file couldn't be read at startup, if it couldn't.
+    pub vault_error: Option<String>,
     pub preset_editor_state: PresetEditorState,
     pub openr_model_names: Vec<String>,
     pub ollama_model_names: Vec<String>,
@@ -343,9 +345,10 @@ impl State {
             active_chat_id = Some(0);
         }
 
-        // --- 2. API Key Retrieval (Env or Keyring) ---
+        // --- 2. API Key Retrieval (Env, then the encrypted key file) ---
         let mut api_key = ApiKey::default();
-        let mut is_keyring_used = false;
+        let mut key_saved = false;
+        let mut vault_error = None;
 
         dotenv().ok(); // Reload env vars if they changed
 
@@ -353,20 +356,25 @@ impl State {
             api_key.key = env_key.into();
             api_key.is_set = true;
         } else {
-            if let Ok(entry) = Entry::new(KEYRING_INFO[0], KEYRING_INFO[1]) {
-                match entry.get_password() {
-                    Ok(retrieved) => {
-                        println!("key retrieved!");
-                        is_keyring_used = true;
-                        api_key.key = retrieved.into();
-                        api_key.is_set = true;
-                    },
-                    Err(error) => {
-                        println!("Failed to retrieve key: {}", error);
-                    },
+            let stored = match crate::key_manager::load_openrouter_key() {
+                Ok(Some(key)) => Some(key),
+                // Nothing saved yet: older versions kept the key in the
+                // system keyring; move it over (checked only once).
+                Ok(None) => {
+                    let (key, error) = crate::key_manager::migrate_from_keyring();
+                    vault_error = error;
+                    key
                 }
-            } else {
-                println!("Failed to access the system keyring to get the API key.");
+                Err(error) => {
+                    eprintln!("Could not read the encrypted API key file: {error}");
+                    vault_error = Some(error);
+                    None
+                }
+            };
+            if let Some(key) = stored {
+                api_key.key = key;
+                api_key.is_set = true;
+                key_saved = vault_error.is_none();
             }
         }
 
@@ -499,7 +507,8 @@ impl State {
             },
             api_key_entered: String::new(),
             openrouter_api_key: api_key,
-            keyring_used: is_keyring_used,
+            key_saved,
+            vault_error,
             preset_editor_state: PresetEditorState {
                 ollama_downloading: Arc::new(
                 Mutex::new(OllamaDownloading::default())),

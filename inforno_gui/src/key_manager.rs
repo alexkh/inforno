@@ -1,10 +1,10 @@
 use eframe::egui::{self, RichText, TextEdit, Vec2b};
-use keyring::Entry;
 use rust_i18n::t;
-use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use secrecy::zeroize::Zeroize;
 
 use inforno_core::common::{ApiKey, KEYRING_INFO};
+use inforno_core::vault::{self, Vault};
 use crate::state::State;
 
 pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
@@ -20,24 +20,27 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
 
         ui.label(RichText::new(t!("openrouter_api_key")).strong());
 
-        if state.keyring_used {
+        if let Some(error) = &state.vault_error {
+            ui.add_space(10.0);
+            ui.colored_label(ui.visuals().error_fg_color, format!("The encrypted key file couldn't be read: {error}"));
+            ui.label("Saving a key replaces it; the old file is kept as api-keys.unreadable.");
+        }
+
+        if state.key_saved {
             ui.add_space(20.0);
             ui.label(t!("openrouter_key_is_set"));
             ui.add_space(10.0);
 
             if ui.button(t!("delete_openrouter_key_btn")).clicked() {
-                // delete the key from the system keyring:
-                if let Ok(entry) = Entry::new(KEYRING_INFO[0], KEYRING_INFO[1]) {
-                    match entry.delete_credential() {
-                        Ok(_result) => {
-                            state.keyring_used = false;
-                            println!("{}!", t!("key_deleted_from_keyring"));
-                        },
-                        Err(error) => {
-                            println!("{}: {}",
-                                t!("error_deleting_key_from_keyring"), error);
-                        },
-                    }
+                // remove the key from the encrypted key file:
+                match store_openrouter_key(None) {
+                    Ok(()) => {
+                        state.key_saved = false;
+                        println!("OpenRouter API key removed from the encrypted key file.");
+                    },
+                    Err(error) => {
+                        println!("Could not remove the API key: {}", error);
+                    },
                 }
             }
             ui.add_space(20.0);
@@ -76,29 +79,107 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
 
             ui.add_space(10.0);
 
-            if ui.add_enabled(is_button_enabled,
-                    egui::Button::new(t!("save_to_keyring_btn"))).clicked() {
+            let can_save = is_button_enabled && vault::platform_sealer().is_some();
+            if ui.add_enabled(can_save, egui::Button::new("💾 Save encrypted"))
+                    .on_hover_text(storage_description())
+                    .clicked() {
                 let new_key = ApiKey {
                     key: state.api_key_entered.clone().into(),
                     is_set: true,
                 };
                 state.api_key_entered.zeroize();
 
-                // store the key into the system keyring:
-                if let Ok(entry) = Entry::new(KEYRING_INFO[0], KEYRING_INFO[1]) {
-                    match entry.set_password(new_key.key.expose_secret()) {
-                        Ok(_result) => {
-                            println!("{}", t!("key_saved_to_keyring"));
-                        },
-                        Err(error) => {
-                            println!("{}: {}",
-                                t!("error_saving_key_to_keyring"), error);
-                        },
-                    }
+                // store the key in the encrypted key file:
+                match store_openrouter_key(Some(&new_key.key)) {
+                    Ok(()) => {
+                        state.key_saved = true;
+                        state.vault_error = None;
+                        println!("OpenRouter API key saved to the encrypted key file.");
+                    },
+                    Err(error) => {
+                        println!("Could not save the API key: {}", error);
+                    },
                 }
                 state.openrouter_api_key = new_key;
             }
         });
 
     });
+}
+
+// --- Encrypted key storage (inforno_core::vault) ---
+
+/// Vault entry of the OpenRouter key.
+const OPENROUTER: &str = "openrouter";
+
+fn vault_location() -> Result<(std::path::PathBuf, Box<dyn vault::Sealer>), String> {
+    let sealer = vault::platform_sealer()
+        .ok_or_else(|| "encrypted key storage isn't available on this platform".to_string())?;
+    let path = vault::default_path().ok_or_else(|| "could not find the user data directory".to_string())?;
+    Ok((path, sealer))
+}
+
+/// What protects saved keys, for tooltips (and later the security report).
+pub fn storage_description() -> &'static str {
+    vault::platform_sealer().map_or("not available on this platform", |s| s.description())
+}
+
+/// The OpenRouter key from the encrypted key file, if one is stored there.
+pub fn load_openrouter_key() -> Result<Option<SecretString>, String> {
+    let (path, sealer) = vault_location()?;
+    let vault = Vault::load(&path, sealer.as_ref()).map_err(|e| e.to_string())?;
+    Ok(vault.get(OPENROUTER).cloned())
+}
+
+/// Stores the OpenRouter key in the encrypted key file, or removes it
+/// (`None`). A key file that can't be decrypted any more (e.g. after a TPM
+/// reset) is moved aside as `api-keys.unreadable` and replaced.
+pub fn store_openrouter_key(key: Option<&SecretString>) -> Result<(), String> {
+    let (path, sealer) = vault_location()?;
+    let mut vault = match Vault::load(&path, sealer.as_ref()) {
+        Ok(vault) => vault,
+        Err(e) => {
+            let aside = path.with_extension("unreadable");
+            std::fs::rename(&path, &aside).map_err(|re| format!("{e} (and moving it aside failed: {re})"))?;
+            eprintln!("Unreadable key file moved to {} ({e})", aside.display());
+            Vault::default()
+        }
+    };
+    match key {
+        Some(key) => vault.set(OPENROUTER, key.clone()),
+        None => {
+            vault.remove(OPENROUTER);
+        }
+    }
+    vault.save(&path, sealer.as_ref()).map_err(|e| e.to_string())
+}
+
+/// Moves the OpenRouter key from the system keyring, where older versions
+/// kept it, into the encrypted key file. Runs once: a marker file next to
+/// the key file records it, so the keyring (which may ask for its password)
+/// isn't touched again. Returns the key found, if any, and an error if it
+/// couldn't be stored (then the next start tries again).
+pub fn migrate_from_keyring() -> (Option<SecretString>, Option<String>) {
+    let Ok((path, _)) = vault_location() else { return (None, None) };
+    let marker = path.with_extension("keyring-migrated");
+    if marker.exists() {
+        return (None, None);
+    }
+
+    let entry = keyring::Entry::new(KEYRING_INFO[0], KEYRING_INFO[1]).ok();
+    let key = entry.as_ref().and_then(|e| e.get_password().ok()).map(SecretString::from);
+    if let Some(key) = &key {
+        if let Err(e) = store_openrouter_key(Some(key)) {
+            return (Some(key.clone()), Some(e));
+        }
+        if let Some(entry) = &entry {
+            let _ = entry.delete_credential();
+        }
+        println!("OpenRouter API key moved from the system keyring into the encrypted key file.");
+    }
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&marker, b"");
+    (key, None)
 }
