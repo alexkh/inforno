@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock, RwLock, Mutex};
@@ -139,8 +138,10 @@ pub struct State {
     pub openrouter_api_key: ApiKey,
     /// The active OpenRouter key is saved in the encrypted key file.
     pub key_saved: bool,
-    /// Why the encrypted key file couldn't be read at startup, if it couldn't.
+    /// Why saved keys couldn't be read or saved, if they couldn't.
     pub vault_error: Option<String>,
+    /// Which vaultorno backend holds saved keys, and until when.
+    pub key_storage: crate::key_manager::KeyStorage,
     pub preset_editor_state: PresetEditorState,
     pub openr_model_names: Vec<String>,
     pub ollama_model_names: Vec<String>,
@@ -345,36 +346,26 @@ impl State {
             active_chat_id = Some(0);
         }
 
-        // --- 2. API Key Retrieval (Env, then the encrypted key file) ---
+        // --- 2. API Key: saved in vaultorno, or entered for this session only ---
         let mut api_key = ApiKey::default();
         let mut key_saved = false;
         let mut vault_error = None;
+        let mut key_storage = crate::key_manager::KeyStorage::default();
 
-        dotenv().ok(); // Reload env vars if they changed
+        dotenv().ok(); // OPENROUTER_API_URLS may still come from .env
 
-        if let Ok(env_key) = env::var("OPENROUTER_API_KEY") {
-            api_key.key = env_key.into();
-            api_key.is_set = true;
-        } else {
-            let stored = match crate::key_manager::load_openrouter_key() {
-                Ok(Some(key)) => Some(key),
-                // Nothing saved yet: older versions kept the key in the
-                // system keyring; move it over (checked only once).
-                Ok(None) => {
-                    let (key, error) = crate::key_manager::migrate_from_keyring();
-                    vault_error = error;
-                    key
+        match crate::key_manager::load_openrouter_key() {
+            Ok((key, storage)) => {
+                key_storage = storage;
+                if let Some(key) = key {
+                    api_key.key = key;
+                    api_key.is_set = true;
+                    key_saved = true;
                 }
-                Err(error) => {
-                    eprintln!("Could not read the encrypted API key file: {error}");
-                    vault_error = Some(error);
-                    None
-                }
-            };
-            if let Some(key) = stored {
-                api_key.key = key;
-                api_key.is_set = true;
-                key_saved = vault_error.is_none();
+            }
+            Err(error) => {
+                eprintln!("Saved API keys aren't available: {error}");
+                vault_error = Some(error);
             }
         }
 
@@ -509,6 +500,7 @@ impl State {
             openrouter_api_key: api_key,
             key_saved,
             vault_error,
+            key_storage,
             preset_editor_state: PresetEditorState {
                 ollama_downloading: Arc::new(
                 Mutex::new(OllamaDownloading::default())),

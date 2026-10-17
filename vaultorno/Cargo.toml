@@ -1,0 +1,31 @@
+[package]
+name = "vaultorno"
+description = "Locker room for disposable secrets: daemon, inspector and admin commands in one executable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "vaultorno"
+path = "src/main.rs"
+
+[features]
+# Milestone 1 only: lets `vaultorno daemon --test-identity` trust unsigned
+# statements, without hash or signature checks. Never enable in a release.
+test_identity = []
+
+[dependencies]
+vaultorno_client = { path = "../vaultorno_client", default-features = false }
+serde_json = "1"
+zeroize = "1"
+rustix = { version = "1", features = ["fs", "net", "process"] }
+getrandom = "0.3"
+
+[dev-dependencies]
+vaultorno_client = { path = "../vaultorno_client", features = ["testing"] }
+tempfile = "3"
+base64 = "0.22"
+
+[[test]]
+name = "end_to_end"
+required-features = ["test_identity"]

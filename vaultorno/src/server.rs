@@ -1,0 +1,470 @@
+//! The daemon (`vaultorno daemon`): one thread per connection, one vault per
+//! connection, four requests (design doc §9). It stores and serves the
+//! client's envelopes and checks only their shape: it has no key to them.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
+
+use vaultorno_client::protocol::{
+    ErrorCode, Frame, FrameError, LockerInfo, MAX_LOCKERS_PER_APP, PROTOCOL, Request, Response,
+    ShapeError, check_envelope_shape, read_frame, write_frame,
+};
+use vaultorno_client::time::Clock;
+use zeroize::Zeroize;
+
+use crate::identity::{Identify, Identity, Peer};
+use crate::store::{Header, Store, VaultLock};
+
+/// Connections one user may hold open (§10).
+pub const MAX_CONNECTIONS_PER_USER: usize = 32;
+/// Vaults one user may have (§10).
+pub const MAX_VAULTS_PER_USER: usize = 64;
+/// How long a new connection has to say `Hello`.
+pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// What `Welcome.sealer` reports in Milestone 1.
+pub const SEALER: &str = "none: Milestone 1 has no outer encryption";
+
+/// The daemon.
+pub struct Server {
+    store: Store,
+    identity: Box<dyn Identify>,
+    clock: Arc<dyn Clock>,
+    connections: Mutex<HashMap<u32, usize>>,
+    refused: Mutex<HashMap<(u32, String), u32>>,
+}
+
+fn error(code: ErrorCode, message: impl Into<String>) -> Response {
+    Response::Error {
+        code,
+        message: message.into(),
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A connection's place in its user's count, given back on drop.
+struct Slot<'a> {
+    server: &'a Server,
+    uid: u32,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut conns = lock(&self.server.connections);
+        if let Some(n) = conns.get_mut(&self.uid) {
+            *n -= 1;
+            if *n == 0 {
+                conns.remove(&self.uid);
+            }
+        }
+    }
+}
+
+impl Server {
+    pub fn new(store: Store, identity: Box<dyn Identify>, clock: Arc<dyn Clock>) -> Arc<Server> {
+        Arc::new(Server {
+            store,
+            identity,
+            clock,
+            connections: Mutex::new(HashMap::new()),
+            refused: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Listens on `socket` (mode `0666`: access is decided per connection)
+    /// until the listener fails. Socket activation arrives in Milestone 4.
+    pub fn listen(self: &Arc<Self>, socket: &Path) -> io::Result<()> {
+        if let Ok(meta) = fs::symlink_metadata(socket) {
+            if !meta.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} isn't a socket", socket.display()),
+                ));
+            }
+            fs::remove_file(socket)?;
+        }
+        let listener = UnixListener::bind(socket)?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o666))?;
+        for stream in listener.incoming() {
+            let stream = match stream {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("vaultorno daemon: accept failed: {e}");
+                    continue;
+                }
+            };
+            let peer = match peer_of(&stream) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("vaultorno daemon: no peer credentials: {e}");
+                    continue;
+                }
+            };
+            let server = Arc::clone(self);
+            thread::spawn(move || server.serve(stream, peer));
+        }
+        Ok(())
+    }
+
+    /// Serves one connection from `peer` until it closes.
+    pub fn serve(&self, stream: UnixStream, peer: Peer) {
+        let Some(_slot) = self.claim_slot(peer.uid) else {
+            refuse_busy(&stream);
+            return;
+        };
+        // Any error, including a malformed or oversized frame, closes the
+        // connection (§9).
+        let _ = self.session(&stream, peer);
+    }
+
+    fn claim_slot(&self, uid: u32) -> Option<Slot<'_>> {
+        let mut conns = lock(&self.connections);
+        let n = conns.entry(uid).or_default();
+        if *n >= MAX_CONNECTIONS_PER_USER {
+            return None;
+        }
+        *n += 1;
+        Some(Slot { server: self, uid })
+    }
+
+    fn session(&self, stream: &UnixStream, peer: Peer) -> Result<(), FrameError> {
+        let mut io = stream;
+        stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
+        let Some(first) = read_frame::<_, Request>(&mut io)? else {
+            return Ok(());
+        };
+        let id = first.id;
+        let reply = |body: Response| write_frame(&mut &*stream, &Frame { id, body });
+
+        let (statement, signature) = match first.body {
+            Request::Hello {
+                protocol,
+                statement,
+                signature,
+                ..
+            } => {
+                if protocol != PROTOCOL {
+                    return reply(error(
+                        ErrorCode::ProtocolMismatch,
+                        format!("this daemon speaks protocol {PROTOCOL}"),
+                    ));
+                }
+                (statement, signature)
+            }
+            _ => {
+                return reply(error(
+                    ErrorCode::ProtocolMismatch,
+                    "the first request must be hello",
+                ));
+            }
+        };
+
+        let now = self.clock.now();
+        let ident =
+            match self
+                .identity
+                .identify(&peer, statement.as_deref(), signature.as_deref(), now)
+            {
+                Ok(i) => i,
+                Err(refusal) => {
+                    if let Some(vault) = refusal.vault {
+                        *lock(&self.refused).entry((peer.uid, vault)).or_default() += 1;
+                    }
+                    return reply(error(ErrorCode::NotAllowed, refusal.message));
+                }
+            };
+        let half = match self.open_vault(&peer, &ident) {
+            Ok(Ok(half)) => half,
+            Ok(Err(refused)) => return reply(refused),
+            Err(e) => return reply(error(ErrorCode::Storage, e.to_string())),
+        };
+        let refused = lock(&self.refused)
+            .remove(&(peer.uid, ident.vault.clone()))
+            .unwrap_or(0);
+        let mut welcome = Frame {
+            id,
+            body: Response::Welcome {
+                protocol: PROTOCOL,
+                app: ident.app.clone(),
+                vault: ident.vault.clone(),
+                binary: ident.binary.clone(),
+                level: ident.level.clone(),
+                sealer: SEALER.into(),
+                half: half.to_vec(),
+                statement_expires: ident.statement_expires,
+                refused,
+            },
+        };
+        let sent = write_frame(&mut io, &welcome);
+        if let Response::Welcome { half, .. } = &mut welcome.body {
+            half.zeroize();
+        }
+        sent?;
+
+        stream.set_read_timeout(None)?;
+        while let Some(frame) = read_frame::<_, Request>(&mut io)? {
+            let body = self.handle(&peer, &ident, frame.body);
+            write_frame(&mut io, &Frame { id: frame.id, body })?;
+        }
+        Ok(())
+    }
+
+    /// Creates the vault if needed (within the vault limit) and returns its
+    /// daemon half.
+    #[allow(clippy::type_complexity)]
+    fn open_vault(
+        &self,
+        peer: &Peer,
+        ident: &Identity,
+    ) -> io::Result<Result<zeroize::Zeroizing<[u8; 32]>, Response>> {
+        if !self.store.vault_exists(peer.uid, &ident.vault)
+            && self.store.vault_count(peer.uid)? >= MAX_VAULTS_PER_USER
+        {
+            return Ok(Err(error(
+                ErrorCode::NotAllowed,
+                format!("this user already has {MAX_VAULTS_PER_USER} vaults"),
+            )));
+        }
+        let lock = self.store.lock_vault(peer.uid, &ident.vault)?;
+        Ok(Ok(self.store.daemon_half(&lock, peer.uid, &ident.vault)?))
+    }
+
+    fn handle(&self, peer: &Peer, ident: &Identity, request: Request) -> Response {
+        let result = match request {
+            Request::Hello { .. } => {
+                return error(ErrorCode::ProtocolMismatch, "already said hello");
+            }
+            Request::List => self.list(peer, ident),
+            Request::Get { locker } => self.get(peer, ident, &locker),
+            Request::Put {
+                locker,
+                data,
+                expected,
+            } => self.put(peer, ident, &locker, &data, expected),
+        };
+        result.unwrap_or_else(|e| error(ErrorCode::Storage, e.to_string()))
+    }
+
+    /// Reads a locker, emptying it first if it has expired.
+    fn live(
+        &self,
+        lock: &VaultLock,
+        peer: &Peer,
+        ident: &Identity,
+        locker: &str,
+        now: u64,
+    ) -> io::Result<Option<(Header, Vec<u8>)>> {
+        match self
+            .store
+            .read_locker(lock, peer.uid, &ident.vault, locker)?
+        {
+            Some((h, _)) if h.is_expired(now) => {
+                self.store
+                    .delete_locker(lock, peer.uid, &ident.vault, locker)?;
+                Ok(None)
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn unknown(ident: &Identity, locker: &str) -> Response {
+        error(
+            ErrorCode::UnknownLocker,
+            format!("{locker} isn't in {}'s statement", ident.binary),
+        )
+    }
+
+    fn list(&self, peer: &Peer, ident: &Identity) -> io::Result<Response> {
+        let lock = self.store.lock_vault(peer.uid, &ident.vault)?;
+        let now = self.clock.now();
+        let mut lockers = Vec::with_capacity(ident.lockers.len());
+        for (name, grant) in &ident.lockers {
+            let (revision, size, expires) =
+                match self
+                    .store
+                    .locker_header(&lock, peer.uid, &ident.vault, name)?
+                {
+                    Some((h, _)) if h.is_expired(now) => {
+                        self.store
+                            .delete_locker(&lock, peer.uid, &ident.vault, name)?;
+                        (0, 0, None)
+                    }
+                    Some((h, size)) => (h.revision, size as u32, Some(h.expires)),
+                    None => (0, 0, None),
+                };
+            lockers.push(LockerInfo {
+                name: name.clone(),
+                revision,
+                size,
+                expires,
+                read: true,
+                write: grant.write,
+            });
+        }
+        Ok(Response::Lockers { lockers })
+    }
+
+    fn get(&self, peer: &Peer, ident: &Identity, locker: &str) -> io::Result<Response> {
+        if !ident.lockers.contains_key(locker) {
+            return Ok(Self::unknown(ident, locker));
+        }
+        let lock = self.store.lock_vault(peer.uid, &ident.vault)?;
+        Ok(
+            match self.live(&lock, peer, ident, locker, self.clock.now())? {
+                None => Response::Locker {
+                    data: Vec::new(),
+                    revision: 0,
+                    expires: None,
+                },
+                Some((h, body)) => Response::Locker {
+                    data: body,
+                    revision: h.revision,
+                    expires: Some(h.expires),
+                },
+            },
+        )
+    }
+
+    fn put(
+        &self,
+        peer: &Peer,
+        ident: &Identity,
+        locker: &str,
+        data: &[u8],
+        expected: u64,
+    ) -> io::Result<Response> {
+        let Some(grant) = ident.lockers.get(locker) else {
+            return Ok(Self::unknown(ident, locker));
+        };
+        if !grant.write {
+            return Ok(error(
+                ErrorCode::NotAllowed,
+                format!("{locker} is read-only for {}", ident.binary),
+            ));
+        }
+        if !data.is_empty() {
+            match check_envelope_shape(data) {
+                Ok(()) => {}
+                Err(ShapeError::TooLarge) => {
+                    return Ok(error(ErrorCode::TooLarge, "a locker holds at most 256 KiB"));
+                }
+                Err(ShapeError::NotSealed) => {
+                    return Ok(error(
+                        ErrorCode::NotSealed,
+                        "data isn't a client envelope; use vaultorno_client",
+                    ));
+                }
+            }
+        }
+
+        let lock = self.store.lock_vault(peer.uid, &ident.vault)?;
+        let now = self.clock.now();
+        let current = self.live(&lock, peer, ident, locker, now)?;
+        let current_revision = current.as_ref().map_or(0, |(h, _)| h.revision);
+        if current_revision != expected {
+            return Ok(error(
+                ErrorCode::Conflict,
+                format!("revision is {current_revision:x}, not {expected:x}"),
+            ));
+        }
+        if data.is_empty() {
+            if current.is_some() {
+                self.store
+                    .delete_locker(&lock, peer.uid, &ident.vault, locker)?;
+            }
+            return Ok(Response::Stored {
+                revision: 0,
+                expires: 0,
+            });
+        }
+        let expires = match &current {
+            // Rewriting never extends the expiry (§6).
+            Some((h, _)) => h.expires,
+            None => {
+                let mut filled = Vec::new();
+                for name in self.store.filled_lockers(&lock, peer.uid, &ident.vault)? {
+                    match self
+                        .store
+                        .locker_header(&lock, peer.uid, &ident.vault, &name)?
+                    {
+                        Some((h, _)) if h.is_expired(now) => {
+                            self.store
+                                .delete_locker(&lock, peer.uid, &ident.vault, &name)?
+                        }
+                        Some(_) => filled.push(name),
+                        None => {}
+                    }
+                }
+                if filled.len() >= MAX_LOCKERS_PER_APP {
+                    return Ok(error(
+                        ErrorCode::NotAllowed,
+                        format!("this app already uses {MAX_LOCKERS_PER_APP} lockers"),
+                    ));
+                }
+                now + grant.lifetime_secs
+            }
+        };
+        let revision = new_revision(current_revision)?;
+        self.store.write_locker(
+            &lock,
+            peer.uid,
+            &ident.vault,
+            locker,
+            &Header { revision, expires },
+            data,
+        )?;
+        Ok(Response::Stored { revision, expires })
+    }
+}
+
+/// Over the connection limit: answer the first request with `Busy`, then
+/// close.
+fn refuse_busy(stream: &UnixStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let id = read_frame::<_, Request>(&mut &*stream)
+        .ok()
+        .flatten()
+        .map_or(0, |f| f.id);
+    let _ = write_frame(
+        &mut &*stream,
+        &Frame {
+            id,
+            body: error(
+                ErrorCode::Busy,
+                format!("this user already has {MAX_CONNECTIONS_PER_USER} connections"),
+            ),
+        },
+    );
+}
+
+fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
+    let cred = rustix::net::sockopt::socket_peercred(stream).map_err(io::Error::from)?;
+    Ok(Peer {
+        uid: cred.uid.as_raw(),
+        pid: Some(cred.pid.as_raw_nonzero().get()),
+    })
+}
+
+fn new_revision(previous: u64) -> io::Result<u64> {
+    loop {
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).map_err(|e| io::Error::other(format!("no randomness: {e}")))?;
+        let r = u64::from_be_bytes(b);
+        if r != 0 && r != previous {
+            return Ok(r);
+        }
+    }
+}

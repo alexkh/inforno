@@ -15,8 +15,6 @@ use crate::db::{CURRENT_SANDBOX_VERSION, mk_agent};
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::images::Image;
 
-pub static KEYRING_INFO: &'static [&str] = &["com.wizstaff.inforno", "openr"];
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub filename: String,

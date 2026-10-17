@@ -1,0 +1,52 @@
+[package]
+name = "vaultorno_client"
+description = "The only API apps use to keep disposable secrets in vaultorno"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["seal"]
+# Everything that touches keys or contents: the envelope, the user's half,
+# the Vault API and its backends. The daemon depends on this crate with
+# default features off, so none of this is linked into it.
+seal = [
+    "dep:chacha20poly1305",
+    "dep:hkdf",
+    "dep:sha2",
+    "dep:secrecy",
+    "dep:libc",
+    "dep:rustix",
+    "dep:getrandom",
+    "dep:windows-sys",
+]
+# The shared backend test suite (§17), run against both the daemon and Local.
+testing = ["seal"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+thiserror = "2"
+zeroize = "1"
+
+chacha20poly1305 = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+secrecy = { version = "0.10", optional = true }
+getrandom = { version = "0.3", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+rustix = { version = "1", features = ["fs", "process", "net"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -3,7 +3,14 @@ members = [
     "inforno_core",
     "inforno_gui",
     "autorno",
-    "bulat"
+    "bulat",
+    "vaultorno",
+    "vaultorno_client",
 ]
 default-members = ["inforno_gui"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"

@@ -32,6 +32,7 @@ argon2 = "0.6.0"
 getrandom = "0.4.3"
 hex = "0.4.3"
 tempfile = "3.27.0"
+vaultorno_client = { path = "../vaultorno_client" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.14.0"

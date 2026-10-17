@@ -12,4 +12,4 @@ pub mod realm_spawn;
 
 pub mod scripting;
 pub mod parsing;
-pub mod vault;
+pub mod api_keys;
