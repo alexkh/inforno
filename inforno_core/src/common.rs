@@ -22,6 +22,22 @@ pub struct Attachment {
     pub content: String,   // Raw text or base64 encoded data
 }
 
+pub fn format_deep_copy(prompt: &str, attachments: &[Attachment]) -> String {
+    let mut full_content = prompt.to_string();
+    for att in attachments {
+        if att.mime_type.starts_with("text/") {
+            full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
+            full_content.push_str(&att.content);
+        } else if att.mime_type.starts_with("image/") {
+            full_content.push_str(&format!(
+                "\n\n![{}](data:{};base64,{})\n",
+                att.filename, att.mime_type, att.content
+            ));
+        }
+    }
+    full_content
+}
+
 // when streaming a chat, this structure is passed to the GUI
 pub enum ChatStreamEvent {
     Content(usize, String),
