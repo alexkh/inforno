@@ -8,7 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use egui::{Margin, RichText, Stroke};
 use rust_i18n::t;
 
-use inforno_core::common::{Attachment, ChatMsg};
+use inforno_core::common::{Attachment, ChatMsg, MsgRole, format_deep_copy};
 
 use crate::state::ChatMsgUi;
 
@@ -165,6 +165,16 @@ fn render_msg_header(
             // Added first, so it ends up on the far right
             if ui.button("🗐").on_hover_text("Copy raw message to clipboard").clicked() {
                 ui.ctx().copy_text(msg.content.clone());
+            }
+            if msg.msg_role == MsgRole::User {
+                if ui.button("📚").on_hover_text("Deep copy (message + attached files) to clipboard").clicked() {
+                    let attachments: Vec<Attachment> = msg.details
+                        .as_deref()
+                        .and_then(|d| serde_json::from_str(d).ok())
+                        .unwrap_or_default();
+                    let deep_text = format_deep_copy(&msg.content, &attachments);
+                    ui.ctx().copy_text(deep_text);
+                }
             }
             if ui.toggle_value(&mut msg_ui.show_raw, "Raw").clicked() {
                 println!("Raw button clicked");

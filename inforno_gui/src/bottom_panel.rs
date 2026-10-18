@@ -207,6 +207,20 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
                                 }
                             }
                         }).0.on_hover_text("Attachments");
+
+                        ui.add_space(4.0);
+
+                        // More Options Menu Button
+                        ui.menu_button("...", |ui| {
+                            if ui.button("Deep copy").clicked() {
+                                let deep_text = inforno_core::common::format_deep_copy(
+                                    &state.bottom_panel_state.prompt_edited,
+                                    &state.bottom_panel_state.pending_attachments,
+                                );
+                                ui.ctx().copy_text(deep_text);
+                                ui.close();
+                            }
+                        }).response.on_hover_text("More options");
                     });
 
                     // --- Column 1: System Prompt ---
