@@ -75,15 +75,19 @@ impl DaemonConn {
     pub(crate) fn open(
         stream: UnixStream,
         app: &str,
-        statement: StatementFiles,
+        statement: Option<StatementFiles>,
         home: &Path,
         uid: u32,
     ) -> Result<DaemonConn, Error> {
         let mut conn = Conn { stream, next_id: 1 };
+        let (st_text, signature) = match statement {
+            Some(s) => (Some(s.statement), s.signature),
+            None => (None, None),
+        };
         let reply = conn.request(Request::Hello {
             protocol: PROTOCOL,
-            statement: Some(statement.statement),
-            signature: statement.signature,
+            statement: st_text,
+            signature,
             succession: None,
         })?;
         let Response::Welcome {

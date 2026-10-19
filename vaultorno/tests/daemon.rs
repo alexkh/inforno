@@ -63,7 +63,7 @@ impl Env {
     fn stream(&self, uid: u32) -> UnixStream {
         let (client, daemon) = UnixStream::pair().unwrap();
         let server = self.server.clone();
-        thread::spawn(move || server.serve(daemon, Peer { uid, pid: None }));
+        thread::spawn(move || server.serve(daemon, Peer::without_pidfd(uid, None)));
         client
     }
 
@@ -230,15 +230,7 @@ fn no_plaintext_canary_reaches_the_daemon() {
     let (client, proxy_client) = UnixStream::pair().unwrap();
     let (proxy_daemon, daemon) = UnixStream::pair().unwrap();
     let server = env.server.clone();
-    thread::spawn(move || {
-        server.serve(
-            daemon,
-            Peer {
-                uid: UID,
-                pid: None,
-            },
-        )
-    });
+    thread::spawn(move || server.serve(daemon, Peer::without_pidfd(UID, None)));
     let up = Arc::new(Mutex::new(Vec::new()));
     let down = Arc::new(Mutex::new(Vec::new()));
     let pumps = [
@@ -750,4 +742,309 @@ fn the_sweep_deletes_expired_lockers_and_stale_vaults() {
     let r = sweep(env.store(), env.clock.now()).unwrap();
     assert_eq!(r.stale_vaults, 1);
     assert!(!env.store().vault_exists(UID, "test_suite"));
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 2: Package manifests, inspector, environment & ptrace_scope checks
+
+struct ManifestEnv {
+    server: Arc<Server>,
+    inspector: Arc<vaultorno::identity::FakeInspector>,
+    root: TempDir,
+    manifests_dir: PathBuf,
+    bin_dir: PathBuf,
+    ptrace_file: PathBuf,
+    writer_bin: PathBuf,
+    reader_bin: PathBuf,
+    unlisted_bin: PathBuf,
+    trusted_uid: u32,
+}
+
+fn manifest_env(test_fallback: bool) -> ManifestEnv {
+    use std::os::unix::fs::PermissionsExt;
+    use vaultorno::identity::{FakeInspector, ManifestIdentity};
+
+    let trusted_uid = rustix::process::geteuid().as_raw();
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let manifests_dir = root.path().join("manifests");
+    let bin_dir = root.path().join("bin");
+    fs::create_dir(&manifests_dir).unwrap();
+    fs::set_permissions(&manifests_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir(&bin_dir).unwrap();
+    fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let writer_bin = bin_dir.join("inforno");
+    let reader_bin = bin_dir.join("autorno");
+    let unlisted_bin = bin_dir.join("unlisted");
+    for (p, bytes) in [
+        (&writer_bin, b"#!/bin/sh\n# writer\n" as &[u8]),
+        (&reader_bin, b"#!/bin/sh\n# reader\n"),
+        (&unlisted_bin, b"#!/bin/sh\n# unlisted\n"),
+    ] {
+        fs::write(p, bytes).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let manifest_json = serde_json::json!({
+        "format": 1,
+        "app": "inforno",
+        "reject_env": ["INFORNO_PLUGIN_*"],
+        "binaries": {
+            "inforno": {
+                "path": writer_bin.to_str().unwrap(),
+                "lockers": { "api_keys": { "access": "write", "lifetime_days": 30 } }
+            },
+            "autorno": {
+                "path": reader_bin.to_str().unwrap(),
+                "lockers": { "api_keys": { "access": "read" } }
+            }
+        }
+    })
+    .to_string();
+    let manifest_path = manifests_dir.join("inforno.json");
+    fs::write(&manifest_path, manifest_json).unwrap();
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let ptrace_file = root.path().join("ptrace_scope");
+    fs::write(&ptrace_file, "1\n").unwrap();
+
+    let inspector = FakeInspector::new();
+    let identity = ManifestIdentity::for_testing(
+        &manifests_dir,
+        root.path(),
+        trusted_uid,
+        &ptrace_file,
+        inspector.clone(),
+        test_fallback,
+    );
+    let clock = Arc::new(FakeClock::new(START));
+    let store = Store::open(root.path().join("state")).unwrap();
+    let server = Server::new(store, Box::new(identity), clock);
+
+    ManifestEnv {
+        server,
+        inspector,
+        root,
+        manifests_dir,
+        bin_dir,
+        ptrace_file,
+        writer_bin,
+        reader_bin,
+        unlisted_bin,
+        trusted_uid,
+    }
+}
+
+impl ManifestEnv {
+    fn inspected_for(&self, bin: &Path, env_names: &[&str]) -> vaultorno_inspect::Inspected {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(bin).unwrap();
+        let bytes = fs::read(bin).unwrap();
+        let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+        vaultorno_inspect::Inspected {
+            pid: 4242,
+            uid: self.trusted_uid,
+            exe_path: bin.to_path_buf(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            sha256,
+            env_names: env_names.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    fn connect_as(
+        &self,
+        bin: &Path,
+        env_names: &[&str],
+        statement: Option<StatementFiles>,
+    ) -> Result<Vault, Error> {
+        self.inspector
+            .set_default(self.inspected_for(bin, env_names));
+        let (client, daemon) = UnixStream::pair().unwrap();
+        let server = self.server.clone();
+        let uid = self.trusted_uid;
+        thread::spawn(move || server.serve(daemon, Peer::without_pidfd(uid, Some(4242))));
+        let home = self.root.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        Vault::connect(DaemonOptions {
+            app: "inforno".into(),
+            socket: PathBuf::from("/nonexistent"),
+            stream: Some(client),
+            home: Some(home),
+            uid: Some(uid),
+            statement,
+        })
+    }
+}
+
+#[test]
+fn an_unlisted_binary_is_refused() {
+    let env = manifest_env(false);
+    match env.connect_as(&env.unlisted_bin, &["PATH", "HOME"], None) {
+        Err(Error::NotAllowed(msg)) => assert!(msg.contains("isn't listed"), "{msg}"),
+        other => panic!("expected NotAllowed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_read_only_manifest_binary_cannot_put() {
+    let env = manifest_env(false);
+    let writer = env
+        .connect_as(&env.writer_bin, &["PATH", "HOME"], None)
+        .unwrap();
+    assert_eq!(writer.vault_name(), Some("pkg_inforno"));
+    assert_eq!(writer.binary(), Some("inforno"));
+    assert_eq!(writer.statement_expires(), None);
+    assert!(writer.describe().contains("watertight"));
+    writer.put("api_keys", b"secret-from-manifest", 0).unwrap();
+
+    let reader = env
+        .connect_as(&env.reader_bin, &["PATH", "HOME"], None)
+        .unwrap();
+    assert_eq!(reader.binary(), Some("autorno"));
+    assert_eq!(
+        reader.get("api_keys").unwrap().data.expose_secret(),
+        b"secret-from-manifest"
+    );
+    match reader.put("api_keys", b"overwrite", 0) {
+        Err(Error::NotAllowed(msg)) => assert!(msg.contains("read-only"), "{msg}"),
+        other => panic!("expected NotAllowed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_rejected_environment_variable_gets_a_binary_refused() {
+    let env = manifest_env(false);
+    for bad in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "VK_LAYER_PATH",
+        "VK_ICD_FILENAMES",
+        "GTK_MODULES",
+        "INFORNO_PLUGIN_DIR",
+    ] {
+        match env.connect_as(&env.writer_bin, &["PATH", bad], None) {
+            Err(Error::NotAllowed(msg)) => assert_eq!(msg, format!("{bad} set")),
+            other => panic!("expected NotAllowed for {bad}, got {other:?}"),
+        }
+    }
+    // Next clean open sees the refused count on `pkg_inforno`.
+    let clean = env.connect_as(&env.writer_bin, &["PATH"], None).unwrap();
+    assert_eq!(clean.refused(), 6);
+}
+
+#[test]
+fn manifest_ignores_unsigned_dev_statement_and_allows_no_statement() {
+    // Even with test_fallback enabled and an unsigned dev statement in Hello,
+    // a binary matching a manifest opens `pkg_<app>` at level `watertight`.
+    let env = manifest_env(true);
+    let dev_st = StatementFiles {
+        statement: statement(
+            "inforno",
+            "inforno",
+            START,
+            &[("api_keys", "write", Some(7))],
+        ),
+        signature: None,
+    };
+    let vault = env
+        .connect_as(&env.writer_bin, &["PATH"], Some(dev_st.clone()))
+        .unwrap();
+    assert_eq!(vault.vault_name(), Some("pkg_inforno"));
+    assert!(vault.describe().contains("watertight"));
+
+    // An unlisted binary falls back to TestIdentity when test_fallback is on.
+    let fallback = env
+        .connect_as(&env.unlisted_bin, &["PATH"], Some(dev_st))
+        .unwrap();
+    assert_eq!(fallback.vault_name(), Some("test_inforno"));
+}
+
+#[test]
+fn manifest_permission_and_ptrace_scope_checks() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = manifest_env(false);
+
+    // 1. ptrace_scope = 0 is refused for watertight (needs >= 1).
+    fs::write(&env.ptrace_file, "0\n").unwrap();
+    match env.connect_as(&env.writer_bin, &["PATH"], None) {
+        Err(Error::NotAllowed(msg)) => {
+            assert!(msg.contains("ptrace_scope is 0, watertight needs 1"), "{msg}")
+        }
+        other => panic!("{other:?}"),
+    }
+    fs::write(&env.ptrace_file, "1\n").unwrap();
+
+    // 2. Group-writable binary is refused.
+    fs::set_permissions(&env.writer_bin, fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(matches!(
+        env.connect_as(&env.writer_bin, &["PATH"], None),
+        Err(Error::NotAllowed(_))
+    ));
+    fs::set_permissions(&env.writer_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 3. Non-world-readable binary (0700) is refused.
+    fs::set_permissions(&env.writer_bin, fs::Permissions::from_mode(0o700)).unwrap();
+    match env.connect_as(&env.writer_bin, &["PATH"], None) {
+        Err(Error::NotAllowed(msg)) => assert!(msg.contains("world-readable"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    fs::set_permissions(&env.writer_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 4. World-writable parent directory is refused.
+    fs::set_permissions(&env.bin_dir, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(matches!(
+        env.connect_as(&env.writer_bin, &["PATH"], None),
+        Err(Error::NotAllowed(_))
+    ));
+    fs::set_permissions(&env.bin_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 5. Group-writable manifest file is refused.
+    let manifest_path = env.manifests_dir.join("inforno.json");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o664)).unwrap();
+    assert!(matches!(
+        env.connect_as(&env.writer_bin, &["PATH"], None),
+        Err(Error::NotAllowed(_))
+    ));
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Restored permissions pass again.
+    assert!(env.connect_as(&env.writer_bin, &["PATH"], None).is_ok());
+}
+
+#[test]
+fn progressive_backoff_slows_repeated_refusals() {
+    let state = tempfile::tempdir().unwrap();
+    let clock = Arc::new(FakeClock::new(START));
+    let store = Store::open(state.path().join("state")).unwrap();
+    let server = Server::with_backoff(
+        store,
+        Box::new(TestIdentity),
+        clock,
+        Duration::from_millis(15),
+    );
+    let bad = statement(
+        APP,
+        "writer",
+        START - 100 * DAY,
+        &[("api_keys", "write", None)],
+    );
+    let try_bad = || {
+        let (client, daemon) = UnixStream::pair().unwrap();
+        let srv = server.clone();
+        thread::spawn(move || srv.serve(daemon, Peer::without_pidfd(UID, Some(999))));
+        let mut raw = Raw::new(client);
+        let t0 = Instant::now();
+        let _ = raw.hello(bad.clone());
+        t0.elapsed()
+    };
+    let d1 = try_bad();
+    let d2 = try_bad();
+    let d3 = try_bad();
+    assert!(d1 >= Duration::from_millis(12), "d1={d1:?}");
+    assert!(d2 >= Duration::from_millis(25), "d2={d2:?}");
+    assert!(d3 >= Duration::from_millis(50), "d3={d3:?}");
 }

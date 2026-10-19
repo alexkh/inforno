@@ -6,6 +6,7 @@ members = [
     "bulat",
     "vaultorno",
     "vaultorno_client",
+    "vaultorno_inspect",
 ]
 default-members = ["inforno_gui"]
 resolver = "3"

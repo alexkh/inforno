@@ -4,27 +4,32 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use vaultorno::identity::{InProcessInspector, Inspector, ManifestIdentity, SocketInspector};
+use vaultorno::server::{DEFAULT_BACKOFF_BASE, Server};
 use vaultorno::store::Store;
 use vaultorno::sweep::sweep;
 use vaultorno::time::{Clock, SystemClock};
+use vaultorno_inspect::{DEFAULT_INSPECT_SOCKET, serve_inspect};
 
 const USAGE: &str = "\
 usage: vaultorno <mode> [options]
 
-modes in this build (Milestone 1):
-  daemon [--state-dir DIR] [--socket PATH] [--test-identity]
-      serve apps; development builds only, see below
+modes in this build (Milestone 2):
+  daemon [--state-dir DIR] [--socket PATH] [--inspect-socket PATH] [--test-identity]
+      serve apps
+  inspect [--socket PATH] [--daemon-uid UID]
+      run the process identity inspector
   sweep [--state-dir DIR]
       delete expired lockers and stale vaults
 
-later milestones: inspect, init, status, check, vaults, log, revoke, forget
+later milestones: init, status, check, vaults, log, revoke, forget
 
-defaults: --state-dir /var/lib/vaultorno, --socket /run/vaultorno.sock
-
-Milestone 1 has no identity checks yet. `vaultorno daemon` only serves when
-built with `--features test_identity` and started with `--test-identity`,
-which trusts unsigned statements: development only.";
+defaults:
+  --state-dir      /var/lib/vaultorno
+  --socket         /run/vaultorno.sock (daemon) or /run/vaultorno_inspect.sock (inspect)
+  --inspect-socket /run/vaultorno_inspect.sock";
 
 fn main() -> ExitCode {
     let args: Vec<String> = match std::env::args_os()
@@ -42,8 +47,9 @@ fn main() -> ExitCode {
     let rest = &args[1..];
     match mode.as_str() {
         "daemon" => daemon(rest),
+        "inspect" => inspect(rest),
         "sweep" => run_sweep(rest),
-        "inspect" | "init" | "status" | "check" | "vaults" | "log" | "revoke" | "forget" => {
+        "init" | "status" | "check" | "vaults" | "log" | "revoke" | "forget" => {
             fail(&format!("`vaultorno {mode}` arrives in a later milestone"))
         }
         "help" | "--help" | "-h" => {
@@ -65,6 +71,7 @@ fn fail(msg: &str) -> ExitCode {
 struct Options {
     state_dir: PathBuf,
     socket: PathBuf,
+    inspect_socket: PathBuf,
     test_identity: bool,
 }
 
@@ -72,6 +79,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     let mut opts = Options {
         state_dir: PathBuf::from("/var/lib/vaultorno"),
         socket: PathBuf::from(vaultorno_client::protocol::DEFAULT_SOCKET),
+        inspect_socket: PathBuf::from(DEFAULT_INSPECT_SOCKET),
         test_identity: false,
     };
     let mut it = args.iter();
@@ -79,6 +87,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         match arg.as_str() {
             "--state-dir" => opts.state_dir = it.next().ok_or("--state-dir needs a folder")?.into(),
             "--socket" => opts.socket = it.next().ok_or("--socket needs a path")?.into(),
+            "--inspect-socket" => {
+                opts.inspect_socket = it.next().ok_or("--inspect-socket needs a path")?.into()
+            }
             "--test-identity" => opts.test_identity = true,
             other => return Err(format!("unknown option {other:?}")),
         }
@@ -94,37 +105,68 @@ fn daemon(args: &[String]) -> ExitCode {
     serve(opts)
 }
 
-#[cfg(not(feature = "test_identity"))]
-fn serve(_opts: Options) -> ExitCode {
-    fail(
-        "this build has no identity checks yet (they arrive in milestones 2 and 3), so it refuses to serve. \
-         For development, build with `--features test_identity` and pass `--test-identity`.",
-    )
-}
-
-#[cfg(feature = "test_identity")]
 fn serve(opts: Options) -> ExitCode {
-    use std::sync::Arc;
-    use vaultorno::identity::TestIdentity;
-    use vaultorno::server::Server;
-
-    if !opts.test_identity {
-        return fail(
-            "this development build serves only with `--test-identity`, which trusts unsigned statements",
+    if opts.test_identity {
+        #[cfg(not(feature = "test_identity"))]
+        {
+            return fail(
+                "`--test-identity` requires a development build (`--features test_identity`)",
+            );
+        }
+        #[cfg(feature = "test_identity")]
+        eprintln!(
+            "vaultorno daemon: WARNING: test identity enabled. Unsigned statements are trusted when no package manifest matches. \
+             Development only."
         );
     }
-    eprintln!(
-        "vaultorno daemon: WARNING: test identity. Unsigned statements are trusted and no executable is checked. \
-         Development only."
-    );
+
     let store = match Store::open(&opts.state_dir) {
         Ok(s) => s,
         Err(e) => return fail(&format!("can't open {}: {e}", opts.state_dir.display())),
     };
-    let server = Server::new(store, Box::new(TestIdentity), Arc::new(SystemClock));
+
+    let inspector: Arc<dyn Inspector> = if opts.test_identity && !opts.inspect_socket.exists() {
+        Arc::new(InProcessInspector)
+    } else {
+        Arc::new(SocketInspector::new(&opts.inspect_socket, None))
+    };
+    let identity = ManifestIdentity::new(inspector, opts.test_identity);
+    let server = Server::with_backoff(
+        store,
+        Box::new(identity),
+        Arc::new(SystemClock),
+        DEFAULT_BACKOFF_BASE,
+    );
     match server.listen(&opts.socket) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&format!("can't listen on {}: {e}", opts.socket.display())),
+    }
+}
+
+fn inspect(args: &[String]) -> ExitCode {
+    let mut socket = PathBuf::from(DEFAULT_INSPECT_SOCKET);
+    let mut daemon_uid: Option<u32> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--socket" => match it.next() {
+                Some(p) => socket = p.into(),
+                None => return fail("--socket needs a path"),
+            },
+            "--daemon-uid" => match it.next().and_then(|s| s.parse::<u32>().ok()) {
+                Some(uid) => daemon_uid = Some(uid),
+                None => return fail("--daemon-uid needs a numeric uid"),
+            },
+            other => return fail(&format!("unknown option {other:?}")),
+        }
+    }
+    let allowed_uid = daemon_uid.unwrap_or_else(|| rustix::process::geteuid().as_raw());
+    match serve_inspect(&socket, allowed_uid) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&format!(
+            "can't serve inspector on {}: {e}",
+            socket.display()
+        )),
     }
 }
 

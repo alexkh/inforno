@@ -78,6 +78,7 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[cfg(feature = "test_identity")]
 #[test]
 fn round_trip_through_the_real_binary() {
     let dir = tempfile::tempdir().unwrap();
@@ -147,6 +148,7 @@ fn round_trip_through_the_real_binary() {
     );
 }
 
+#[cfg(feature = "test_identity")]
 #[test]
 fn a_daemon_restart_keeps_the_vault() {
     let dir = tempfile::tempdir().unwrap();
@@ -168,24 +170,40 @@ fn a_daemon_restart_keeps_the_vault() {
 }
 
 #[test]
-fn the_daemon_refuses_to_serve_without_the_flag() {
+fn real_inspect_mode_over_socket() {
+    use std::os::fd::AsFd;
+    use rustix::process::{PidfdFlags, pidfd_open};
+
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(BIN)
-        .arg("daemon")
-        .arg("--state-dir")
-        .arg(dir.path().join("state"))
-        .arg("--socket")
-        .arg(dir.path().join("s.sock"))
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(!dir.path().join("s.sock").exists());
+    let sock = dir.path().join("inspect.sock");
+    let inspector = Daemon(
+        Command::new(BIN)
+            .args(["inspect", "--socket"])
+            .arg(&sock)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !sock.exists() {
+        assert!(Instant::now() < deadline, "inspector didn't start");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // Inspect self (which is fully readable by the unprivileged test runner user).
+    let pid = rustix::process::getpid();
+    let pidfd = pidfd_open(pid, PidfdFlags::empty()).unwrap();
+    let uid = rustix::process::getuid().as_raw();
+    let info = vaultorno_inspect::request_inspection(&sock, pidfd.as_fd(), Some(uid)).unwrap();
+    assert_eq!(info.uid, uid);
+    assert_eq!(info.exe_path, std::env::current_exe().unwrap());
+    drop(inspector);
 }
 
 #[test]
 fn later_modes_and_unknown_modes_fail_cleanly() {
     for mode in [
-        "inspect", "init", "status", "check", "vaults", "log", "revoke", "forget",
+        "init", "status", "check", "vaults", "log", "revoke", "forget",
     ] {
         let out = Command::new(BIN).arg(mode).output().unwrap();
         assert!(!out.status.success(), "{mode}");

@@ -49,4 +49,5 @@ windows-sys = { version = "0.59", optional = true, features = [
 ] }
 
 [dev-dependencies]
+vaultorno_client = { path = ".", features = ["testing"] }
 tempfile = "3"

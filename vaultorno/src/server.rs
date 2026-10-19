@@ -31,13 +31,20 @@ pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// What `Welcome.sealer` reports in Milestone 1.
 pub const SEALER: &str = "none: Milestone 1 has no outer encryption";
 
+/// Base delay for progressive refusal back-off in production (§10).
+pub const DEFAULT_BACKOFF_BASE: Duration = Duration::from_millis(25);
+/// Maximum delay for progressive refusal back-off (§10).
+pub const MAX_BACKOFF: Duration = Duration::from_secs(1);
+
 /// The daemon.
 pub struct Server {
     store: Store,
     identity: Box<dyn Identify>,
     clock: Arc<dyn Clock>,
+    backoff_base: Duration,
     connections: Mutex<HashMap<u32, usize>>,
     refused: Mutex<HashMap<(u32, String), u32>>,
+    backoff_streaks: Mutex<HashMap<(u32, Option<i32>), u32>>,
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Response {
@@ -71,13 +78,49 @@ impl Drop for Slot<'_> {
 
 impl Server {
     pub fn new(store: Store, identity: Box<dyn Identify>, clock: Arc<dyn Clock>) -> Arc<Server> {
+        Self::with_backoff(store, identity, clock, Duration::ZERO)
+    }
+
+    pub fn with_backoff(
+        store: Store,
+        identity: Box<dyn Identify>,
+        clock: Arc<dyn Clock>,
+        backoff_base: Duration,
+    ) -> Arc<Server> {
         Arc::new(Server {
             store,
             identity,
             clock,
+            backoff_base,
             connections: Mutex::new(HashMap::new()),
             refused: Mutex::new(HashMap::new()),
+            backoff_streaks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Computes and sleeps the progressive back-off for a refused request
+    /// from `peer`, returning the delay applied (§10).
+    fn apply_backoff(&self, peer: &Peer) -> Duration {
+        let streak = {
+            let mut map = lock(&self.backoff_streaks);
+            let n = map.entry((peer.uid, peer.pid)).or_default();
+            *n = n.saturating_add(1);
+            *n
+        };
+        if self.backoff_base.is_zero() {
+            return Duration::ZERO;
+        }
+        let shift = (streak - 1).min(10);
+        let delay = self
+            .backoff_base
+            .saturating_mul(1u32 << shift)
+            .min(MAX_BACKOFF);
+        thread::sleep(delay);
+        delay
+    }
+
+    fn clear_backoff(&self, peer: &Peer) {
+        lock(&self.backoff_streaks).remove(&(peer.uid, peer.pid));
     }
 
     pub fn store(&self) -> &Store {
@@ -178,11 +221,15 @@ impl Server {
                 .identity
                 .identify(&peer, statement.as_deref(), signature.as_deref(), now)
             {
-                Ok(i) => i,
+                Ok(i) => {
+                    self.clear_backoff(&peer);
+                    i
+                }
                 Err(refusal) => {
                     if let Some(vault) = refusal.vault {
                         *lock(&self.refused).entry((peer.uid, vault)).or_default() += 1;
                     }
+                    self.apply_backoff(&peer);
                     return reply(error(ErrorCode::NotAllowed, refusal.message));
                 }
             };
@@ -255,7 +302,17 @@ impl Server {
                 expected,
             } => self.put(peer, ident, &locker, &data, expected),
         };
-        result.unwrap_or_else(|e| error(ErrorCode::Storage, e.to_string()))
+        let resp = result.unwrap_or_else(|e| error(ErrorCode::Storage, e.to_string()));
+        if matches!(
+            resp,
+            Response::Error {
+                code: ErrorCode::NotAllowed | ErrorCode::UnknownLocker,
+                ..
+            }
+        ) {
+            self.apply_backoff(peer);
+        }
+        resp
     }
 
     /// Reads a locker, emptying it first if it has expired.
@@ -451,10 +508,11 @@ fn refuse_busy(stream: &UnixStream) {
 }
 
 fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
-    let cred = rustix::net::sockopt::socket_peercred(stream).map_err(io::Error::from)?;
+    let (uid, pid, pidfd) = vaultorno_inspect::peer_pidfd(stream)?;
     Ok(Peer {
-        uid: cred.uid.as_raw(),
-        pid: Some(cred.pid.as_raw_nonzero().get()),
+        uid,
+        pid: Some(pid),
+        pidfd: Some(Arc::new(pidfd)),
     })
 }
 

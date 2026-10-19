@@ -1,0 +1,13 @@
+[package]
+name = "vaultorno_inspect"
+description = "Process identity inspector for vaultorno (design doc §3, §7, §14)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rustix = { version = "1", features = ["fs", "net", "process"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

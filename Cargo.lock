@@ -9466,8 +9466,10 @@ dependencies = [
  "getrandom 0.3.4",
  "rustix 1.1.4",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "vaultorno_client",
+ "vaultorno_inspect",
  "zeroize",
 ]
 
@@ -9487,8 +9489,18 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "vaultorno_client",
  "windows-sys 0.59.0",
  "zeroize",
+]
+
+[[package]]
+name = "vaultorno_inspect"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

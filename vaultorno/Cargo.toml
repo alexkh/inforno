@@ -16,6 +16,7 @@ test_identity = []
 
 [dependencies]
 vaultorno_client = { path = "../vaultorno_client", default-features = false }
+vaultorno_inspect = { path = "../vaultorno_inspect" }
 serde_json = "1"
 zeroize = "1"
 rustix = { version = "1", features = ["fs", "net", "process"] }
@@ -25,7 +26,7 @@ getrandom = "0.3"
 vaultorno_client = { path = "../vaultorno_client", features = ["testing"] }
 tempfile = "3"
 base64 = "0.22"
+sha2 = "0.10"
 
 [[test]]
 name = "end_to_end"
-required-features = ["test_identity"]

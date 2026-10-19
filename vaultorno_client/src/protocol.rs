@@ -416,44 +416,7 @@ impl Statement {
                 return refuse(format!("reject_env entry {var:?} isn't a variable name"));
             }
         }
-        if self.lockers.is_empty() {
-            return refuse("statement names no lockers");
-        }
-        if self.lockers.len() > MAX_LOCKERS_PER_APP {
-            return refuse(format!(
-                "statement names more than {MAX_LOCKERS_PER_APP} lockers"
-            ));
-        }
-        let mut lockers = BTreeMap::new();
-        for (name, grant) in &self.lockers {
-            if !is_valid_name(name) {
-                return refuse(format!("locker name {name:?} isn't [a-z0-9_]{{1,32}}"));
-            }
-            let checked = match (grant.access, grant.lifetime_days) {
-                (Access::Read, None) => Grant {
-                    write: false,
-                    lifetime_secs: 0,
-                },
-                (Access::Read, Some(_)) => {
-                    return refuse(format!(
-                        "{name}: lifetime_days only applies to write access"
-                    ));
-                }
-                (Access::Write, days) => {
-                    let days = days.unwrap_or(DEFAULT_LIFETIME_DAYS);
-                    if days == 0 || days > MAX_LIFETIME_DAYS {
-                        return refuse(format!(
-                            "{name}: lifetime_days must be 1 to {MAX_LIFETIME_DAYS}"
-                        ));
-                    }
-                    Grant {
-                        write: true,
-                        lifetime_secs: u64::from(days) * DAY,
-                    }
-                }
-            };
-            lockers.insert(name.clone(), checked);
-        }
+        let lockers = check_locker_grants(&self.lockers)?;
         Ok(CheckedStatement {
             app: self.app.clone(),
             binary: self.binary.clone(),
@@ -467,8 +430,202 @@ impl Statement {
     }
 }
 
+// Package manifests (§5)
+
+/// Where root-owned package manifests live on Linux (§5).
+pub const DEFAULT_MANIFESTS_DIR: &str = "/usr/share/vaultorno/manifests";
+
+/// Built-in environment variable patterns refused at every level (§7).
+pub const BUILTIN_REJECT_ENV: &[&str] = &[
+    "LD_*",
+    "VK_*",
+    "__EGL_VENDOR_LIBRARY_DIRS",
+    "__EGL_VENDOR_LIBRARY_FILENAMES",
+    "LIBGL_DRIVERS_PATH",
+    "GBM_BACKENDS_PATH",
+    "GTK_MODULES",
+    "GTK_PATH",
+    "GIO_MODULE_DIR",
+    "GIO_EXTRA_MODULES",
+    "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+];
+
+/// A root-owned package manifest (`/usr/share/vaultorno/manifests/<app>.json`, §5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    pub format: u32,
+    pub app: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reject_env: Vec<String>,
+    #[serde(deserialize_with = "unique_keys")]
+    pub binaries: BTreeMap<String, ManifestBinary>,
+}
+
+/// One binary entry inside a [`Manifest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestBinary {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reject_env: Vec<String>,
+    #[serde(deserialize_with = "unique_keys")]
+    pub lockers: BTreeMap<String, LockerGrant>,
+}
+
+/// A manifest that passed format, name, locker and path checks.
+#[derive(Debug, Clone)]
+pub struct CheckedManifest {
+    pub app: String,
+    pub reject_env: Vec<String>,
+    pub binaries: BTreeMap<String, CheckedManifestBinary>,
+}
+
+/// One checked binary inside a [`CheckedManifest`].
+#[derive(Debug, Clone)]
+pub struct CheckedManifestBinary {
+    pub path: String,
+    pub reject_env: Vec<String>,
+    pub lockers: BTreeMap<String, Grant>,
+}
+
+impl Manifest {
+    /// Parses a manifest's exact text. Unknown fields and duplicate keys are
+    /// refused.
+    pub fn parse(text: &str) -> Result<Manifest, StatementError> {
+        serde_json::from_str(text).map_err(|e| StatementError(format!("malformed manifest: {e}")))
+    }
+
+    /// Checks format, names, paths, `reject_env`, and locker grants.
+    pub fn check(&self) -> Result<CheckedManifest, StatementError> {
+        if self.format != 1 {
+            return refuse(format!("manifest format {} isn't supported", self.format));
+        }
+        if !is_valid_name(&self.app) {
+            return refuse(format!("app name {:?} isn't [a-z0-9_]{{1,32}}", self.app));
+        }
+        for var in &self.reject_env {
+            if !is_valid_env_pattern(var) {
+                return refuse(format!("reject_env entry {var:?} isn't a variable name"));
+            }
+        }
+        if self.binaries.is_empty() {
+            return refuse("manifest names no binaries");
+        }
+        let mut all_lockers = std::collections::BTreeSet::new();
+        let mut binaries = BTreeMap::new();
+        for (bin_name, bin) in &self.binaries {
+            if !is_valid_name(bin_name) {
+                return refuse(format!(
+                    "binary name {bin_name:?} isn't [a-z0-9_]{{1,32}}"
+                ));
+            }
+            if !bin.path.starts_with('/') || bin.path.len() < 2 || bin.path.ends_with('/') {
+                return refuse(format!(
+                    "binary {bin_name}: path {:?} must be an absolute file path",
+                    bin.path
+                ));
+            }
+            for var in &bin.reject_env {
+                if !is_valid_env_pattern(var) {
+                    return refuse(format!("reject_env entry {var:?} isn't a variable name"));
+                }
+            }
+            let lockers = check_locker_grants(&bin.lockers)?;
+            all_lockers.extend(lockers.keys().cloned());
+            if all_lockers.len() > MAX_LOCKERS_PER_APP {
+                return refuse(format!(
+                    "manifest names more than {MAX_LOCKERS_PER_APP} lockers"
+                ));
+            }
+            binaries.insert(
+                bin_name.clone(),
+                CheckedManifestBinary {
+                    path: bin.path.clone(),
+                    reject_env: bin.reject_env.clone(),
+                    lockers,
+                },
+            );
+        }
+        Ok(CheckedManifest {
+            app: self.app.clone(),
+            reject_env: self.reject_env.clone(),
+            binaries,
+        })
+    }
+}
+
+fn check_locker_grants(
+    raw: &BTreeMap<String, LockerGrant>,
+) -> Result<BTreeMap<String, Grant>, StatementError> {
+    if raw.is_empty() {
+        return refuse("statement names no lockers");
+    }
+    if raw.len() > MAX_LOCKERS_PER_APP {
+        return refuse(format!(
+            "statement names more than {MAX_LOCKERS_PER_APP} lockers"
+        ));
+    }
+    let mut lockers = BTreeMap::new();
+    for (name, grant) in raw {
+        if !is_valid_name(name) {
+            return refuse(format!("locker name {name:?} isn't [a-z0-9_]{{1,32}}"));
+        }
+        let checked = match (grant.access, grant.lifetime_days) {
+            (Access::Read, None) => Grant {
+                write: false,
+                lifetime_secs: 0,
+            },
+            (Access::Read, Some(_)) => {
+                return refuse(format!(
+                    "{name}: lifetime_days only applies to write access"
+                ));
+            }
+            (Access::Write, days) => {
+                let days = days.unwrap_or(DEFAULT_LIFETIME_DAYS);
+                if days == 0 || days > MAX_LIFETIME_DAYS {
+                    return refuse(format!(
+                        "{name}: lifetime_days must be 1 to {MAX_LIFETIME_DAYS}"
+                    ));
+                }
+                Grant {
+                    write: true,
+                    lifetime_secs: u64::from(days) * DAY,
+                }
+            }
+        };
+        lockers.insert(name.clone(), checked);
+    }
+    Ok(lockers)
+}
+
+/// Whether environment variable `name` matches `pattern` (`NAME` or `PREFIX*`, §7).
+pub fn env_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
+}
+
+/// First rejected variable in `env_names` matching [`BUILTIN_REJECT_ENV`] or
+/// `extra_patterns`, if any.
+pub fn find_rejected_env<'a>(
+    env_names: &'a [String],
+    extra_patterns: &[String],
+) -> Option<&'a str> {
+    for var in env_names {
+        if BUILTIN_REJECT_ENV.iter().any(|p| env_matches(p, var))
+            || extra_patterns.iter().any(|p| env_matches(p, var))
+        {
+            return Some(var.as_str());
+        }
+    }
+    None
+}
+
 /// `NAME` or `PREFIX*`, as in the built-in reject list (§7).
-fn is_valid_env_pattern(var: &str) -> bool {
+pub fn is_valid_env_pattern(var: &str) -> bool {
     let name = var.strip_suffix('*').unwrap_or(var);
     !name.is_empty()
         && name.len() <= 128
@@ -662,6 +819,54 @@ mod tests {
         assert_eq!(
             check_envelope_shape(b"plain text"),
             Err(ShapeError::NotSealed)
+        );
+    }
+
+    #[test]
+    fn manifest_checks_and_refusals() {
+        let good = r#"{
+            "format": 1,
+            "app": "inforno",
+            "reject_env": ["INFORNO_PLUGIN_*"],
+            "binaries": {
+                "inforno": {
+                    "path": "/usr/bin/inforno",
+                    "lockers": { "api_keys": { "access": "write", "lifetime_days": 30 } }
+                },
+                "autorno": {
+                    "path": "/usr/bin/autorno",
+                    "lockers": { "api_keys": { "access": "read" } }
+                }
+            }
+        }"#;
+        let m = Manifest::parse(good).unwrap().check().unwrap();
+        assert_eq!(m.app, "inforno");
+        assert!(m.binaries["inforno"].lockers["api_keys"].write);
+        assert!(!m.binaries["autorno"].lockers["api_keys"].write);
+
+        // Relative path refused.
+        let rel = r#"{"format":1,"app":"a","binaries":{"b":{"path":"bin/b","lockers":{"k":{"access":"read"}}}}}"#;
+        assert!(Manifest::parse(rel).unwrap().check().is_err());
+
+        // Duplicate binary refused.
+        let dup = r#"{"format":1,"app":"a","binaries":{"b":{"path":"/bin/b","lockers":{"k":{"access":"read"}}},"b":{"path":"/bin/b2","lockers":{"k":{"access":"read"}}}}}"#;
+        assert!(Manifest::parse(dup).is_err());
+    }
+
+    #[test]
+    fn env_rejection_patterns() {
+        let vars = vec![
+            "PATH".to_owned(),
+            "HOME".to_owned(),
+            "VK_LAYER_PATH".to_owned(),
+        ];
+        assert_eq!(find_rejected_env(&vars, &[]), Some("VK_LAYER_PATH"));
+
+        let clean = vec!["PATH".to_owned(), "CUSTOM_PLUGINS".to_owned()];
+        assert_eq!(find_rejected_env(&clean, &[]), None);
+        assert_eq!(
+            find_rejected_env(&clean, &["CUSTOM_*".to_owned()]),
+            Some("CUSTOM_PLUGINS")
         );
     }
 }

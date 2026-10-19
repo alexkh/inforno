@@ -17,7 +17,9 @@ use crate::local::{LocalStore, OsSealer, default_sealer};
 use crate::names::is_valid_name;
 #[cfg(unix)]
 use crate::protocol::DEFAULT_SOCKET;
-use crate::protocol::{LockerInfo, Statement};
+#[cfg(unix)]
+use crate::protocol::{DEFAULT_MANIFESTS_DIR, Manifest};
+use crate::protocol::{Grant, LockerInfo, Statement};
 use crate::time::{Clock, SystemClock, format_date};
 
 /// How often `update` retries after a conflict.
@@ -175,8 +177,12 @@ impl Vault {
             None => home_dir(real_uid)?,
         };
         let statement = match opts.statement {
-            Some(s) => s,
-            None => find_statement(&opts.app, &SystemClock)?,
+            Some(s) => Some(s),
+            None => match find_statement(&opts.app, &SystemClock) {
+                Ok(s) => Some(s),
+                Err(Error::NoStatement(_)) => None,
+                Err(e) => return Err(e),
+            },
         };
         let stream = match opts.stream {
             Some(s) => s,
@@ -200,22 +206,26 @@ impl Vault {
         if !is_valid_name(&opts.app) {
             return Err(Error::InvalidName(opts.app));
         }
-        let text = match opts.statement {
-            Some(t) => t,
-            None => find_statement(&opts.app, opts.clock.as_ref())?.statement,
+        let lockers = match opts.statement {
+            Some(text) => check_local_statement(&opts.app, &text, opts.clock.now())?,
+            None => match find_statement(&opts.app, opts.clock.as_ref()) {
+                Ok(s) => check_local_statement(&opts.app, &s.statement, opts.clock.now())?,
+                #[cfg(unix)]
+                Err(Error::NoStatement(st_err)) => {
+                    find_manifest_lockers(&opts.app, Path::new(DEFAULT_MANIFESTS_DIR))
+                        .map_err(|_| Error::NoStatement(st_err))?
+                }
+                #[cfg(not(unix))]
+                Err(e) => return Err(e),
+                #[cfg(unix)]
+                Err(e) => return Err(e),
+            },
         };
-        let checked = Statement::parse(&text)?.check(opts.clock.now())?;
-        if checked.app != opts.app {
-            return Err(Error::NoStatement(format!(
-                "the statement is for app {:?}",
-                checked.app
-            )));
-        }
         let base = match opts.base {
             Some(b) => b,
             None => user_data_dir()?,
         };
-        let store = LocalStore::open(&base, &opts.app, checked.lockers, opts.sealer, opts.clock)?;
+        let store = LocalStore::open(&base, &opts.app, lockers, opts.sealer, opts.clock)?;
         Ok(Vault {
             app: opts.app,
             backend: Backend::Local(store),
@@ -334,6 +344,52 @@ fn check_name(locker: &str) -> Result<(), Error> {
     } else {
         Err(Error::InvalidName(locker.to_owned()))
     }
+}
+
+fn check_local_statement(
+    app: &str,
+    text: &str,
+    now: u64,
+) -> Result< std::collections::BTreeMap<String, Grant>, Error > {
+    let checked = Statement::parse(text)?.check(now)?;
+    if checked.app != app {
+        return Err(Error::NoStatement(format!(
+            "the statement is for app {:?}",
+            checked.app
+        )));
+    }
+    Ok(checked.lockers)
+}
+
+#[cfg(unix)]
+fn find_manifest_lockers(
+    app: &str,
+    manifests_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, Grant>, Error> {
+    use std::os::unix::fs::MetadataExt;
+    let exe_meta = fs::metadata(std::env::current_exe()?)?;
+    let path = manifests_dir.join(format!("{app}.json"));
+    let text = fs::read_to_string(&path)
+        .map_err(|e| Error::NoStatement(format!("no manifest {}: {e}", path.display())))?;
+    let checked = Manifest::parse(&text)?.check()?;
+    if checked.app != app {
+        return Err(Error::NoStatement(format!(
+            "manifest {} is for app {:?}",
+            path.display(),
+            checked.app
+        )));
+    }
+    for bin in checked.binaries.values() {
+        if let Ok(meta) = fs::metadata(&bin.path) {
+            if meta.dev() == exe_meta.dev() && meta.ino() == exe_meta.ino() {
+                return Ok(bin.lockers.clone());
+            }
+        }
+    }
+    Err(Error::NoStatement(format!(
+        "current executable isn't listed in {}",
+        path.display()
+    )))
 }
 
 /// Finds this executable's statement (§5): `<binary>_statement.json` next to
