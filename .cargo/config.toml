@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask build`: release binaries plus signed vaultorno statements.
+xtask = "run --release --package xtask --"

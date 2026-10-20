@@ -16,11 +16,12 @@
 > re-issue (API keys, tokens, a cached unlock for another store), never
 > anything you would mind losing (§1).
 
-Status: Milestones 1 and 2 are implemented (the client, the daemon with
-package manifests and the inspector, and the `Local` backend). Milestone 3 has
-signed statements, `revoked_keys`, `successions` (recorded from succession
-statements in `Hello`) and `vaultorno revoke`; `cargo xtask build` is next.
-Everything else is design. The first user is Inforno (`inforno`, `autorno`).
+Status: Milestones 1 to 3 are implemented: the client, the daemon with
+package manifests and the inspector, the `Local` backend, signed statements,
+`revoked_keys`, `successions` (recorded from succession statements in
+`Hello`), `vaultorno revoke`, and `cargo xtask build`, which builds the
+release binaries and signs their statements. Everything else is design. The
+first user is Inforno (`inforno`, `autorno`).
 This revision:
 
 - makes the daemon blind with a split key (§2, §6);
