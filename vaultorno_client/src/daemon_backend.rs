@@ -14,7 +14,7 @@ use crate::protocol::{
 };
 use crate::seal::AppKey;
 use crate::user_half;
-use crate::vault::{Locker, StatementFiles, Stored};
+use crate::vault::{Locker, StatementFiles, Stored, SuccessionFiles};
 
 struct Conn {
     stream: UnixStream,
@@ -76,6 +76,7 @@ impl DaemonConn {
         stream: UnixStream,
         app: &str,
         statement: Option<StatementFiles>,
+        succession: Option<SuccessionFiles>,
         home: &Path,
         uid: u32,
     ) -> Result<DaemonConn, Error> {
@@ -84,11 +85,16 @@ impl DaemonConn {
             Some(s) => (Some(s.statement), s.signature),
             None => (None, None),
         };
+        let (succession, succession_signature) = match succession {
+            Some(s) => (Some(s.succession), Some(s.signature)),
+            None => (None, None),
+        };
         let reply = conn.request(Request::Hello {
             protocol: PROTOCOL,
             statement: st_text,
             signature,
-            succession: None,
+            succession,
+            succession_signature,
         })?;
         let Response::Welcome {
             protocol,

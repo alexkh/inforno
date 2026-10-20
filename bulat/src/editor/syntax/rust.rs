@@ -78,10 +78,13 @@ pub enum RustToken {
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     Identifier,
 
-    // 9. Numbers
-    #[regex(r"\d+(?:\.\d+)?")]
-    #[regex(r"0x[0-9a-fA-F]+")]
-    #[regex(r"0b[01]+")]
+    // 9. Numbers: `_` separators, an exponent and a type suffix are part of
+    // the number (`1_000u32`, `2.5e-3`, `3.14_f32`, `0xff_u8`). A fraction
+    // needs a digit after the dot, so `0..10` and `2.max(3)` stay apart.
+    #[regex(r"[0-9][0-9_]*(?:\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9_]*[0-9][0-9_]*)?(?:[iu](?:8|16|32|64|128|size)|f32|f64)?")]
+    #[regex(r"0x[0-9a-fA-F_]+(?:[iu](?:8|16|32|64|128|size))?")]
+    #[regex(r"0o[0-7_]+(?:[iu](?:8|16|32|64|128|size))?")]
+    #[regex(r"0b[01_]+(?:[iu](?:8|16|32|64|128|size))?")]
     Number,
 
     // 10. Punctuation
@@ -103,6 +106,21 @@ pub enum RustToken {
     Error,
 }
 
+/// Whether a number token is a float: a fraction, an exponent or a float
+/// suffix. Integer suffixes are checked first, since `usize` contains an `e`.
+fn is_float(number: &str) -> bool {
+    if number.starts_with("0x") || number.starts_with("0o") || number.starts_with("0b") {
+        return false;
+    }
+    if number.ends_with("f32") || number.ends_with("f64") {
+        return true;
+    }
+    let int_suffix = ["size", "8", "16", "32", "64", "128"]
+        .iter()
+        .any(|w| ["i", "u"].iter().any(|s| number.ends_with(&format!("{s}{w}"))));
+    !int_suffix && number.contains(['.', 'e', 'E'])
+}
+
 pub fn parse(text: &str) -> Vec<Token> {
     let lexer = RustToken::lexer(text);
     let raw_tokens: Vec<(RustToken, &str)> = lexer
@@ -121,7 +139,7 @@ pub fn parse(text: &str) -> Vec<Token> {
             RustToken::Char => TokenType::Str('\''),
             RustToken::Comment => TokenType::Comment(false),
             RustToken::CommentMulti => TokenType::Comment(true),
-            RustToken::Number => TokenType::Numeric(buffer.contains('.')),
+            RustToken::Number => TokenType::Numeric(is_float(buffer)),
 
             RustToken::Punctuation => {
                 let c = buffer.chars().next().unwrap_or('?');

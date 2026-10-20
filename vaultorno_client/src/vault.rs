@@ -19,7 +19,7 @@ use crate::names::is_valid_name;
 use crate::protocol::DEFAULT_SOCKET;
 #[cfg(unix)]
 use crate::protocol::{DEFAULT_MANIFESTS_DIR, Manifest};
-use crate::protocol::{Grant, LockerInfo, Statement};
+use crate::protocol::{Grant, LockerInfo, Statement, SuccessionStatement};
 use crate::time::{Clock, SystemClock, format_date};
 
 /// How often `update` retries after a conflict.
@@ -61,6 +61,14 @@ pub struct StatementFiles {
     pub signature: Option<String>,
 }
 
+/// A succession statement's text and its SSHSIG by the old key (§8), sent
+/// in `Hello` with a statement signed by the new key.
+#[derive(Clone)]
+pub struct SuccessionFiles {
+    pub succession: String,
+    pub signature: String,
+}
+
 /// How to reach the daemon. `Vault::open` fills these in; tests and tools
 /// can set them. Unix only: there is no daemon on Windows yet (M7).
 #[cfg(unix)]
@@ -78,6 +86,10 @@ pub struct DaemonOptions {
     pub uid: Option<u32>,
     /// The statement to send; by default found next to the executable (§5).
     pub statement: Option<StatementFiles>,
+    /// A succession to send with it (§8). A caller that gives `statement`
+    /// gives this too; a signed statement found by default brings the
+    /// succession found beside it, unless this is set.
+    pub succession: Option<SuccessionFiles>,
 }
 
 #[cfg(unix)]
@@ -90,6 +102,7 @@ impl DaemonOptions {
             home: None,
             uid: None,
             statement: None,
+            succession: None,
         }
     }
 }
@@ -176,11 +189,21 @@ impl Vault {
             Some(h) => h,
             None => home_dir(real_uid)?,
         };
-        let statement = match opts.statement {
-            Some(s) => Some(s),
+        // A succession is found with the statement it goes with (§8).
+        let (statement, succession) = match opts.statement {
+            Some(s) => (Some(s), opts.succession),
             None => match find_statement(&opts.app, &SystemClock) {
-                Ok(s) => Some(s),
-                Err(Error::NoStatement(_)) => None,
+                Ok(s) => {
+                    let succession = if opts.succession.is_some() {
+                        opts.succession
+                    } else if s.signature.is_some() {
+                        find_succession(&opts.app, &SystemClock)
+                    } else {
+                        None
+                    };
+                    (Some(s), succession)
+                }
+                Err(Error::NoStatement(_)) => (None, opts.succession),
                 Err(e) => return Err(e),
             },
         };
@@ -192,6 +215,7 @@ impl Vault {
             stream,
             &opts.app,
             statement,
+            succession,
             &home,
             opts.uid.unwrap_or(real_uid),
         )?;
@@ -405,12 +429,7 @@ pub fn find_statement(app: &str, clock: &dyn Clock) -> Result<StatementFiles, Er
         .ok_or_else(|| Error::NoStatement(format!("{} isn't a valid binary name", exe.display())))?
         .to_owned();
     let file = format!("{binary}_statement.json");
-    let mut dirs: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
-    if let Ok(data) = user_data_dir() {
-        dirs.push(data.join("statements").join(app));
-    }
-    #[cfg(unix)]
-    dirs.push(Path::new("/usr/share/vaultorno/statements").join(app));
+    let dirs = statement_dirs(app, &exe);
 
     let mut best: Option<(u64, StatementFiles)> = None;
     for dir in &dirs {
@@ -442,6 +461,58 @@ pub fn find_statement(app: &str, clock: &dyn Clock) -> Result<StatementFiles, Er
         let looked: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
         Error::NoStatement(format!("no valid {file} in {}", looked.join(", ")))
     })
+}
+
+/// Where statements and successions are kept, in the order they're searched
+/// (§5, §8): next to the executable, the app's own fetched copies, then the
+/// package's.
+fn statement_dirs(app: &str, exe: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = exe.parent().map(Path::to_path_buf).into_iter().collect();
+    if let Ok(data) = user_data_dir() {
+        dirs.push(data.join("statements").join(app));
+    }
+    #[cfg(unix)]
+    dirs.push(Path::new("/usr/share/vaultorno/statements").join(app));
+    dirs
+}
+
+/// Finds the app's succession statement (§8): `<app>_succession.json`, with
+/// its signature in `<app>_succession.json.sig`, in the folders statements
+/// are kept in. Returns the newest one (by `issued`) that is signed and
+/// valid now; the daemon decides whether it applies.
+pub fn find_succession(app: &str, clock: &dyn Clock) -> Option<SuccessionFiles> {
+    if !is_valid_name(app) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let file = format!("{app}_succession.json");
+    let mut best: Option<(u64, SuccessionFiles)> = None;
+    for dir in statement_dirs(app, &exe) {
+        let path = dir.join(&file);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(signature) = fs::read_to_string(path.with_extension("json.sig")) else {
+            continue;
+        };
+        let Ok(checked) = SuccessionStatement::parse(&text).and_then(|s| s.check(clock.now()))
+        else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(issued, _)| checked.issued > *issued)
+        {
+            best = Some((
+                checked.issued,
+                SuccessionFiles {
+                    succession: text,
+                    signature,
+                },
+            ));
+        }
+    }
+    best.map(|(_, s)| s)
 }
 
 /// Where this user's vaultorno files live: `~/.local/share/vaultorno` on

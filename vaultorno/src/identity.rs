@@ -1,6 +1,7 @@
-//! Who is asking (design doc §7). Milestone 2 adds [`ManifestIdentity`]
-//! (level `watertight`), [`Inspector`], environment and `ptrace_scope`
-//! checks; signed statements arrive in Milestone 3.
+//! Who is asking (design doc §7). [`SignedIdentity`] is the daemon's check:
+//! a signed statement first (level `airtight`, Milestone 3), then a package
+//! manifest through [`ManifestIdentity`] (level `watertight`, Milestone 2),
+//! with one inspection of the caller, environment and `ptrace_scope` checks.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -9,16 +10,27 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use ssh_key::PublicKey;
 use vaultorno_client::names::is_valid_name;
 use vaultorno_client::protocol::{
-    DEFAULT_MANIFESTS_DIR, Grant, Manifest, Statement, find_rejected_env,
+    DEFAULT_MANIFESTS_DIR, Grant, Manifest, Statement, SuccessionStatement, find_rejected_env,
 };
+use vaultorno_client::time::format_rfc3339;
 use vaultorno_inspect::{
     DEFAULT_INSPECT_SOCKET, Inspected, inspect_pidfd, request_inspection,
 };
 
+use crate::signing::{
+    KeyFingerprint, KeyListFiles, KeyLists, STATEMENT_NAMESPACE, SUCCESSION_NAMESPACE, SignedBy,
+    parse_key_line, verify_signature,
+};
+
 /// Level reported for package manifests (§4).
 pub const WATERTIGHT_LEVEL: &str = "watertight";
+/// Level reported for signed statements (§4).
+pub const AIRTIGHT_LEVEL: &str = "airtight";
+/// The `ptrace_scope` a signed statement needs (§4).
+pub const AIRTIGHT_PTRACE_SCOPE: u32 = 2;
 /// Default path to Yama's `ptrace_scope` sysctl (§7.6).
 pub const DEFAULT_PTRACE_SCOPE_PATH: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
@@ -61,13 +73,29 @@ pub struct Refusal {
     pub message: String,
 }
 
+fn refused(vault: Option<String>, message: impl Into<String>) -> Refusal {
+    Refusal {
+        vault,
+        message: message.into(),
+    }
+}
+
 /// An identity check.
 pub trait Identify: Send + Sync {
+    /// Whether the state the check relies on is readable. If not, the daemon
+    /// answers every `Hello` with `Storage` rather than guess (§5, §9).
+    fn check_state(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// `succession` is a succession statement and its signature, sent with a
+    /// statement signed by the new key after a key rotation (§8).
     fn identify(
         &self,
         peer: &Peer,
         statement: Option<&str>,
         signature: Option<&str>,
+        succession: Option<(&str, &str)>,
         now: u64,
     ) -> Result<Identity, Refusal>;
 }
@@ -317,14 +345,11 @@ impl ManifestIdentity {
     }
 }
 
-impl Identify for ManifestIdentity {
-    fn identify(
-        &self,
-        peer: &Peer,
-        statement: Option<&str>,
-        signature: Option<&str>,
-        now: u64,
-    ) -> Result<Identity, Refusal> {
+impl ManifestIdentity {
+    /// Inspects the caller. `None` means there is nothing to inspect and the
+    /// test fallback applies (a development daemon serving a connection
+    /// without a pidfd).
+    fn inspect_peer(&self, peer: &Peer) -> Result<Option<Inspected>, Refusal> {
         match self.inspector.inspect(peer) {
             Ok(inspected) => {
                 if inspected.uid != peer.uid {
@@ -336,37 +361,271 @@ impl Identify for ManifestIdentity {
                         ),
                     });
                 }
-                if let Some(ident) = self.match_manifest(&inspected)? {
-                    return Ok(ident);
-                }
-                if self.test_fallback {
-                    // Even under test fallback, enforce the environment reject
-                    // list when we have an inspected process.
-                    if let Some(bad_var) = find_rejected_env(&inspected.env_names, &[]) {
-                        return Err(Refusal {
-                            vault: None,
-                            message: format!("{bad_var} set"),
-                        });
-                    }
-                    return TestIdentity.identify(peer, statement, signature, now);
-                }
-                Err(Refusal {
-                    vault: None,
-                    message: format!(
-                        "executable {} isn't listed in any package manifest",
-                        inspected.exe_path.display()
-                    ),
-                })
+                Ok(Some(inspected))
             }
             Err(inspect_err) => {
                 if self.test_fallback && peer.pidfd.is_none() {
-                    return TestIdentity.identify(peer, statement, signature, now);
+                    return Ok(None);
                 }
                 Err(Refusal {
                     vault: None,
                     message: format!("inspection failed: {inspect_err}"),
                 })
             }
+        }
+    }
+
+    /// The manifest check, and the test fallback, for an inspected caller.
+    fn identify_inspected(
+        &self,
+        peer: &Peer,
+        inspected: &Inspected,
+        statement: Option<&str>,
+        signature: Option<&str>,
+        now: u64,
+    ) -> Result<Identity, Refusal> {
+        if let Some(ident) = self.match_manifest(inspected)? {
+            return Ok(ident);
+        }
+        if self.test_fallback {
+            // Even under test fallback, enforce the environment reject
+            // list when we have an inspected process.
+            if let Some(bad_var) = find_rejected_env(&inspected.env_names, &[]) {
+                return Err(Refusal {
+                    vault: None,
+                    message: format!("{bad_var} set"),
+                });
+            }
+            return TestIdentity.identify(peer, statement, signature, None, now);
+        }
+        Err(Refusal {
+            vault: None,
+            message: format!(
+                "executable {} isn't listed in any package manifest",
+                inspected.exe_path.display()
+            ),
+        })
+    }
+}
+
+impl Identify for ManifestIdentity {
+    fn identify(
+        &self,
+        peer: &Peer,
+        statement: Option<&str>,
+        signature: Option<&str>,
+        _succession: Option<(&str, &str)>,
+        now: u64,
+    ) -> Result<Identity, Refusal> {
+        match self.inspect_peer(peer)? {
+            Some(inspected) => self.identify_inspected(peer, &inspected, statement, signature, now),
+            None => TestIdentity.identify(peer, statement, signature, None, now),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signed statement identity (`airtight`, §4, §5, §7, §8)
+
+/// The daemon's identity check (§7.4): a signed statement first, then a
+/// package manifest, with one inspection of the caller. The vault is named by
+/// the fingerprint of the key that signed the statement, or of the first key
+/// in its line of `successions` (§6, §8). Every `Hello` is refused while
+/// `revoked_keys` or `successions` doesn't parse.
+pub struct SignedIdentity {
+    manifests: ManifestIdentity,
+    key_lists: KeyListFiles,
+    /// Serialises this daemon's writes to `successions` (§8).
+    recording: Mutex<()>,
+}
+
+/// A succession from `Hello` that checked out and isn't recorded yet.
+struct NewSuccession {
+    from: KeyFingerprint,
+    /// The new key, as it will be written to `successions`.
+    to: PublicKey,
+}
+
+impl SignedIdentity {
+    /// `state_dir` holds `revoked_keys` and `successions` (§6).
+    pub fn new(manifests: ManifestIdentity, state_dir: impl Into<PathBuf>) -> Self {
+        SignedIdentity {
+            manifests,
+            key_lists: KeyListFiles::new(state_dir),
+            recording: Mutex::new(()),
+        }
+    }
+
+    /// Checks a succession sent with a statement `signer` signed (§8):
+    /// signed by the key it's from, handing over to `signer`, from a key
+    /// that isn't revoked, and fitting the recorded successions. `None` if
+    /// it's recorded already.
+    fn check_succession(
+        &self,
+        lists: &KeyLists,
+        signer: &SignedBy,
+        text: &str,
+        signature: &str,
+        now: u64,
+    ) -> Result<Option<NewSuccession>, Refusal> {
+        let bad = |m: String| refused(None, format!("succession: {m}"));
+        // Signature first, parsing second (§5).
+        let by = verify_signature(SUCCESSION_NAMESPACE, text.as_bytes(), signature)
+            .map_err(|m| bad(format!("signature: {m}")))?;
+        let checked = SuccessionStatement::parse(text)
+            .and_then(|s| s.check(now))
+            .map_err(|e| bad(e.0))?;
+        let from = KeyFingerprint::parse(&checked.from)
+            .ok_or_else(|| bad(format!("from {:?} isn't a SHA256: fingerprint", checked.from)))?;
+        if by.fingerprint != from {
+            return Err(bad(format!(
+                "signed by {}, not by the key it's from, {from}",
+                by.fingerprint
+            )));
+        }
+        let to = parse_key_line(&checked.to).map_err(|m| bad(format!("to: {m}")))?;
+        let to_fingerprint = KeyFingerprint::of(&to);
+        if to_fingerprint != signer.fingerprint {
+            return Err(bad(format!(
+                "it hands over to {to_fingerprint}, but the statement is signed by {}",
+                signer.fingerprint
+            )));
+        }
+        if lists.is_revoked(&from) {
+            return Err(bad(format!("from revoked key {from}")));
+        }
+        match lists.check_new_succession(&from, &to_fingerprint) {
+            Ok(true) => Ok(Some(NewSuccession { from, to })),
+            Ok(false) => Ok(None),
+            Err(m) => Err(bad(m)),
+        }
+    }
+
+    /// Appends a checked succession to `successions` (§8). Another
+    /// connection may have recorded it meanwhile, which is fine; one that
+    /// now conflicts with it is refused.
+    fn record(&self, succession: &NewSuccession, now: u64) -> Result<(), String> {
+        let _writer = self.recording.lock().unwrap_or_else(|p| p.into_inner());
+        let note = format!(
+            "recorded {} from a succession statement",
+            format_rfc3339(now)
+        );
+        self.key_lists
+            .record_succession(&succession.from, &succession.to, &note)
+            .map(drop)
+            .map_err(|m| format!("can't record the succession: {m}"))
+    }
+
+    fn check_statement(
+        &self,
+        lists: &KeyLists,
+        inspected: &Inspected,
+        text: &str,
+        signature: &str,
+        succession: Option<(&str, &str)>,
+        now: u64,
+    ) -> Result<Identity, Refusal> {
+        // Signature first, parsing second (§5).
+        let signer = verify_signature(STATEMENT_NAMESPACE, text.as_bytes(), signature)
+            .map_err(|m| refused(None, format!("statement signature: {m}")))?;
+        if lists.is_revoked(&signer.fingerprint) {
+            return Err(refused(
+                Some(lists.vault_of(&signer.fingerprint).hex()),
+                format!("statement signed by revoked key {}", signer.fingerprint),
+            ));
+        }
+        let new_succession = match succession {
+            Some((s_text, s_signature)) => {
+                self.check_succession(lists, &signer, s_text, s_signature, now)?
+            }
+            None => None,
+        };
+        // Until it's recorded, a new succession carries the old key's vault.
+        let vault = match &new_succession {
+            Some(s) => lists.vault_of(&s.from),
+            None => lists.vault_of(&signer.fingerprint),
+        }
+        .hex();
+        let hint = || Some(vault.clone());
+        let checked = Statement::parse(text)
+            .and_then(|s| s.check(now))
+            .map_err(|e| refused(hint(), e.0))?;
+        let actual = inspected.sha256_hex();
+        if checked.sha256 != actual {
+            return Err(refused(
+                hint(),
+                format!(
+                    "the statement is for executable {}…, not {}… ({})",
+                    &checked.sha256[..8],
+                    &actual[..8],
+                    inspected.exe_path.display()
+                ),
+            ));
+        }
+        if let Some(bad_var) = find_rejected_env(&inspected.env_names, &checked.reject_env) {
+            return Err(refused(hint(), format!("{bad_var} set")));
+        }
+        if checked.level.is_some_and(|l| l != AIRTIGHT_LEVEL) {
+            // `hermetic` also needs the TPM2-sealed master key (§4).
+            return Err(refused(
+                hint(),
+                "hermetic needs a TPM2-sealed master key, which this build doesn't have (Milestone 4)",
+            ));
+        }
+        check_ptrace_scope(
+            &self.manifests.ptrace_scope_path,
+            AIRTIGHT_LEVEL,
+            AIRTIGHT_PTRACE_SCOPE,
+        )
+        .map_err(|m| refused(hint(), m))?;
+        // Recorded only once everything else has passed (§8).
+        if let Some(succession) = &new_succession {
+            self.record(succession, now).map_err(|m| refused(hint(), m))?;
+        }
+        Ok(Identity {
+            app: checked.app,
+            vault,
+            binary: checked.binary,
+            level: AIRTIGHT_LEVEL.into(),
+            lockers: checked.lockers,
+            statement_expires: Some(checked.expires),
+        })
+    }
+}
+
+impl Identify for SignedIdentity {
+    fn check_state(&self) -> Result<(), String> {
+        self.key_lists.load().map(|_| ())
+    }
+
+    fn identify(
+        &self,
+        peer: &Peer,
+        statement: Option<&str>,
+        signature: Option<&str>,
+        succession: Option<(&str, &str)>,
+        now: u64,
+    ) -> Result<Identity, Refusal> {
+        let lists = self.key_lists.load().map_err(|m| refused(None, m))?;
+        let Some(inspected) = self.manifests.inspect_peer(peer)? else {
+            return TestIdentity.identify(peer, statement, signature, None, now);
+        };
+        // A succession only matters with a signed statement: a package
+        // manifest doesn't care which key an app uses.
+        let (Some(text), Some(signature)) = (statement, signature) else {
+            return self
+                .manifests
+                .identify_inspected(peer, &inspected, statement, signature, now);
+        };
+        match self.check_statement(&lists, &inspected, text, signature, succession, now) {
+            Ok(ident) => Ok(ident),
+            // A package manifest may still vouch for the binary (§7.4). If
+            // none does, the statement's reason is the one worth reporting;
+            // a signed statement never falls back to the test identity.
+            Err(refusal) => match self.manifests.match_manifest(&inspected) {
+                Ok(Some(ident)) => Ok(ident),
+                _ => Err(refusal),
+            },
         }
     }
 }
@@ -465,6 +724,7 @@ impl Identify for TestIdentity {
         _peer: &Peer,
         statement: Option<&str>,
         _signature: Option<&str>,
+        _succession: Option<(&str, &str)>,
         now: u64,
     ) -> Result<Identity, Refusal> {
         let text = statement.ok_or_else(|| Refusal {

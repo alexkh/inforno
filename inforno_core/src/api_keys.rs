@@ -8,11 +8,13 @@
 //! `api_keys` expires 30 days after it is first filled. Adding or changing a
 //! key later doesn't extend that; when it lapses, the user enters keys again.
 //!
-//! Milestone 1: no signed statements yet. If no `<binary>_statement.json` is
-//! found next to the executable, Inforno builds an unsigned one at startup.
-//! The development daemon (`--test-identity`) trusts it and `Local` never
-//! verifies signatures; a Milestone 3 daemon will refuse it, and Inforno then
-//! falls back to keys entered for the session only.
+//! The statement comes from `<binary>_statement.json` and its `.sig`, found
+//! by vaultorno_client next to the executable or in the statement folders,
+//! along with `inforno_succession.json` after a key rotation. If there is
+//! none, Inforno builds an unsigned one at startup: the development daemon
+//! (`--test-identity`) trusts it and `Local` never verifies signatures, but
+//! a release daemon refuses it, and Inforno then falls back to keys entered
+//! for the session only.
 
 use std::collections::BTreeMap;
 
@@ -60,13 +62,18 @@ struct SavedIn {
 }
 
 /// Opens Inforno's vault: the daemon if it's running, otherwise `Local`.
+/// With a statement on disk, `Vault::open` finds it again, together with the
+/// succession beside it after a key rotation (design doc §8); without one,
+/// Inforno sends its unsigned development statement.
 pub fn open_vault() -> Result<Vault, KeysError> {
-    let statement = match vaultorno_client::find_statement(APP, &SystemClock) {
-        Ok(found) => found,
-        Err(vaultorno_client::Error::NoStatement(_)) => dev_statement(SystemClock.now()),
-        Err(e) => return Err(e.into()),
-    };
-    Ok(Vault::open_with(APP, Some(statement))?)
+    match vaultorno_client::find_statement(APP, &SystemClock) {
+        Ok(_) => Ok(Vault::open(APP)?),
+        Err(vaultorno_client::Error::NoStatement(_)) => Ok(Vault::open_with(
+            APP,
+            Some(dev_statement(SystemClock.now())),
+        )?),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// All saved keys, and when they expire (none if nothing is saved).

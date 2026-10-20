@@ -1,10 +1,12 @@
 #![allow(rustdoc::invalid_rust_codeblocks)]
-//! Text Editor Widget for [egui](https://github.com/emilk/egui) with numbered lines and simple syntax highlighting based on keywords sets.
+//! Text Editor Widget for [egui](https://github.com/emilk/egui) with numbered lines and syntax highlighting.
+//! Adapted from the `egui_code_editor` crate.
 //!
 //! ## Usage with egui
 //!
-//! ```rust
-//! use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
+//! ```ignore
+//! // Inside your egui code, where `ui` is an `&mut egui::Ui`:
+//! use bulat::editor::{CodeEditor, ColorTheme, Syntax};
 //!
 //! CodeEditor::default()
 //!   .id_source("code editor")
@@ -16,56 +18,34 @@
 //!   .show(ui, &mut self.code);
 //! ```
 //!
-//! ## Usage as lexer without egui
+//! ## Using the lexer on its own
 //!
-//! **Cargo.toml**
-//!
-//! ```toml
-//! [dependencies]
-//! egui_code_editor = { version = "0.2" , default-features = false }
-//! colorful = "0.2.2"
 //! ```
+//! use bulat::editor::{Syntax, Token, TokenType};
 //!
-//! **main.rs**
-//!
-//! ```rust
-//! use colorful::{Color, Colorful};
-//! use egui_code_editor::{Syntax, Token, TokenType};
-//!
-//! fn color(token: TokenType) -> Color {
+//! fn kind(token: TokenType) -> &'static str {
 //!     match token {
-//!         TokenType::Comment(_) => Color::Grey37,
-//!         TokenType::Function => Color::Yellow3b,
-//!         TokenType::Keyword => Color::IndianRed1c,
-//!         TokenType::Literal => Color::NavajoWhite1,
-//!         TokenType::Numeric(_) => Color::MediumPurple,
-//!         TokenType::Punctuation(_) => Color::Orange3,
-//!         TokenType::Special => Color::Cyan,
-//!         TokenType::Str(_) => Color::Green,
-//!         TokenType::Type => Color::GreenYellow,
-//!         TokenType::Whitespace(_) => Color::White,
-//!         TokenType::Unknown => Color::Pink1,
+//!         TokenType::Comment(_) => "comment",
+//!         TokenType::Function => "function",
+//!         TokenType::Hyperlink => "hyperlink",
+//!         TokenType::Keyword => "keyword",
+//!         TokenType::Literal => "literal",
+//!         TokenType::Numeric(_) => "number",
+//!         TokenType::Punctuation(_) => "punctuation",
+//!         TokenType::Special => "special",
+//!         TokenType::Str(_) => "string",
+//!         TokenType::Type => "type",
+//!         TokenType::Whitespace(_) => "whitespace",
+//!         TokenType::Unknown => "unknown",
 //!     }
 //! }
 //!
-//! fn main() {
-//!     let text = r#"// Code Editor
-//! CodeEditor::default()
-//!     .id_source("code editor")
-//!     .with_rows(12)
-//!     .with_fontsize(14.0)
-//!     .with_theme(self.theme)
-//!     .with_syntax(self.syntax.to_owned())
-//!     .with_numlines(true)
-//!     .vscroll(true)
-//!     .show(ui, &mut self.code);
-//!     "#;
-//!
-//!     let syntax = Syntax::rust();
-//!     for token in Token::default().tokens(&syntax, text) {
-//!         print!("{}", token.buffer().color(color(token.ty())));
-//!     }
+//! let syntax = Syntax::rust();
+//! let tokens = Token::default().tokens(&syntax, "let pi = 3.14_f32; // close enough");
+//! for token in &tokens {
+//!     println!("{:>12} {:?}", kind(token.ty()), token.buffer());
 //! }
+//! assert_eq!(kind(tokens[0].ty()), "keyword");
 //! ```
 mod completer;
 pub mod highlighting;

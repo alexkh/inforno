@@ -9,6 +9,7 @@
 
 pub mod identity;
 pub mod server;
+pub mod signing;
 pub mod store;
 pub mod sweep;
 

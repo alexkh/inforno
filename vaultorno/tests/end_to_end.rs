@@ -9,11 +9,10 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use vaultorno_client::testing::statement;
-use vaultorno_client::time::{Clock, SystemClock};
-use vaultorno_client::{DaemonOptions, Error, ExposeSecret, StatementFiles, Vault};
-
 const BIN: &str = env!("CARGO_BIN_EXE_vaultorno");
+/// A client in a process of its own (`tests/support/e2e_client.rs`).
+#[cfg(feature = "test_identity")]
+const CLIENT: &str = env!("CARGO_BIN_EXE_vaultorno_e2e_client");
 
 /// The daemon process, killed when the test ends.
 struct Daemon(Child);
@@ -45,24 +44,58 @@ fn start(state: &Path, socket: &Path) -> Daemon {
     daemon
 }
 
-fn open(
+/// Runs one client operation in a process of its own with an empty
+/// environment, as `binary` with `lockers` (`name:read` or
+/// `name:write[:days]`). Cargo sets `LD_LIBRARY_PATH` for tests, and the
+/// daemon refuses a caller with any variable on its reject list (§7.5), so
+/// the clients can't be this test process. `Err` carries a refusal.
+#[cfg(feature = "test_identity")]
+fn client(
     socket: &Path,
     home: &Path,
     binary: &str,
-    lockers: &[(&str, &str, Option<u32>)],
-) -> Result<Vault, Error> {
-    let now = SystemClock.now() - 60;
-    Vault::connect(DaemonOptions {
-        app: "e2e".into(),
-        socket: socket.to_path_buf(),
-        stream: None,
-        home: Some(home.to_path_buf()),
-        uid: None,
-        statement: Some(StatementFiles {
-            statement: statement("e2e", binary, now, lockers),
-            signature: None,
-        }),
-    })
+    lockers: &[&str],
+    op: &[&str],
+) -> Result<String, String> {
+    let out = Command::new(CLIENT)
+        .env_clear()
+        .arg("--socket")
+        .arg(socket)
+        .arg("--home")
+        .arg(home)
+        .args(["--binary", binary])
+        .args(lockers.iter().flat_map(|l| ["--locker", *l]))
+        .arg("--")
+        .args(op)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    match out.status.code() {
+        Some(0) => Ok(stdout),
+        Some(1) => Err(stdout),
+        _ => panic!(
+            "client {op:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
+}
+
+#[cfg(feature = "test_identity")]
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A `get`'s output, `<revision>:<hex>`, as the revision and the data.
+#[cfg(feature = "test_identity")]
+fn parse_get(out: &str) -> (String, Vec<u8>) {
+    let (revision, data) = out
+        .split_once(':')
+        .unwrap_or_else(|| panic!("not a get: {out:?}"));
+    let data = (0..data.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&data[i..i + 2], 16).unwrap())
+        .collect();
+    (revision.to_owned(), data)
 }
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
@@ -98,19 +131,18 @@ fn round_trip_through_the_real_binary() {
     );
 
     const SECRET: &[u8] = b"sk-e2e-canary-0b5e2c";
-    let writer = open(&socket, &home, "writer", &[("api_keys", "write", Some(30))]).unwrap();
-    assert!(writer.describe().contains("test identity"));
-    let stored = writer.put("api_keys", SECRET, 0).unwrap();
+    let writer = |op: &[&str]| client(&socket, &home, "writer", &["api_keys:write:30"], op);
+    let reader = |op: &[&str]| client(&socket, &home, "reader", &["api_keys:read"], op);
+    assert!(writer(&["describe"]).unwrap().contains("test identity"));
+    let stored = writer(&["put", "api_keys", hex(SECRET).as_str(), "0"]).unwrap();
+    let revision = stored.strip_prefix("stored ").unwrap();
 
-    // A second process, read-only.
-    let reader = open(&socket, &home, "reader", &[("api_keys", "read", None)]).unwrap();
-    let got = reader.get("api_keys").unwrap();
-    assert_eq!(got.data.expose_secret(), SECRET);
-    assert_eq!(got.revision, stored.revision);
-    assert!(matches!(
-        reader.put("api_keys", b"x", got.revision),
-        Err(Error::NotAllowed(_))
-    ));
+    // Another process, read-only.
+    let (got_revision, got) = parse_get(&reader(&["get", "api_keys"]).unwrap());
+    assert_eq!(got, SECRET);
+    assert_eq!(got_revision, revision);
+    let refused = reader(&["put", "api_keys", hex(b"x").as_str(), revision]).unwrap_err();
+    assert!(refused.starts_with("NotAllowed"), "{refused}");
 
     // The state is ciphertext only, under the real uid.
     let uid = rustix::process::getuid().as_raw();
@@ -142,7 +174,7 @@ fn round_trip_through_the_real_binary() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("swept:"));
     assert_eq!(
-        reader.get("api_keys").unwrap().data.expose_secret(),
+        parse_get(&reader(&["get", "api_keys"]).unwrap()).1,
         SECRET,
         "live lockers survive the sweep"
     );
@@ -151,6 +183,7 @@ fn round_trip_through_the_real_binary() {
 #[cfg(feature = "test_identity")]
 #[test]
 fn a_daemon_restart_keeps_the_vault() {
+    const WRITER: &[&str] = &["api_keys:write"];
     let dir = tempfile::tempdir().unwrap();
     let (state, socket, home) = (
         dir.path().join("state"),
@@ -159,14 +192,18 @@ fn a_daemon_restart_keeps_the_vault() {
     );
     {
         let _daemon = start(&state, &socket);
-        open(&socket, &home, "writer", &[("api_keys", "write", None)])
-            .unwrap()
-            .put("api_keys", b"kept", 0)
-            .unwrap();
+        client(
+            &socket,
+            &home,
+            "writer",
+            WRITER,
+            &["put", "api_keys", hex(b"kept").as_str(), "0"],
+        )
+        .unwrap();
     }
     let _daemon = start(&state, &socket);
-    let vault = open(&socket, &home, "writer", &[("api_keys", "write", None)]).unwrap();
-    assert_eq!(vault.get("api_keys").unwrap().data.expose_secret(), b"kept");
+    let got = client(&socket, &home, "writer", WRITER, &["get", "api_keys"]).unwrap();
+    assert_eq!(parse_get(&got).1, b"kept");
 }
 
 #[test]
@@ -202,9 +239,7 @@ fn real_inspect_mode_over_socket() {
 
 #[test]
 fn later_modes_and_unknown_modes_fail_cleanly() {
-    for mode in [
-        "init", "status", "check", "vaults", "log", "revoke", "forget",
-    ] {
+    for mode in ["init", "status", "check", "vaults", "log", "forget"] {
         let out = Command::new(BIN).arg(mode).output().unwrap();
         assert!(!out.status.success(), "{mode}");
         assert!(
@@ -229,4 +264,40 @@ fn later_modes_and_unknown_modes_fail_cleanly() {
             .status
             .success()
     );
+}
+
+#[test]
+fn revoke_mode_appends_and_undoes() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGf35LBmeMKO1jMA9oUql/3dGOKq+QS9ISbJkDJzoRu inforno_release_2026";
+    let fingerprint = "SHA256:er8u9VfNuR0xkLRM0QgzXCYQOcmcBhHaj1lAkDj0+fA";
+    let revoke = |args: &[&str]| {
+        Command::new(BIN)
+            .arg("revoke")
+            .arg("--state-dir")
+            .arg(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let list = || fs::read_to_string(dir.path().join("revoked_keys")).unwrap_or_default();
+
+    // Unquoted words make up the key line.
+    let out = revoke(&key.split(' ').collect::<Vec<_>>());
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(fingerprint));
+    assert!(list().contains(key));
+
+    // A .pub file works too, and revoking twice changes nothing.
+    let pub_file = dir.path().join("release.pub");
+    fs::write(&pub_file, format!("{key}\n")).unwrap();
+    let out = revoke(&[pub_file.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already revoked"));
+    assert_eq!(list().matches("ssh-ed25519").count(), 1);
+
+    let out = revoke(&["--undo", pub_file.to_str().unwrap()]);
+    assert!(out.status.success());
+    assert!(!list().contains("ssh-ed25519"));
+
+    assert!(!revoke(&["not", "a", "key"]).status.success());
 }

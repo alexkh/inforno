@@ -2,12 +2,16 @@
 //! depends only on its first argument; what it may do depends only on how
 //! it was started.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use vaultorno::identity::{InProcessInspector, Inspector, ManifestIdentity, SocketInspector};
+use vaultorno::identity::{
+    InProcessInspector, Inspector, ManifestIdentity, SignedIdentity, SocketInspector,
+};
 use vaultorno::server::{DEFAULT_BACKOFF_BASE, Server};
+use vaultorno::signing::{KeyFingerprint, KeyListFiles, edit_revoked_keys, parse_key_line};
 use vaultorno::store::Store;
 use vaultorno::sweep::sweep;
 use vaultorno::time::{Clock, SystemClock};
@@ -16,15 +20,17 @@ use vaultorno_inspect::{DEFAULT_INSPECT_SOCKET, serve_inspect};
 const USAGE: &str = "\
 usage: vaultorno <mode> [options]
 
-modes in this build (Milestone 2):
+modes in this build (Milestone 3):
   daemon [--state-dir DIR] [--socket PATH] [--inspect-socket PATH] [--test-identity]
       serve apps
   inspect [--socket PATH] [--daemon-uid UID]
       run the process identity inspector
   sweep [--state-dir DIR]
       delete expired lockers and stale vaults
+  revoke [--undo] [--state-dir DIR] <public key or .pub file>
+      refuse statements signed by a key from now on (as root)
 
-later milestones: init, status, check, vaults, log, revoke, forget
+later milestones: init, status, check, vaults, log, forget
 
 defaults:
   --state-dir      /var/lib/vaultorno
@@ -49,7 +55,8 @@ fn main() -> ExitCode {
         "daemon" => daemon(rest),
         "inspect" => inspect(rest),
         "sweep" => run_sweep(rest),
-        "init" | "status" | "check" | "vaults" | "log" | "revoke" | "forget" => {
+        "revoke" => revoke(rest),
+        "init" | "status" | "check" | "vaults" | "log" | "forget" => {
             fail(&format!("`vaultorno {mode}` arrives in a later milestone"))
         }
         "help" | "--help" | "-h" => {
@@ -130,7 +137,10 @@ fn serve(opts: Options) -> ExitCode {
     } else {
         Arc::new(SocketInspector::new(&opts.inspect_socket, None))
     };
-    let identity = ManifestIdentity::new(inspector, opts.test_identity);
+    let identity = SignedIdentity::new(
+        ManifestIdentity::new(inspector, opts.test_identity),
+        store.root(),
+    );
     let server = Server::with_backoff(
         store,
         Box::new(identity),
@@ -189,4 +199,82 @@ fn run_sweep(args: &[String]) -> ExitCode {
         }
         Err(e) => fail(&format!("sweep failed: {e}")),
     }
+}
+
+fn revoke(args: &[String]) -> ExitCode {
+    let mut state_dir = PathBuf::from("/var/lib/vaultorno");
+    let mut undo = false;
+    let mut words: Vec<&str> = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--undo" => undo = true,
+            "--state-dir" => match it.next() {
+                Some(d) => state_dir = d.into(),
+                None => return fail("--state-dir needs a folder"),
+            },
+            other if other.starts_with("--") => return fail(&format!("unknown option {other:?}")),
+            word => words.push(word),
+        }
+    }
+    if words.is_empty() {
+        return fail("revoke needs a public key, or the path of a .pub file");
+    }
+    // One argument naming a file is a .pub file; otherwise the words are the
+    // key line itself, quoted or not.
+    let text = match words.as_slice() {
+        [one] if Path::new(one).is_file() => match fs::read_to_string(one) {
+            Ok(t) => t,
+            Err(e) => return fail(&format!("can't read {one}: {e}")),
+        },
+        _ => words.join(" "),
+    };
+    let Some(line) = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+    else {
+        return fail("no public key given");
+    };
+    let key = match parse_key_line(line) {
+        Ok(k) => k,
+        Err(e) => return fail(&e),
+    };
+    if !state_dir.is_dir() {
+        return fail(&format!("no state folder at {}", state_dir.display()));
+    }
+    let fingerprint = KeyFingerprint::of(&key);
+    match edit_revoked_keys(&state_dir, &key, undo) {
+        Ok(true) if undo => println!(
+            "no longer revoked: {fingerprint}; its statements work again"
+        ),
+        Ok(true) => println!(
+            "revoked {fingerprint} (key id {}); new connections refuse its statements at once",
+            fingerprint.key_id()
+        ),
+        Ok(false) if undo => println!("{fingerprint} wasn't revoked"),
+        Ok(false) => println!("{fingerprint} was already revoked"),
+        Err(e) => return fail(&e),
+    }
+    if !undo {
+        warn_about_successors(&state_dir, &fingerprint);
+    }
+    ExitCode::SUCCESS
+}
+
+/// A stolen key may have handed its vault on before it was revoked (§8):
+/// name the keys that keep that vault through it.
+fn warn_about_successors(state_dir: &Path, key: &KeyFingerprint) {
+    let Ok(lists) = KeyListFiles::new(state_dir).load() else {
+        return;
+    };
+    let successors = lists.successors_of(key);
+    if successors.is_empty() {
+        return;
+    }
+    println!("note: successions hand its vault on to these keys, which keep it:");
+    for successor in successors {
+        println!("  {successor}");
+    }
+    println!("revoke them too unless they are yours");
 }

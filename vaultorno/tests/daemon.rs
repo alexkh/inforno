@@ -25,7 +25,9 @@ use vaultorno_client::testing::{
     APP, Harness, START, reader_statement, statement, writer_statement,
 };
 use vaultorno_client::time::{Clock, DAY, FakeClock};
-use vaultorno_client::{DaemonOptions, Error, ExposeSecret, StatementFiles, Vault};
+use vaultorno_client::{
+    DaemonOptions, Error, ExposeSecret, StatementFiles, SuccessionFiles, Vault,
+};
 
 // ---------------------------------------------------------------------------
 // Test environment
@@ -84,6 +86,7 @@ impl Env {
                 statement,
                 signature: None,
             }),
+            succession: None,
         })
     }
 
@@ -141,6 +144,7 @@ impl Raw {
             statement: Some(statement),
             signature: None,
             succession: None,
+            succession_signature: None,
         })
         .expect("a reply to hello")
     }
@@ -418,6 +422,21 @@ fn another_protocol_version_is_refused() {
         statement: Some(writer_statement(START)),
         signature: None,
         succession: None,
+        succession_signature: None,
+    });
+    assert_eq!(code(&reply), Some(ErrorCode::ProtocolMismatch));
+}
+
+#[test]
+fn a_succession_without_its_signature_is_refused() {
+    let env = env();
+    let mut raw = Raw::new(env.stream(UID));
+    let reply = raw.send(Request::Hello {
+        protocol: PROTOCOL,
+        statement: Some(writer_statement(START)),
+        signature: None,
+        succession: Some("{}".into()),
+        succession_signature: None,
     });
     assert_eq!(code(&reply), Some(ErrorCode::ProtocolMismatch));
 }
@@ -876,6 +895,7 @@ impl ManifestEnv {
             home: Some(home),
             uid: Some(uid),
             statement,
+            succession: None,
         })
     }
 }
@@ -1047,4 +1067,613 @@ fn progressive_backoff_slows_repeated_refusals() {
     assert!(d1 >= Duration::from_millis(12), "d1={d1:?}");
     assert!(d2 >= Duration::from_millis(25), "d2={d2:?}");
     assert!(d3 >= Duration::from_millis(50), "d3={d3:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 3: signed statements, vaults by key fingerprint, revoked_keys and
+// successions
+
+use ssh_key::private::Ed25519Keypair;
+use ssh_key::{HashAlg, LineEnding, PrivateKey, SshSig};
+use vaultorno::signing::{
+    KeyFingerprint, REVOKED_KEYS, STATEMENT_NAMESPACE, SUCCESSION_NAMESPACE, SUCCESSIONS,
+    edit_revoked_keys,
+};
+use vaultorno_client::time::format_rfc3339;
+
+struct SignedEnv {
+    server: Arc<Server>,
+    inspector: Arc<vaultorno::identity::FakeInspector>,
+    clock: Arc<FakeClock>,
+    root: TempDir,
+    state: PathBuf,
+    bin_dir: PathBuf,
+    manifests_dir: PathBuf,
+    ptrace_file: PathBuf,
+    uid: u32,
+}
+
+/// A signing key, the same for the same seed.
+fn signing_key(seed: u8) -> PrivateKey {
+    PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
+}
+
+fn fingerprint(key: &PrivateKey) -> KeyFingerprint {
+    KeyFingerprint::of(key.public_key())
+}
+
+/// `ssh-keygen -Y sign -n vaultorno/statement` (SHA-512 is its default).
+fn sign(key: &PrivateKey, namespace: &str, text: &str) -> String {
+    SshSig::sign(key, namespace, HashAlg::Sha512, text.as_bytes())
+        .unwrap()
+        .to_pem(LineEnding::LF)
+        .unwrap()
+}
+
+fn signed_env() -> SignedEnv {
+    use std::os::unix::fs::PermissionsExt;
+    use vaultorno::identity::{FakeInspector, ManifestIdentity, SignedIdentity};
+
+    let uid = rustix::process::geteuid().as_raw();
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let manifests_dir = root.path().join("manifests");
+    let bin_dir = root.path().join("bin");
+    for dir in [&manifests_dir, &bin_dir] {
+        fs::create_dir(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ptrace_file = root.path().join("ptrace_scope");
+    fs::write(&ptrace_file, "2\n").unwrap();
+
+    let inspector = FakeInspector::new();
+    let manifests = ManifestIdentity::for_testing(
+        &manifests_dir,
+        root.path(),
+        uid,
+        &ptrace_file,
+        inspector.clone(),
+        false,
+    );
+    let state = root.path().join("state");
+    let store = Store::open(&state).unwrap();
+    let identity = SignedIdentity::new(manifests, &state);
+    let clock = Arc::new(FakeClock::new(START));
+    let server = Server::new(store, Box::new(identity), clock.clone());
+    SignedEnv {
+        server,
+        inspector,
+        clock,
+        root,
+        state,
+        bin_dir,
+        manifests_dir,
+        ptrace_file,
+        uid,
+    }
+}
+
+impl SignedEnv {
+    /// A test executable with distinct contents, so a distinct hash.
+    fn binary(&self, name: &str, contents: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.bin_dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n# {contents}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn inspected(&self, bin: &Path, env_names: &[&str]) -> vaultorno_inspect::Inspected {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(bin).unwrap();
+        vaultorno_inspect::Inspected {
+            pid: 4343,
+            uid: self.uid,
+            exe_path: bin.to_path_buf(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            sha256: Sha256::digest(fs::read(bin).unwrap()).into(),
+            env_names: env_names.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    fn sha256_of(&self, bin: &Path) -> String {
+        self.inspected(bin, &[]).sha256_hex()
+    }
+
+    /// A statement for `bin`, issued now and valid 90 days, with `extra`
+    /// fields merged in.
+    fn statement(
+        &self,
+        bin: &Path,
+        lockers: &[(&str, &str, Option<u32>)],
+        extra: serde_json::Value,
+    ) -> String {
+        let name = bin.file_name().unwrap().to_str().unwrap();
+        let text = statement("inforno", name, self.clock.now(), lockers);
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        value["sha256"] = self.sha256_of(bin).into();
+        for (k, v) in extra.as_object().unwrap() {
+            value[k] = v.clone();
+        }
+        value.to_string()
+    }
+
+    fn connect(
+        &self,
+        bin: &Path,
+        env_names: &[&str],
+        text: String,
+        signature: Option<String>,
+    ) -> Result<Vault, Error> {
+        self.connect_with(bin, env_names, text, signature, None)
+    }
+
+    fn connect_with(
+        &self,
+        bin: &Path,
+        env_names: &[&str],
+        text: String,
+        signature: Option<String>,
+        succession: Option<SuccessionFiles>,
+    ) -> Result<Vault, Error> {
+        self.inspector.set_default(self.inspected(bin, env_names));
+        let (client, daemon) = UnixStream::pair().unwrap();
+        let server = self.server.clone();
+        let uid = self.uid;
+        thread::spawn(move || server.serve(daemon, Peer::without_pidfd(uid, Some(4343))));
+        Vault::connect(DaemonOptions {
+            app: "inforno".into(),
+            socket: PathBuf::from("/nonexistent"),
+            stream: Some(client),
+            home: Some(self.home()),
+            uid: Some(uid),
+            statement: Some(StatementFiles {
+                statement: text,
+                signature,
+            }),
+            succession,
+        })
+    }
+
+    /// Opens `bin` with a statement for it signed by `key`.
+    fn open(
+        &self,
+        bin: &Path,
+        key: &PrivateKey,
+        lockers: &[(&str, &str, Option<u32>)],
+    ) -> Result<Vault, Error> {
+        let text = self.statement(bin, lockers, serde_json::json!({}));
+        let sig = sign(key, STATEMENT_NAMESPACE, &text);
+        self.connect(bin, &["PATH", "HOME"], text, Some(sig))
+    }
+
+    /// Opens `bin` for writing with a statement signed by `key`, sending
+    /// `succession` with it.
+    fn open_succeeding(
+        &self,
+        bin: &Path,
+        key: &PrivateKey,
+        succession: SuccessionFiles,
+    ) -> Result<Vault, Error> {
+        let text = self.statement(bin, WRITE, serde_json::json!({}));
+        let sig = sign(key, STATEMENT_NAMESPACE, &text);
+        self.connect_with(bin, &["PATH", "HOME"], text, Some(sig), Some(succession))
+    }
+
+    fn home(&self) -> PathBuf {
+        self.root.path().join("home")
+    }
+}
+
+const WRITE: &[(&str, &str, Option<u32>)] = &[("api_keys", "write", Some(30))];
+const READ: &[(&str, &str, Option<u32>)] = &[("api_keys", "read", None)];
+
+fn not_allowed(result: Result<Vault, Error>) -> String {
+    match result {
+        Err(Error::NotAllowed(msg)) => msg,
+        other => panic!("expected NotAllowed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_signed_statement_opens_its_keys_vault() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let (inforno, autorno) = (
+        env.binary("inforno", "writer"),
+        env.binary("autorno", "reader"),
+    );
+
+    let writer = env.open(&inforno, &key, WRITE).unwrap();
+    let vault = fingerprint(&key).hex();
+    assert_eq!(writer.vault_name(), Some(vault.as_str()));
+    assert_eq!(writer.binary(), Some("inforno"));
+    assert_eq!(writer.statement_expires(), Some(START + 90 * DAY));
+    assert!(writer.describe().starts_with("vaultorno, airtight, blind"));
+    writer.put("api_keys", b"sk-signed-1", 0).unwrap();
+
+    // Another binary of the same app, signed by the same key, shares the
+    // vault and the user's half.
+    let reader = env.open(&autorno, &key, READ).unwrap();
+    assert_eq!(reader.vault_name(), Some(vault.as_str()));
+    assert_eq!(
+        reader.get("api_keys").unwrap().data.expose_secret(),
+        b"sk-signed-1"
+    );
+    assert!(matches!(
+        reader.put("api_keys", b"x", 0),
+        Err(Error::NotAllowed(_))
+    ));
+    let half = env
+        .home()
+        .join(".local/share/vaultorno")
+        .join(format!("inforno_{}", fingerprint(&key).key_id()))
+        .join("user_half");
+    assert!(half.is_file(), "{}", half.display());
+    assert!(env.state.join(format!("users/{}/{vault}/daemon_half", env.uid)).is_file());
+}
+
+#[test]
+fn a_statement_for_another_hash_is_refused() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let genuine = env.binary("inforno", "genuine");
+    let text = env.statement(&genuine, WRITE, serde_json::json!({}));
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+
+    // The genuine binary's statement, presented by another executable.
+    let tampered = env.binary("tampered", "something else");
+    let msg = not_allowed(env.connect(&tampered, &["PATH"], text.clone(), Some(sig.clone())));
+    assert!(msg.contains("the statement is for executable"), "{msg}");
+
+    // A byte-identical copy elsewhere is the same executable.
+    fs::copy(&genuine, env.bin_dir.join("copy")).unwrap();
+    let copy = env.connect(&env.bin_dir.join("copy"), &["PATH"], text, Some(sig));
+    assert_eq!(copy.unwrap().vault_name(), Some(fingerprint(&key).hex().as_str()));
+}
+
+#[test]
+fn an_expired_or_not_yet_valid_statement_is_refused() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "writer");
+    let text = env.statement(&bin, WRITE, serde_json::json!({}));
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+
+    // Refusals for a key whose vault doesn't exist yet aren't counted: anyone
+    // can make keys, and the daemon keeps no count for vaults nobody uses.
+    env.clock.set(START + 90 * DAY);
+    not_allowed(env.connect(&bin, &["PATH"], text.clone(), Some(sig.clone())));
+    env.clock.set(START);
+    assert_eq!(env.open(&bin, &key, WRITE).unwrap().refused(), 0);
+
+    env.clock.set(START - 1);
+    let msg = not_allowed(env.connect(&bin, &["PATH"], text.clone(), Some(sig.clone())));
+    assert!(msg.contains("isn't valid until"), "{msg}");
+
+    env.clock.set(START + 90 * DAY);
+    let msg = not_allowed(env.connect(&bin, &["PATH"], text, Some(sig)));
+    assert!(msg.contains("statement expired on"), "{msg}");
+
+    // A fresh statement opens the vault, and hears about both refusals.
+    let fresh = env.open(&bin, &key, WRITE).unwrap();
+    assert_eq!(fresh.refused(), 2);
+}
+
+#[test]
+fn a_statement_signed_by_another_key_opens_another_empty_vault() {
+    let env = signed_env();
+    let (release, other) = (signing_key(1), signing_key(2));
+    let bin = env.binary("inforno", "writer");
+    env.open(&bin, &release, WRITE)
+        .unwrap()
+        .put("api_keys", b"release secret", 0)
+        .unwrap();
+
+    let impostor = env.open(&bin, &other, WRITE).unwrap();
+    assert_eq!(impostor.vault_name(), Some(fingerprint(&other).hex().as_str()));
+    assert_ne!(fingerprint(&other), fingerprint(&release));
+    assert_eq!(impostor.get("api_keys").unwrap().revision, 0);
+    assert!(impostor.get("api_keys").unwrap().data.expose_secret().is_empty());
+}
+
+#[test]
+fn a_tampered_or_misdirected_signature_is_refused() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "writer");
+    let text = env.statement(&bin, WRITE, serde_json::json!({}));
+
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+    let edited = text.replace("\"lifetime_days\":30", "\"lifetime_days\":90");
+    assert_ne!(edited, text);
+    let msg = not_allowed(env.connect(&bin, &["PATH"], edited, Some(sig)));
+    assert_eq!(msg, "statement signature: bad signature");
+
+    let wrong_ns = sign(&key, "file", &text);
+    let msg = not_allowed(env.connect(&bin, &["PATH"], text.clone(), Some(wrong_ns)));
+    assert!(msg.contains("namespace"), "{msg}");
+
+    let msg = not_allowed(env.connect(&bin, &["PATH"], text, Some("garbage".into())));
+    assert!(msg.contains("not an SSH signature"), "{msg}");
+}
+
+#[test]
+fn a_revoked_key_gets_no_access_until_unrevoked() {
+    let env = signed_env();
+    let (key, other) = (signing_key(1), signing_key(2));
+    let bin = env.binary("inforno", "writer");
+    env.open(&bin, &key, WRITE).unwrap();
+
+    assert!(edit_revoked_keys(&env.state, key.public_key(), false).unwrap());
+    let msg = not_allowed(env.open(&bin, &key, WRITE));
+    assert!(msg.contains("revoked key"), "{msg}");
+    assert!(msg.contains(&fingerprint(&key).to_string()), "{msg}");
+    assert!(env.open(&bin, &other, WRITE).is_ok(), "other keys still work");
+
+    assert!(edit_revoked_keys(&env.state, key.public_key(), true).unwrap());
+    let back = env.open(&bin, &key, WRITE).unwrap();
+    assert_eq!(back.refused(), 1);
+}
+
+#[test]
+fn a_key_list_that_doesnt_parse_refuses_everything() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "writer");
+    for file in [REVOKED_KEYS, SUCCESSIONS] {
+        fs::write(env.state.join(file), "# fine\nnot a key\n").unwrap();
+        match env.open(&bin, &key, WRITE) {
+            Err(Error::Storage(msg)) => {
+                assert!(msg.starts_with(&format!("{file} line 2")), "{msg}")
+            }
+            other => panic!("expected Storage for {file}, got {other:?}"),
+        }
+        // Unsigned callers, which only a manifest could vouch for, too.
+        let unsigned = env.statement(&bin, WRITE, serde_json::json!({}));
+        assert!(matches!(
+            env.connect(&bin, &["PATH"], unsigned, None),
+            Err(Error::Storage(_))
+        ));
+        fs::write(env.state.join(file), "# fine\n").unwrap();
+        assert!(env.open(&bin, &key, WRITE).is_ok());
+    }
+}
+
+#[test]
+fn a_recorded_succession_carries_the_vault_to_a_new_key() {
+    let env = signed_env();
+    let (old, new) = (signing_key(1), signing_key(2));
+    let bin = env.binary("inforno", "writer");
+    env.open(&bin, &old, WRITE)
+        .unwrap()
+        .put("api_keys", b"carried over", 0)
+        .unwrap();
+
+    let mut new_public = new.public_key().clone();
+    new_public.set_comment("inforno_release_2027");
+    fs::write(
+        env.state.join(SUCCESSIONS),
+        format!("{} {}\n", fingerprint(&old), new_public.to_openssh().unwrap()),
+    )
+    .unwrap();
+    let rotated = env.open(&bin, &new, WRITE).unwrap();
+    assert_eq!(rotated.vault_name(), Some(fingerprint(&old).hex().as_str()));
+    assert_eq!(
+        rotated.get("api_keys").unwrap().data.expose_secret(),
+        b"carried over"
+    );
+
+    // Revoking the old key doesn't touch its successor; revoking the new one
+    // does.
+    edit_revoked_keys(&env.state, old.public_key(), false).unwrap();
+    assert!(env.open(&bin, &new, WRITE).is_ok());
+    edit_revoked_keys(&env.state, new.public_key(), false).unwrap();
+    assert!(not_allowed(env.open(&bin, &new, WRITE)).contains("revoked key"));
+}
+
+#[test]
+fn airtight_needs_ptrace_scope_2_and_hermetic_is_refused() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "writer");
+    fs::write(&env.ptrace_file, "1\n").unwrap();
+    let msg = not_allowed(env.open(&bin, &key, WRITE));
+    assert_eq!(msg, "ptrace_scope is 1, airtight needs 2");
+    fs::write(&env.ptrace_file, "3\n").unwrap();
+    assert!(env.open(&bin, &key, WRITE).is_ok());
+
+    let text = env.statement(&bin, WRITE, serde_json::json!({ "level": "hermetic" }));
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+    let msg = not_allowed(env.connect(&bin, &["PATH"], text, Some(sig)));
+    assert!(msg.contains("hermetic needs a TPM2-sealed master key"), "{msg}");
+}
+
+#[test]
+fn the_statements_reject_env_adds_to_the_built_in_list() {
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "writer");
+    let text = env.statement(
+        &bin,
+        WRITE,
+        serde_json::json!({ "reject_env": ["INFORNO_PLUGIN_*"] }),
+    );
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+    for bad in ["LD_PRELOAD", "VK_LAYER_PATH", "INFORNO_PLUGIN_DIR"] {
+        let msg = not_allowed(env.connect(&bin, &["PATH", bad], text.clone(), Some(sig.clone())));
+        assert_eq!(msg, format!("{bad} set"));
+    }
+    assert!(env.connect(&bin, &["PATH", "INFORNO_HOME"], text, Some(sig)).is_ok());
+}
+
+#[test]
+fn a_manifest_still_vouches_when_a_statement_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "packaged");
+    let manifest = env.manifests_dir.join("inforno.json");
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "format": 1,
+            "app": "inforno",
+            "binaries": { "inforno": {
+                "path": bin.to_str().unwrap(),
+                "lockers": { "api_keys": { "access": "write" } }
+            } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+
+    // A statement for another build: the manifest still lists this binary.
+    let other = env.binary("other_build", "upstream build");
+    let text = env.statement(&other, WRITE, serde_json::json!({}));
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+    let vault = env.connect(&bin, &["PATH"], text, Some(sig)).unwrap();
+    assert_eq!(vault.vault_name(), Some("pkg_inforno"));
+    assert!(vault.describe().contains("watertight"));
+}
+
+/// A succession statement handing `from`'s vault to `to` (§8).
+fn succession_text(from: &PrivateKey, to: &PrivateKey, issued: u64) -> String {
+    let mut public = to.public_key().clone();
+    public.set_comment("inforno_release_2027");
+    serde_json::json!({
+        "format": 1,
+        "succession": {
+            "from": fingerprint(from).to_string(),
+            "to": public.to_openssh().unwrap(),
+        },
+        "issued": format_rfc3339(issued),
+    })
+    .to_string()
+}
+
+fn signed_succession(text: String, signer: &PrivateKey, namespace: &str) -> SuccessionFiles {
+    SuccessionFiles {
+        signature: sign(signer, namespace, &text),
+        succession: text,
+    }
+}
+
+#[test]
+fn a_succession_in_hello_carries_the_vault_and_is_recorded() {
+    let env = signed_env();
+    let (old, new) = (signing_key(1), signing_key(2));
+    let bin = env.binary("inforno", "writer");
+    env.open(&bin, &old, WRITE)
+        .unwrap()
+        .put("api_keys", b"carried over", 0)
+        .unwrap();
+
+    let succession = signed_succession(
+        succession_text(&old, &new, START),
+        &old,
+        SUCCESSION_NAMESPACE,
+    );
+    let rotated = env.open_succeeding(&bin, &new, succession.clone()).unwrap();
+    assert_eq!(rotated.vault_name(), Some(fingerprint(&old).hex().as_str()));
+    assert_eq!(
+        rotated.get("api_keys").unwrap().data.expose_secret(),
+        b"carried over"
+    );
+    let recorded = fs::read_to_string(env.state.join(SUCCESSIONS)).unwrap();
+    assert!(
+        recorded.contains(&format!("{} ssh-ed25519 ", fingerprint(&old))),
+        "{recorded}"
+    );
+    assert!(recorded.contains("inforno_release_2027"));
+
+    // Recorded once: presenting it again changes nothing, and the new key
+    // no longer needs it.
+    env.open_succeeding(&bin, &new, succession).unwrap();
+    assert_eq!(
+        fs::read_to_string(env.state.join(SUCCESSIONS)).unwrap(),
+        recorded
+    );
+    let later = env.open(&bin, &new, WRITE).unwrap();
+    assert_eq!(later.vault_name(), Some(fingerprint(&old).hex().as_str()));
+
+    // A key succeeds only one other.
+    let third = signing_key(3);
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &new,
+        signed_succession(
+            succession_text(&third, &new, START),
+            &third,
+            SUCCESSION_NAMESPACE,
+        ),
+    ));
+    assert!(msg.contains("already succeeds"), "{msg}");
+}
+
+#[test]
+fn a_bad_succession_is_refused_and_not_recorded() {
+    let env = signed_env();
+    let (old, new, other) = (signing_key(1), signing_key(2), signing_key(3));
+    let bin = env.binary("inforno", "writer");
+    env.open(&bin, &old, WRITE).unwrap();
+    let good = succession_text(&old, &new, START);
+
+    // Signed by a key other than the one it's from.
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &new,
+        signed_succession(good.clone(), &other, SUCCESSION_NAMESPACE),
+    ));
+    assert!(msg.contains("not by the key it's from"), "{msg}");
+
+    // A statement's signature can't stand in for a succession's.
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &new,
+        signed_succession(good.clone(), &old, STATEMENT_NAMESPACE),
+    ));
+    assert!(msg.contains("namespace"), "{msg}");
+
+    // Handing over to another key than the statement's.
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &other,
+        signed_succession(good.clone(), &old, SUCCESSION_NAMESPACE),
+    ));
+    assert!(msg.contains("the statement is signed by"), "{msg}");
+
+    // Not valid yet.
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &new,
+        signed_succession(
+            succession_text(&old, &new, START + DAY),
+            &old,
+            SUCCESSION_NAMESPACE,
+        ),
+    ));
+    assert!(msg.contains("isn't valid until"), "{msg}");
+
+    // Tampered with.
+    let mut tampered = signed_succession(good.clone(), &old, SUCCESSION_NAMESPACE);
+    tampered.succession = tampered
+        .succession
+        .replace("inforno_release_2027", "inforno_release_2028");
+    let msg = not_allowed(env.open_succeeding(&bin, &new, tampered));
+    assert!(msg.contains("bad signature"), "{msg}");
+
+    // From a revoked key.
+    edit_revoked_keys(&env.state, old.public_key(), false).unwrap();
+    let msg = not_allowed(env.open_succeeding(
+        &bin,
+        &new,
+        signed_succession(good, &old, SUCCESSION_NAMESPACE),
+    ));
+    assert!(msg.contains("from revoked key"), "{msg}");
+
+    assert!(!env.state.join(SUCCESSIONS).exists(), "nothing recorded");
 }

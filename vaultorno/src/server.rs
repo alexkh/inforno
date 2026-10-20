@@ -192,12 +192,13 @@ impl Server {
         let id = first.id;
         let reply = |body: Response| write_frame(&mut &*stream, &Frame { id, body });
 
-        let (statement, signature) = match first.body {
+        let (statement, signature, succession_text, succession_signature) = match first.body {
             Request::Hello {
                 protocol,
                 statement,
                 signature,
-                ..
+                succession,
+                succession_signature,
             } => {
                 if protocol != PROTOCOL {
                     return reply(error(
@@ -205,7 +206,7 @@ impl Server {
                         format!("this daemon speaks protocol {PROTOCOL}"),
                     ));
                 }
-                (statement, signature)
+                (statement, signature, succession, succession_signature)
             }
             _ => {
                 return reply(error(
@@ -214,20 +215,44 @@ impl Server {
                 ));
             }
         };
+        // A succession and its signature come together (§8).
+        let succession = match (succession_text.as_deref(), succession_signature.as_deref()) {
+            (Some(text), Some(sig)) => Some((text, sig)),
+            (None, None) => None,
+            _ => {
+                return reply(error(
+                    ErrorCode::ProtocolMismatch,
+                    "a succession is sent with its signature, or not at all",
+                ));
+            }
+        };
 
+        // Unreadable state, e.g. a line in `revoked_keys` that isn't a key:
+        // refuse everything rather than guess (§9).
+        if let Err(message) = self.identity.check_state() {
+            return reply(error(ErrorCode::Storage, message));
+        }
         let now = self.clock.now();
         let ident =
-            match self
-                .identity
-                .identify(&peer, statement.as_deref(), signature.as_deref(), now)
-            {
+            match self.identity.identify(
+                &peer,
+                statement.as_deref(),
+                signature.as_deref(),
+                succession,
+                now,
+            ) {
                 Ok(i) => {
                     self.clear_backoff(&peer);
                     i
                 }
                 Err(refusal) => {
+                    // Anyone can sign with a fresh key, so a fingerprint vault
+                    // is counted only once it exists; manifest vaults are
+                    // bounded by the manifests root installed.
                     if let Some(vault) = refusal.vault {
-                        *lock(&self.refused).entry((peer.uid, vault)).or_default() += 1;
+                        if !is_key_vault(&vault) || self.store.vault_exists(peer.uid, &vault) {
+                            *lock(&self.refused).entry((peer.uid, vault)).or_default() += 1;
+                        }
                     }
                     self.apply_backoff(&peer);
                     return reply(error(ErrorCode::NotAllowed, refusal.message));
@@ -505,6 +530,12 @@ fn refuse_busy(stream: &UnixStream) {
             ),
         },
     );
+}
+
+/// A vault named by a key fingerprint (64 hex digits), not `pkg_` or
+/// `test_` (§6).
+fn is_key_vault(vault: &str) -> bool {
+    vault.len() == 64 && vault.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn peer_of(stream: &UnixStream) -> io::Result<Peer> {

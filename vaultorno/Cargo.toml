@@ -4,15 +4,27 @@ description = "Locker room for disposable secrets: daemon, inspector and admin c
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+default-run = "vaultorno"
 
 [[bin]]
 name = "vaultorno"
 path = "src/main.rs"
 
+# The end-to-end tests' client, run in a process of its own with an empty
+# environment (tests/end_to_end.rs). Built only with `test_identity`.
+[[bin]]
+name = "vaultorno_e2e_client"
+path = "tests/support/e2e_client.rs"
+required-features = ["test_identity"]
+test = false
+doc = false
+
 [features]
-# Milestone 1 only: lets `vaultorno daemon --test-identity` trust unsigned
-# statements, without hash or signature checks. Never enable in a release.
-test_identity = []
+# Development only: lets `vaultorno daemon --test-identity` trust unsigned
+# statements, without hash or signature checks, and builds the end-to-end
+# tests' client. That links the client's sealing code into this package,
+# which a release must never contain. Never enable in a release.
+test_identity = ["vaultorno_client/testing"]
 
 [dependencies]
 vaultorno_client = { path = "../vaultorno_client", default-features = false }
@@ -21,6 +33,10 @@ serde_json = "1"
 zeroize = "1"
 rustix = { version = "1", features = ["fs", "net", "process"] }
 getrandom = "0.3"
+# SSHSIG verification and OpenSSH key parsing (§3, §8). Only Ed25519 can
+# verify; `ecdsa` only lets ECDSA lines in `revoked_keys` parse (no ECDSA or
+# RSA signature code is linked in).
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "ecdsa"] }
 
 [dev-dependencies]
 vaultorno_client = { path = "../vaultorno_client", features = ["testing"] }

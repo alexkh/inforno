@@ -55,5 +55,6 @@ pub use secrecy::{ExposeSecret, SecretBox};
 pub use vault::DaemonOptions;
 #[cfg(feature = "seal")]
 pub use vault::{
-    LocalOptions, Locker, StatementFiles, Stored, Vault, find_statement, user_data_dir,
+    LocalOptions, Locker, StatementFiles, Stored, SuccessionFiles, Vault, find_statement,
+    find_succession, user_data_dir,
 };

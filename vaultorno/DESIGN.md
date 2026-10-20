@@ -16,9 +16,12 @@
 > re-issue (API keys, tokens, a cached unlock for another store), never
 > anything you would mind losing (§1).
 
-Status: Milestone 1 is implemented (the client, a daemon skeleton with a
-test-only identity, and the `Local` backend); everything else is design. The
-first user is Inforno (`inforno`, `autorno`). This revision:
+Status: Milestones 1 and 2 are implemented (the client, the daemon with
+package manifests and the inspector, and the `Local` backend). Milestone 3 has
+signed statements, `revoked_keys`, `successions` (recorded from succession
+statements in `Hello`) and `vaultorno revoke`; `cargo xtask build` is next.
+Everything else is design. The first user is Inforno (`inforno`, `autorno`).
+This revision:
 
 - makes the daemon blind with a split key (§2, §6);
 - makes every locker expire, and limits vaultorno to disposable data (§1, §6);
@@ -366,7 +369,7 @@ From loosest to strictest:
 |---|---|---|
 | `watertight` | **package manifest**: a root-owned binary at the path a root-owned manifest lists (trusts the package manager) | binary and every parent directory root-owned, not group/world-writable; environment check; `ptrace_scope >= 1` |
 | `airtight` | **signed statement**: valid, unexpired, by the app's key, for this exact executable (§8) | environment check; `ptrace_scope >= 2` |
-| `hermetic` (later) | as airtight | `ptrace_scope = 3`, so nothing (not even the inspector) can read another process's memory; master key must be TPM2-sealed. The only level at which no part of vaultorno can read contents (§2) |
+| `hermetic` (later) | as airtight | `ptrace_scope = 3`, so nothing (not even the inspector) can read another process's memory; master key must be TPM2-sealed. The only level at which no part of vaultorno can read contents (§2). Until the master key exists (M4), a statement asking for it is refused |
 
 The identity decides the level: a package manifest gives `watertight`, a
 signed statement `airtight`. A statement may ask for `hermetic`. There is no
@@ -575,8 +578,8 @@ ssh-ed25519 AAAAC3Nza… inforno_release_2026 stolen 2026-11-02
 SHA256:3f9a… ssh-ed25519 AAAAC3Nza… inforno_release_2027
 ```
 
-The daemon rereads either file whenever it changes, so root may also edit
-them by hand.
+The daemon rereads both files at every `Hello`, so root may also edit them
+by hand. It reads them only as regular files, never through a symlink.
 
 ### Vault names
 
@@ -761,7 +764,9 @@ version of `inforno_core::vault`; both layers reuse it.
      in `Hello` (§5). The daemon verifies the signature for namespace
      `vaultorno/statement`, refuses keys listed in `revoked_keys`, checks the
      validity window, and checks that the statement's `sha256` equals the
-     inspector's hash. The vault is the signing key's.
+     inspector's hash. The vault is the signing key's. If the statement
+     fails, a manifest listing the executable still decides; otherwise the
+     statement's reason is reported.
    - **Package manifest:** the executable is at a path a manifest in
      `/usr/share/vaultorno/manifests/` lists (same device and inode), and
      it, the manifest and every parent directory of both are root-owned and
@@ -825,9 +830,11 @@ item; the Keychain enforces per-app access for signed apps.
 
 ## 8. Signatures and statement lifecycle
 
-- **One format:** OpenSSH signatures (SSHSIG) with SHA-256, namespace
-  `vaultorno/statement`, over the statement file's exact bytes. The
-  statement in turn names the executable's hash.
+- **One format:** OpenSSH signatures (SSHSIG), namespace
+  `vaultorno/statement`, over the statement file's exact bytes, with
+  SHA-512 (`ssh-keygen`'s default) or SHA-256 as the message hash. The
+  statement in turn names the executable's hash. Only `ssh-ed25519` and
+  `sk-ssh-ed25519@openssh.com` keys are accepted.
 - **Release builds:** a plain `ssh-ed25519` key, kept offline. Statements
   valid 90 days, re-signed regularly (e.g. monthly) for every version still
   supported, and shipped with updates or fetched by the app.
@@ -866,8 +873,10 @@ ssh-keygen -Y sign -f ~/.ssh/vaultorno_sign_sk -n vaultorno/statement \
 - **Revoking a version:** stop re-signing its statement; it lapses within
   one lifetime.
 - **A stolen key:** root runs `vaultorno revoke <public key or .pub file>`,
-  which appends it to `revoked_keys`; statements signed by it stop working
-  at once. The developer then rotates to a new key.
+  which appends it to `revoked_keys`; from then on, every new connection
+  presenting a statement signed by it is refused. Identity is checked once
+  per connection (§9), so a connection already open keeps its access until
+  it closes. The developer then rotates to a new key.
 - **Key rotation:** since the key is the app, a new key is a new vault. To
   carry the vault over, the old key signs a succession statement:
 
@@ -882,13 +891,33 @@ ssh-keygen -Y sign -f ~/.ssh/vaultorno_sign_sk -n vaultorno/statement \
   }
   ```
 
-  The client sends it in `Hello` with a statement signed by the new key; the
-  daemon then serves the old vault to the new key and records the rotation
-  as a line in `successions`. Without one, users simply start with an empty
-  vault and re-enter their keys, which is acceptable for disposable data. A
-  key that was stolen shouldn't be carried over: revoke it and start fresh.
-- **Open item (M0):** confirm a Rust crate (likely `ssh-key`) can verify
-  `sk-ssh-ed25519@openssh.com` SSHSIG signatures, including the flag.
+  The old key signs it with namespace `vaultorno/succession`, never
+  `vaultorno/statement`, so neither kind of signature can stand in for the
+  other. It is kept as `<app>_succession.json`, with its signature in
+  `<app>_succession.json.sig`, in the same folders as statements (§5). When
+  the client finds a signed statement there itself, it also sends the newest
+  succession it finds (by `issued`) in `Hello`, with the signature in
+  `succession_signature`. A succession has no expiry; `issued` must not be in
+  the future. The daemon checks that it is signed by `from`, that `to` is the
+  key that signed the statement, that `from` isn't revoked, and that it fits
+  the recorded lines: a key succeeds at most one other, and no line may close
+  into a cycle. Only once the statement passes every other check does the
+  daemon append the rotation to `successions`, after a comment saying when,
+  and serve the old vault to the new key. A succession that fails any check
+  refuses the connection, so ship one only beside statements signed by its
+  `to` key. Each `Hello` carries one succession, so a machine that missed a
+  rotation altogether opens the vault of the key just before, often empty.
+  Without one, users simply start with an empty vault and re-enter their
+  keys, which is acceptable for disposable data.
+- **A stolen key and its successions:** revoking a key doesn't revoke the
+  keys that succeed it, so a thief who records a succession to a key of their
+  own before the revocation keeps the vault. `vaultorno revoke` lists a
+  revoked key's successors; revoke them too unless they are yours. A key that
+  was stolen shouldn't be carried over: revoke it and start fresh.
+- **Verification:** the `ssh-key` crate verifies
+  `sk-ssh-ed25519@openssh.com` SSHSIG signatures, including the flags and
+  counter they cover, but doesn't look at the flags; vaultorno checks the
+  "user present" bit itself.
 
 ---
 
@@ -911,7 +940,8 @@ enum Request {
     Hello { protocol: u32,
             statement: Option<String>,                     // the statement file (§5), if signed
             signature: Option<String>,                     // its SSHSIG
-            succession: Option<String> },                  // with its signature, after a key rotation (§8)
+            succession: Option<String>,                    // a succession statement, after a key rotation (§8)
+            succession_signature: Option<String> },        // its SSHSIG, by the old key
     List,
     Get { locker: String },
     Put { locker: String, data: Vec<u8>, expected: u64 },  // a client envelope (§6); empty data empties the locker
@@ -1039,7 +1069,7 @@ half, so none can read contents, even as root.
 | `vaultorno check <binary>` | no | Dry run: which statement or manifest it would use, which vault, level and lockers, and which check fails. |
 | `vaultorno vaults --user U` | yes | Vaults (label, key fingerprint) and their lockers: size classes, revisions, expiries. Never contents or halves. |
 | `vaultorno log --user U` | yes | Show the log (§11). |
-| `vaultorno revoke <public key or .pub file>` | yes | Append a key to `revoked_keys`; statements signed by it stop working at once. `--undo` removes it. |
+| `vaultorno revoke <public key or .pub file>` | yes | Append a key to `revoked_keys`; new connections with statements signed by it are refused at once, and the keys that succeed it are listed (§8). `--undo` removes it. |
 | `vaultorno forget <vault> [--locker L] [--user U]` | yes | Delete lockers. Without `--locker`, deletes the whole vault, the daemon's half included. |
 | `vaultorno sweep` | yes | Delete expired lockers and stale vaults now (the daily timer does the same, §14). |
 | `vaultorno init` | yes | Create the state directory and the sealed master key (§6). Run once, by the package's install script. |

@@ -69,9 +69,14 @@ pub enum Request {
         /// Its SSHSIG (checked from Milestone 3).
         #[serde(default)]
         signature: Option<String>,
-        /// A succession statement with its signature (§8; Milestone 3).
+        /// A succession statement (§8), as its exact text, sent with a
+        /// statement signed by the new key after a key rotation.
         #[serde(default)]
         succession: Option<String>,
+        /// The succession's SSHSIG by the old key, namespace
+        /// `vaultorno/succession`.
+        #[serde(default)]
+        succession_signature: Option<String>,
     },
     List,
     Get {
@@ -426,6 +431,74 @@ impl Statement {
             level: self.level.clone(),
             reject_env: self.reject_env.clone(),
             lockers,
+        })
+    }
+}
+
+// Succession statements (§8)
+
+/// A succession statement (§8): the old key hands its vault to a new one.
+/// Signed by the old key; parsed only after its signature checks out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessionStatement {
+    pub format: u32,
+    pub succession: SuccessionLink,
+    pub issued: String,
+}
+
+/// Which key hands over to which.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessionLink {
+    /// The old key's fingerprint, `SHA256:<base64>`.
+    pub from: String,
+    /// The new key, as one line of a `.pub` file.
+    pub to: String,
+}
+
+/// A succession whose format, time and shape checked out. The daemon still
+/// parses both keys and checks the signature against `from`.
+#[derive(Debug, Clone)]
+pub struct CheckedSuccession {
+    pub from: String,
+    pub to: String,
+    pub issued: u64,
+}
+
+/// Longest `to` line accepted: an Ed25519 key line with a generous comment.
+const MAX_KEY_LINE: usize = 1024;
+
+impl SuccessionStatement {
+    /// Parses a succession's exact text. Unknown fields are refused.
+    pub fn parse(text: &str) -> Result<SuccessionStatement, StatementError> {
+        serde_json::from_str(text).map_err(|e| StatementError(format!("malformed: {e}")))
+    }
+
+    /// Checks what needs no signature or key parsing: the format, `issued`
+    /// against `now`, and that `to` is a single line, so it can only ever be
+    /// written to `successions` as one. A succession doesn't expire.
+    pub fn check(&self, now: u64) -> Result<CheckedSuccession, StatementError> {
+        if self.format != 1 {
+            return refuse(format!("format {} isn't supported", self.format));
+        }
+        let Some(issued) = parse_rfc3339(&self.issued) else {
+            return refuse("issued must be YYYY-MM-DDTHH:MM:SSZ");
+        };
+        if now < issued {
+            return refuse(format!("isn't valid until {}", self.issued));
+        }
+        let SuccessionLink { from, to } = &self.succession;
+        if !from.starts_with("SHA256:") {
+            return refuse("from must be a SHA256: fingerprint");
+        }
+        if to.is_empty() || to.len() > MAX_KEY_LINE || to.chars().any(char::is_control) {
+            return refuse("to must be one OpenSSH public key line");
+        }
+        Ok(CheckedSuccession {
+            from: from.clone(),
+            to: to.clone(),
+            issued,
         })
     }
 }
@@ -868,5 +941,22 @@ mod tests {
             find_rejected_env(&clean, &["CUSTOM_*".to_owned()]),
             Some("CUSTOM_PLUGINS")
         );
+    }
+
+    #[test]
+    fn succession_checks() {
+        let text = |issued: &str, to: &str| {
+            format!(
+                r#"{{"format":1,"succession":{{"from":"SHA256:abc","to":"{to}"}},"issued":"{issued}"}}"#
+            )
+        };
+        let now = format_rfc3339(NOW);
+        let good = SuccessionStatement::parse(&text(&now, "ssh-ed25519 AAAA x")).unwrap();
+        assert_eq!(good.check(NOW).unwrap().issued, NOW);
+        assert!(good.check(NOW - 1).is_err(), "not yet valid");
+        let injected = SuccessionStatement::parse(&text(&now, r"a\nSHA256:x b")).unwrap();
+        assert!(injected.check(NOW).is_err(), "one line only");
+        let extra = text(&now, "x").replace(r#""issued""#, r#""expires":"x","issued""#);
+        assert!(SuccessionStatement::parse(&extra).is_err());
     }
 }
