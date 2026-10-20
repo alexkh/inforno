@@ -230,6 +230,7 @@ impl Server {
         // Unreadable state, e.g. a line in `revoked_keys` that isn't a key:
         // refuse everything rather than guess (§9).
         if let Err(message) = self.identity.check_state() {
+            eprintln!("vaultorno daemon: refusing every hello: {message}");
             return reply(error(ErrorCode::Storage, message));
         }
         let now = self.clock.now();
@@ -246,6 +247,13 @@ impl Server {
                     i
                 }
                 Err(refusal) => {
+                    // Until the log (§11, Milestone 6): why, never what.
+                    eprintln!(
+                        "vaultorno daemon: refused uid {} pid {}: {}",
+                        peer.uid,
+                        peer.pid.map_or_else(|| "?".to_owned(), |p| p.to_string()),
+                        refusal.message
+                    );
                     // Anyone can sign with a fresh key, so a fingerprint vault
                     // is counted only once it exists; manifest vaults are
                     // bounded by the manifests root installed.
@@ -285,6 +293,10 @@ impl Server {
             half.zeroize();
         }
         sent?;
+        eprintln!(
+            "vaultorno daemon: uid {} opened {} as {} ({})",
+            peer.uid, ident.vault, ident.binary, ident.level
+        );
 
         stream.set_read_timeout(None)?;
         while let Some(frame) = read_frame::<_, Request>(&mut io)? {
