@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ use vaultorno_client::protocol::{
 };
 use vaultorno_client::time::format_rfc3339;
 use vaultorno_inspect::{
-    DEFAULT_INSPECT_SOCKET, Inspected, inspect_pidfd, request_inspection,
+    DEFAULT_INSPECT_SOCKET, Inspected, anchor, inspect_pidfd, request_inspection,
 };
 
 use crate::signing::{
@@ -42,6 +42,11 @@ pub struct Peer {
     pub pid: Option<i32>,
     /// Pinned process handle for the inspector.
     pub pidfd: Option<Arc<OwnedFd>>,
+    /// Names of the environment variables set in the caller, as its own
+    /// client reports them (§7.5). The inspector can't read another user's
+    /// environment; the report counts only because the caller holds no
+    /// foreign code, which is checked first.
+    pub environment: Vec<String>,
 }
 
 impl Peer {
@@ -50,7 +55,14 @@ impl Peer {
             uid,
             pid,
             pidfd: None,
+            environment: Vec::new(),
         }
+    }
+
+    /// The same peer, reporting `names` as set.
+    pub fn with_environment(mut self, names: &[&str]) -> Peer {
+        self.environment = names.iter().map(|s| (*s).to_owned()).collect();
+        self
     }
 }
 
@@ -108,22 +120,22 @@ pub trait Inspector: Send + Sync {
     fn inspect(&self, peer: &Peer) -> Result<Inspected, String>;
 }
 
-/// Connects to `vaultorno inspect` over a Unix socket (`SCM_RIGHTS`).
+/// Connects to `vaultorno inspect` over a Unix socket (`SCM_RIGHTS`), and
+/// accepts replies only from the user owning that socket, which systemd
+/// sets from `SocketUser=vaultorno_inspect` (§3).
 pub struct SocketInspector {
     socket: PathBuf,
-    expected_uid: Option<u32>,
 }
 
 impl SocketInspector {
-    pub fn new(socket: impl Into<PathBuf>, expected_uid: Option<u32>) -> Self {
+    pub fn new(socket: impl Into<PathBuf>) -> Self {
         SocketInspector {
             socket: socket.into(),
-            expected_uid,
         }
     }
 
     pub fn default_socket() -> Self {
-        SocketInspector::new(DEFAULT_INSPECT_SOCKET, None)
+        SocketInspector::new(DEFAULT_INSPECT_SOCKET)
     }
 }
 
@@ -133,7 +145,12 @@ impl Inspector for SocketInspector {
             .pidfd
             .as_ref()
             .ok_or_else(|| "caller connection has no pidfd".to_owned())?;
-        request_inspection(&self.socket, pidfd.as_fd(), self.expected_uid)
+        // Looked up for each caller: cheap, and never stale.
+        let meta = anchor(&self.socket)?;
+        if !meta.file_type().is_socket() {
+            return Err(format!("{} isn't a socket", self.socket.display()));
+        }
+        request_inspection(&self.socket, pidfd.as_fd(), meta.uid())
     }
 }
 
@@ -237,7 +254,11 @@ impl ManifestIdentity {
         }
     }
 
-    fn match_manifest(&self, inspected: &Inspected) -> Result<Option<Identity>, Refusal> {
+    fn match_manifest(
+        &self,
+        inspected: &Inspected,
+        environment: &[String],
+    ) -> Result<Option<Identity>, Refusal> {
         let rd = match fs::read_dir(&self.manifests_dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
@@ -315,9 +336,15 @@ impl ManifestIdentity {
                     },
                 )?;
 
+                // Loaded code first: the environment's names come from the
+                // caller's own client, which counts only in a clean process.
+                self.check_code(inspected).map_err(|msg| Refusal {
+                    vault: Some(vault.clone()),
+                    message: msg,
+                })?;
                 let mut extra_env = manifest.reject_env.clone();
                 extra_env.extend(bin.reject_env.iter().cloned());
-                if let Some(bad_var) = find_rejected_env(&inspected.env_names, &extra_env) {
+                if let Some(bad_var) = find_rejected_env(environment, &extra_env) {
                     return Err(Refusal {
                         vault: Some(vault),
                         message: format!("{bad_var} set"),
@@ -384,17 +411,19 @@ impl ManifestIdentity {
         signature: Option<&str>,
         now: u64,
     ) -> Result<Identity, Refusal> {
-        if let Some(ident) = self.match_manifest(inspected)? {
+        if let Some(ident) = self.match_manifest(inspected, &peer.environment)? {
             return Ok(ident);
         }
         if self.test_fallback {
-            // Even under test fallback, enforce the environment reject
-            // list when we have an inspected process.
-            if let Some(bad_var) = find_rejected_env(&inspected.env_names, &[]) {
-                return Err(Refusal {
-                    vault: None,
-                    message: format!("{bad_var} set"),
-                });
+            // Even under the test fallback, an inspected process must hold
+            // no foreign code and no rejected variable (§7.5).
+            let refuse = |message: String| Refusal {
+                vault: None,
+                message,
+            };
+            self.check_code(inspected).map_err(refuse)?;
+            if let Some(bad_var) = find_rejected_env(&peer.environment, &[]) {
+                return Err(refuse(format!("{bad_var} set")));
             }
             return TestIdentity.identify(peer, statement, signature, None, now);
         }
@@ -405,6 +434,10 @@ impl ManifestIdentity {
                 inspected.exe_path.display()
             ),
         })
+    }
+    /// The code `inspected` has loaded besides its executable (§7.5).
+    fn check_code(&self, inspected: &Inspected) -> Result<(), String> {
+        check_loaded_code(inspected, &self.root_dir, self.trusted_uid)
     }
 }
 
@@ -516,10 +549,12 @@ impl SignedIdentity {
             .map_err(|m| format!("can't record the succession: {m}"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_statement(
         &self,
         lists: &KeyLists,
         inspected: &Inspected,
+        environment: &[String],
         text: &str,
         signature: &str,
         succession: Option<(&str, &str)>,
@@ -562,7 +597,10 @@ impl SignedIdentity {
                 ),
             ));
         }
-        if let Some(bad_var) = find_rejected_env(&inspected.env_names, &checked.reject_env) {
+        self.manifests
+            .check_code(inspected)
+            .map_err(|m| refused(hint(), m))?;
+        if let Some(bad_var) = find_rejected_env(environment, &checked.reject_env) {
             return Err(refused(hint(), format!("{bad_var} set")));
         }
         if checked.level.is_some_and(|l| l != AIRTIGHT_LEVEL) {
@@ -617,12 +655,21 @@ impl Identify for SignedIdentity {
                 .manifests
                 .identify_inspected(peer, &inspected, statement, signature, now);
         };
-        match self.check_statement(&lists, &inspected, text, signature, succession, now) {
+        let environment = &peer.environment;
+        match self.check_statement(
+            &lists,
+            &inspected,
+            environment,
+            text,
+            signature,
+            succession,
+            now,
+        ) {
             Ok(ident) => Ok(ident),
             // A package manifest may still vouch for the binary (§7.4). If
             // none does, the statement's reason is the one worth reporting;
             // a signed statement never falls back to the test identity.
-            Err(refusal) => match self.manifests.match_manifest(&inspected) {
+            Err(refusal) => match self.manifests.match_manifest(&inspected, environment) {
                 Ok(Some(ident)) => Ok(ident),
                 _ => Err(refusal),
             },
@@ -689,6 +736,39 @@ fn check_owner_and_not_writable(
             "{} has mode {mode:o}; must not be writable by group or others",
             path.display()
         ));
+    }
+    Ok(())
+}
+
+/// Checks the code a caller has loaded besides its executable (§7.5): every
+/// file it maps executable must pass [`check_safe_path`], and still be the
+/// file it loaded. Its executable is covered by its hash or its manifest.
+pub fn check_loaded_code(
+    inspected: &Inspected,
+    root_dir: &Path,
+    trusted_uid: u32,
+) -> Result<(), String> {
+    for code in &inspected.code {
+        if code.ino == inspected.ino && code.path == inspected.exe_path {
+            continue;
+        }
+        let path = code.path.display();
+        if code.deleted {
+            return Err(format!(
+                "loaded code {path} was replaced or removed since; restart the program"
+            ));
+        }
+        check_safe_path(&code.path, root_dir, trusted_uid, false)
+            .map_err(|m| format!("loaded code: {m}"))?;
+        // Inodes only: on btrfs, maps and stat() can disagree on the device.
+        let ino = fs::metadata(&code.path)
+            .map_err(|e| format!("loaded code: can't stat {path}: {e}"))?
+            .ino();
+        if ino != code.ino {
+            return Err(format!(
+                "loaded code {path} isn't the file that was loaded; restart the program"
+            ));
+        }
     }
     Ok(())
 }

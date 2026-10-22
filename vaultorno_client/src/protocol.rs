@@ -44,6 +44,8 @@ pub const MAX_LIFETIME_DAYS: u32 = 90;
 pub const MAX_STATEMENT_DAYS: u64 = 180;
 /// Length of each half of an app key.
 pub const HALF_LEN: usize = 32;
+/// Most environment variable names a `Hello` may carry.
+pub const MAX_ENVIRONMENT: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -77,6 +79,10 @@ pub enum Request {
         /// `vaultorno/succession`.
         #[serde(default)]
         succession_signature: Option<String>,
+        /// Names of the environment variables set when this program started
+        /// (§7.5), which the inspector can't read for itself. The daemon
+        /// trusts them only from a process holding no foreign code.
+        environment: Vec<String>,
     },
     List,
     Get {

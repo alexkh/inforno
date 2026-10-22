@@ -33,6 +33,11 @@ serde_json = "1"
 zeroize = "1"
 rustix = { version = "1", features = ["fs", "net", "process"] }
 getrandom = "0.3"
+# The daemon's outer layer (§6): XChaCha20-Poly1305 under per-file keys
+# derived from the master key with HKDF-SHA256.
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
 # SSHSIG verification and OpenSSH key parsing (§3, §8). Only Ed25519 can
 # verify; `ecdsa` only lets ECDSA lines in `revoked_keys` parse (no ECDSA or
 # RSA signature code is linked in).
@@ -42,7 +47,6 @@ ssh-key = { version = "0.6", default-features = false, features = ["std", "ed255
 vaultorno_client = { path = "../vaultorno_client", features = ["testing"] }
 tempfile = "3"
 base64 = "0.22"
-sha2 = "0.10"
 
 [[test]]
 name = "end_to_end"

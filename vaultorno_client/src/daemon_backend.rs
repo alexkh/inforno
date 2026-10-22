@@ -10,7 +10,8 @@ use zeroize::Zeroizing;
 use crate::Error;
 use crate::names::{is_valid_name, is_valid_vault_name};
 use crate::protocol::{
-    Frame, HALF_LEN, LockerInfo, PROTOCOL, Request, Response, read_frame, write_frame,
+    Frame, HALF_LEN, LockerInfo, MAX_ENVIRONMENT, PROTOCOL, Request, Response, read_frame,
+    write_frame,
 };
 use crate::seal::AppKey;
 use crate::user_half;
@@ -50,6 +51,33 @@ impl Conn {
 
 fn unexpected<T>(reply: Response) -> Result<T, Error> {
     Err(Error::Protocol(format!("unexpected reply {reply:?}")))
+}
+
+/// Names of the variables this program was started with (§7.5), from
+/// `/proc/self/environ`: what it was launched with, not what it has set
+/// since, so an app may still set `VK_LOADER_LAYERS_DISABLE` and the like
+/// for itself (§13).
+fn started_environment() -> Result<Vec<String>, Error> {
+    let raw = std::fs::read("/proc/self/environ").map_err(|e| {
+        Error::Protocol(format!(
+            "can't read this program's environment from /proc/self/environ: {e}"
+        ))
+    })?;
+    let names: Vec<String> = raw
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let name = entry.split(|&b| b == b'=').next().unwrap_or(entry);
+            // Lossily, so a name that isn't UTF-8 can't slip past a prefix.
+            String::from_utf8_lossy(name).into_owned()
+        })
+        .collect();
+    if names.len() > MAX_ENVIRONMENT {
+        return Err(Error::Protocol(format!(
+            "this program has more than {MAX_ENVIRONMENT} environment variables"
+        )));
+    }
+    Ok(names)
 }
 
 /// What the daemon said in `Welcome`, minus its half.
@@ -95,6 +123,7 @@ impl DaemonConn {
             signature,
             succession,
             succession_signature,
+            environment: started_environment()?,
         })?;
         let Response::Welcome {
             protocol,

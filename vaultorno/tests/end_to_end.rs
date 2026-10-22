@@ -1,6 +1,8 @@
 //! The real `vaultorno` binary, over a real socket. Needs the development
 //! build: `cargo test -p vaultorno --features test_identity`.
 
+#![cfg_attr(not(feature = "test_identity"), allow(dead_code, unused_imports))]
+
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -8,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use vaultorno::master_key::{CREDENTIALS_DIRECTORY, MasterKey, Sealing};
 
 const BIN: &str = env!("CARGO_BIN_EXE_vaultorno");
 /// A client in a process of its own (`tests/support/e2e_client.rs`).
@@ -24,12 +28,29 @@ impl Drop for Daemon {
     }
 }
 
+/// What systemd would give the daemon: a folder holding the unsealed master
+/// key (§6), here labelled `unsealed`. The same `state` gets the same key.
+fn credentials(state: &Path) -> PathBuf {
+    let dir = state.with_file_name("credentials");
+    let file = dir.join("master_key");
+    if !file.exists() {
+        fs::create_dir_all(&dir).unwrap();
+        let key = MasterKey::new(&[0x5a; 32], Sealing::Unsealed);
+        fs::write(&file, key.to_credential().as_slice()).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    dir
+}
+
 fn start(state: &Path, socket: &Path) -> Daemon {
     let child = Command::new(BIN)
         .args(["daemon", "--test-identity", "--state-dir"])
         .arg(state)
         .arg("--socket")
         .arg(socket)
+        // Never the machine's inspector, whatever runs in /run.
+        .arg("--in-process-inspector")
+        .env(CREDENTIALS_DIRECTORY, credentials(state))
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -206,6 +227,7 @@ fn a_daemon_restart_keeps_the_vault() {
     assert_eq!(parse_get(&got).1, b"kept");
 }
 
+#[cfg(feature = "test_identity")]
 #[test]
 fn real_inspect_mode_over_socket() {
     use std::os::fd::AsFd;
@@ -213,10 +235,15 @@ fn real_inspect_mode_over_socket() {
 
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("inspect.sock");
+    // The daemon's user is whoever owns its state folder (§3): here, us.
+    let state = dir.path().join("state");
+    fs::create_dir(&state).unwrap();
     let inspector = Daemon(
         Command::new(BIN)
             .args(["inspect", "--socket"])
             .arg(&sock)
+            .arg("--state-dir")
+            .arg(&state)
             .stderr(Stdio::null())
             .spawn()
             .unwrap(),
@@ -231,7 +258,7 @@ fn real_inspect_mode_over_socket() {
     let pid = rustix::process::getpid();
     let pidfd = pidfd_open(pid, PidfdFlags::empty()).unwrap();
     let uid = rustix::process::getuid().as_raw();
-    let info = vaultorno_inspect::request_inspection(&sock, pidfd.as_fd(), Some(uid)).unwrap();
+    let info = vaultorno_inspect::request_inspection(&sock, pidfd.as_fd(), uid).unwrap();
     assert_eq!(info.uid, uid);
     assert_eq!(info.exe_path, std::env::current_exe().unwrap());
     drop(inspector);
@@ -239,7 +266,7 @@ fn real_inspect_mode_over_socket() {
 
 #[test]
 fn later_modes_and_unknown_modes_fail_cleanly() {
-    for mode in ["init", "status", "check", "vaults", "log", "forget"] {
+    for mode in ["status", "check", "vaults", "log", "forget"] {
         let out = Command::new(BIN).arg(mode).output().unwrap();
         assert!(!out.status.success(), "{mode}");
         assert!(
@@ -300,4 +327,151 @@ fn revoke_mode_appends_and_undoes() {
     assert!(!list().contains("ssh-ed25519"));
 
     assert!(!revoke(&["not", "a", "key"]).status.success());
+}
+
+#[test]
+fn a_daemon_without_its_master_key_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let run = |credentials: Option<&Path>| {
+        let mut cmd = Command::new(BIN);
+        cmd.arg("daemon").arg("--state-dir").arg(&state);
+        match credentials {
+            Some(dir) => cmd.env(CREDENTIALS_DIRECTORY, dir),
+            None => cmd.env_remove(CREDENTIALS_DIRECTORY),
+        };
+        cmd.output().unwrap()
+    };
+
+    let out = run(None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(CREDENTIALS_DIRECTORY));
+    assert!(!state.exists(), "nothing touched");
+
+    // A key file others may read isn't one systemd would have made.
+    let creds = credentials(&state);
+    fs::set_permissions(creds.join("master_key"), fs::Permissions::from_mode(0o644)).unwrap();
+    let out = run(Some(&creds));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("others must have no access"));
+    assert!(!state.exists());
+}
+
+#[test]
+fn release_modes_take_their_sockets_only_from_systemd() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let creds = credentials(&state);
+    let run = |mode: &str, stdin: Stdio, extra: &[&str]| {
+        Command::new(BIN)
+            .arg(mode)
+            .arg("--state-dir")
+            .arg(&state)
+            .args(extra)
+            .env(CREDENTIALS_DIRECTORY, &creds)
+            .stdin(stdin)
+            .output()
+            .unwrap()
+    };
+    let refused = |out: &std::process::Output, why: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains(why), "{err}");
+    };
+
+    // Not started by systemd: standard input isn't a socket.
+    refused(&run("daemon", Stdio::null(), &[]), "no socket from systemd");
+    refused(&run("inspect", Stdio::null(), &[]), "no socket from systemd");
+
+    // A listening socket, but not where clients connect.
+    let elsewhere = dir.path().join("elsewhere.sock");
+    let listener = OwnedFd::from(UnixListener::bind(&elsewhere).unwrap());
+    let out = run("daemon", Stdio::from(listener.try_clone().unwrap()), &[]);
+    refused(&out, "not /run/vaultorno.sock");
+    refused(
+        &run("inspect", Stdio::from(listener), &[]),
+        "not /run/vaultorno_inspect.sock",
+    );
+    assert!(!state.exists(), "refused before touching the state");
+
+    // Only a development build binds a socket of its own.
+    #[cfg(not(feature = "test_identity"))]
+    refused(
+        &run("daemon", Stdio::null(), &["--socket", elsewhere.to_str().unwrap()]),
+        "unknown option",
+    );
+}
+
+#[test]
+fn init_never_replaces_a_master_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::write(state.join("master_key.cred"), b"sealed earlier").unwrap();
+    let out = Command::new(BIN)
+        .args(["init", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already exists"));
+    assert_eq!(
+        fs::read(state.join("master_key.cred")).unwrap(),
+        b"sealed earlier"
+    );
+    assert!(
+        !state.join("CACHEDIR.TAG").exists(),
+        "refused before touching anything"
+    );
+}
+
+/// Needs root and `systemd-creds`; as root, run
+/// `cargo test --release -p vaultorno --test end_to_end -- --ignored real_init`.
+#[test]
+#[ignore]
+fn real_init_seals_a_master_key_that_unseals() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let init = || {
+        Command::new(BIN)
+            .args(["init", "--state-dir"])
+            .arg(&state)
+            .output()
+            .unwrap()
+    };
+    let out = init();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(
+        fs::read_to_string(state.join("CACHEDIR.TAG"))
+            .unwrap()
+            .starts_with("Signature: 8a477f597d28d172789f06886806bc55")
+    );
+    let cred = state.join("master_key.cred");
+    assert_eq!(
+        fs::metadata(&cred).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let plain = Command::new("/usr/bin/systemd-creds")
+        .args(["decrypt", "--name=master_key"])
+        .arg(&cred)
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    let key = MasterKey::from_credential(&plain.stdout).unwrap();
+    assert_ne!(key.sealing(), Sealing::Unsealed);
+    println!("sealed with {}", key.sealing().describe());
+
+    assert!(!init().status.success(), "a second init refuses");
 }

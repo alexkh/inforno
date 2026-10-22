@@ -11,9 +11,10 @@ use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
 
 use rustix::net::{
@@ -29,11 +30,14 @@ pub const DEFAULT_INSPECT_SOCKET: &str = "/run/vaultorno_inspect.sock";
 /// Fixed 8-byte request sent with the pidfd in `SCM_RIGHTS` (§3, §14).
 const REQUEST_MAGIC: [u8; 8] = *b"VINS\x00\x00\x00\x01";
 
-/// Maximum reply frame length (64 KiB).
-const MAX_REPLY: usize = 64 * 1024;
+/// Maximum reply frame length (1 MiB): a GUI maps a few hundred libraries.
+const MAX_REPLY: usize = 1024 * 1024;
 
-/// Maximum `/proc/<pid>/environ` bytes read (256 KiB).
-const MAX_ENVIRON: usize = 256 * 1024;
+/// Maximum `/proc/<pid>/maps` bytes read (8 MiB).
+const MAX_MAPS: usize = 8 * 1024 * 1024;
+
+/// Most files mapped as code that an inspection reports.
+const MAX_CODE: usize = 4096;
 
 /// IO timeout on a single inspector request.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -47,8 +51,18 @@ pub struct Inspected {
     pub dev: u64,
     pub ino: u64,
     pub sha256: [u8; 32],
-    /// Names of environment variables set in `/proc/<pid>/environ`.
-    pub env_names: Vec<String>,
+    /// Every file the process maps executable, its executable included: the
+    /// code it runs (§7.5).
+    pub code: Vec<MappedCode>,
+}
+
+/// A file mapped executable into a process, from `/proc/<pid>/maps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappedCode {
+    pub path: PathBuf,
+    pub ino: u64,
+    /// Deleted or replaced since it was mapped (` (deleted)` in `maps`).
+    pub deleted: bool,
 }
 
 impl Inspected {
@@ -110,7 +124,9 @@ pub fn inspect_pidfd(pidfd: BorrowedFd<'_>) -> Result<Inspected, String> {
     }
     let sha256: [u8; 32] = hasher.finalize().into();
 
-    let env_names = read_environ_names(&proc_dir.join("environ"))?;
+    // What else it runs (§7.5). Unlike its environment, which only its own
+    // user may read, `maps` opens with CAP_SYS_PTRACE alone.
+    let code = read_mapped_code(&proc_dir.join("maps"))?;
 
     // Pin to the exact process: if the original process exited before or
     // during our `/proc/<pid>` reads, its pidfd fdinfo reports Pid: -1 (or 0),
@@ -126,57 +142,104 @@ pub fn inspect_pidfd(pidfd: BorrowedFd<'_>) -> Result<Inspected, String> {
         dev,
         ino,
         sha256,
-        env_names,
+        code,
     })
 }
 
-/// Asks the inspector listening at `socket` to inspect `pidfd`.
-/// If `expected_inspector_uid` is `Some(uid)`, refuses any inspector process
-/// not running as `uid` (§3).
+/// Asks the inspector listening at `socket` to inspect `pidfd`, and refuses
+/// a reply from any process not running as `inspector_uid` (§3).
+///
+/// `SO_PEERCRED` can't tell: on a socket systemd activated, it names whoever
+/// called `listen()`, which is PID 1. Instead this side sets `SO_PASSCRED`,
+/// and the kernel attaches the replying process's own credentials to the
+/// reply, which it can't change without `CAP_SETUID`.
 pub fn request_inspection(
     socket: &Path,
     pidfd: BorrowedFd<'_>,
-    expected_inspector_uid: Option<u32>,
+    inspector_uid: u32,
 ) -> Result<Inspected, String> {
-    let mut stream = UnixStream::connect(socket)
+    let stream = UnixStream::connect(socket)
         .map_err(|e| format!("can't connect to inspector at {}: {e}", socket.display()))?;
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-
-    if let Some(expected) = expected_inspector_uid {
-        let cred = sockopt::socket_peercred(&stream)
-            .map_err(|e| format!("can't check inspector credentials: {e}"))?;
-        let actual = cred.uid.as_raw();
-        if actual != expected {
-            return Err(format!(
-                "inspector socket is owned by uid {actual}, expected {expected}"
-            ));
-        }
-    }
-
+    sockopt::set_socket_passcred(&stream, true)
+        .map_err(|e| format!("can't ask for the inspector's credentials: {e}"))?;
     send_request(&stream, pidfd)?;
-    read_reply(&mut stream)
+    read_reply(&stream, inspector_uid)
 }
 
-/// Runs the inspector loop on `socket` (mode `0660`), accepting connections
-/// only from `allowed_daemon_uid` (§3, §14).
-pub fn serve_inspect(socket: &Path, allowed_daemon_uid: u32) -> io::Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(socket) {
-        if !meta.file_type().is_socket() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{} isn't a socket", socket.display()),
+/// A path systemd sets up for one service user, whose owner names that user
+/// without a lookup by name, which would need NSS (§3): `/var/lib/vaultorno`
+/// (`StateDirectory=`) names the daemon's user, `/run/vaultorno_inspect.sock`
+/// (`SocketUser=`) the inspector's. Refused unless the path is absolute and
+/// not a symlink, and every folder above it is a real folder owned by root
+/// or by the same owner. The folder holding it must not be writable by group
+/// or others; folders further up may be only if they are root's and sticky,
+/// like `/tmp`.
+pub fn anchor(path: &Path) -> Result<fs::Metadata, String> {
+    if !path.is_absolute() {
+        return Err(format!("{} isn't an absolute path", path.display()));
+    }
+    let meta =
+        fs::symlink_metadata(path).map_err(|e| format!("can't stat {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a symlink", path.display()));
+    }
+    let owner = meta.uid();
+    for (depth, dir) in path.ancestors().skip(1).enumerate() {
+        let m =
+            fs::symlink_metadata(dir).map_err(|e| format!("can't stat {}: {e}", dir.display()))?;
+        if !m.file_type().is_dir() {
+            return Err(format!("{} isn't a folder", dir.display()));
+        }
+        if m.uid() != 0 && m.uid() != owner {
+            return Err(format!(
+                "{} is owned by uid {}, neither root nor uid {owner}",
+                dir.display(),
+                m.uid()
             ));
         }
-        fs::remove_file(socket)?;
+        let mode = m.mode();
+        let sticky_root = depth > 0 && m.uid() == 0 && mode & 0o1000 != 0;
+        if mode & 0o022 != 0 && !sticky_root {
+            return Err(format!(
+                "{} has mode {:o}; it must not be writable by group or others",
+                dir.display(),
+                mode & 0o7777
+            ));
+        }
     }
-    let listener = UnixListener::bind(socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o660))?;
+    Ok(meta)
+}
+
+/// Runs the inspector on `listener`, which systemd made (§14). A connection
+/// must come from the owner of `daemon_anchor`, the daemon's state folder,
+/// looked up again for each one (§3).
+pub fn serve_inspect(listener: UnixListener, daemon_anchor: &Path) -> io::Result<()> {
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let _ = handle_client(stream, allowed_daemon_uid);
+        let Ok(stream) = stream else {
+            // E.g. out of file descriptors: don't spin.
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let daemon_uid = anchor(daemon_anchor).and_then(|m| {
+            if m.file_type().is_dir() {
+                Ok(m.uid())
+            } else {
+                Err(format!("{} isn't a folder", daemon_anchor.display()))
+            }
+        });
+        let _ = match daemon_uid {
+            Ok(uid) => handle_client(stream, uid),
+            Err(msg) => refuse_client(stream, msg),
+        };
     }
     Ok(())
+}
+
+fn refuse_client(mut stream: UnixStream, msg: String) -> io::Result<()> {
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    write_reply(&mut stream, Err(msg))
 }
 
 /// Handles one connection from the daemon on `stream`.
@@ -248,16 +311,49 @@ fn recv_request(stream: &UnixStream) -> Result<OwnedFd, String> {
 }
 
 fn write_reply(w: &mut impl Write, result: Result<Inspected, String>) -> io::Result<()> {
-    let payload = encode_reply(&result);
-    let len = (payload.len() as u32).to_be_bytes();
-    w.write_all(&len)?;
-    w.write_all(&payload)?;
+    let mut payload = encode_reply(&result);
+    if payload.len() > MAX_REPLY {
+        payload = encode_reply(&Err("the inspection is too large to report".into()));
+    }
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    w.write_all(&frame)?;
     w.flush()
 }
 
-fn read_reply(r: &mut impl Read) -> Result<Inspected, String> {
+/// Reads the reply, refusing it unless the credentials the kernel attached
+/// to it are `inspector_uid`'s (see [`request_inspection`]).
+fn read_reply(stream: &UnixStream, inspector_uid: u32) -> Result<Inspected, String> {
     let mut len_bytes = [0u8; 4];
-    r.read_exact(&mut len_bytes)
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmCredentials(1))];
+    let mut cmsg = RecvAncillaryBuffer::new(&mut space);
+    let got = {
+        let mut iov = [IoSliceMut::new(&mut len_bytes)];
+        recvmsg(stream, &mut iov, &mut cmsg, RecvFlags::CMSG_CLOEXEC)
+            .map_err(|e| format!("failed to read inspector reply: {e}"))?
+            .bytes
+    };
+    let mut sender = None;
+    for item in cmsg.drain() {
+        if let RecvAncillaryMessage::ScmCredentials(cred) = item {
+            sender = Some(cred.uid.as_raw());
+        }
+    }
+    if got == 0 {
+        return Err("the inspector closed without a reply".into());
+    }
+    match sender {
+        None => return Err("the inspector's reply carried no credentials".into()),
+        Some(uid) if uid != inspector_uid => {
+            return Err(format!(
+                "the inspector runs as uid {uid}, not uid {inspector_uid}"
+            ));
+        }
+        Some(_) => {}
+    }
+    let mut r = stream;
+    r.read_exact(&mut len_bytes[got..])
         .map_err(|e| format!("failed to read inspector reply: {e}"))?;
     let len = u32::from_be_bytes(len_bytes) as usize;
     if len == 0 || len > MAX_REPLY {
@@ -282,12 +378,13 @@ fn encode_reply(result: &Result<Inspected, String>) -> Vec<u8> {
             let path_bytes = ins.exe_path.as_os_str().as_bytes();
             out.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
             out.extend_from_slice(path_bytes);
-            out.extend_from_slice(&(ins.env_names.len() as u32).to_be_bytes());
-            for name in &ins.env_names {
-                let nb = name.as_bytes();
-                let len = u16::try_from(nb.len()).unwrap_or(u16::MAX);
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(&nb[.. usize::from(len)]);
+            out.extend_from_slice(&(ins.code.len() as u32).to_be_bytes());
+            for code in &ins.code {
+                out.extend_from_slice(&code.ino.to_be_bytes());
+                out.push(u8::from(code.deleted));
+                let path = code.path.as_os_str().as_bytes();
+                out.extend_from_slice(&(path.len() as u32).to_be_bytes());
+                out.extend_from_slice(path);
             }
         }
         Err(msg) => {
@@ -324,13 +421,21 @@ fn decode_reply(mut b: &[u8]) -> Result<Inspected, String> {
     let path_len = u32::from_be_bytes(take(&mut b, 4)?.try_into().unwrap()) as usize;
     let path_bytes = take(&mut b, path_len)?;
     let exe_path = PathBuf::from(OsStr::from_bytes(&path_bytes));
-    let env_count = u32::from_be_bytes(take(&mut b, 4)?.try_into().unwrap()) as usize;
-    let mut env_names = Vec::with_capacity(env_count.min(4096));
-    for _ in 0..env_count {
-        let n = u16::from_be_bytes(take(&mut b, 2)?.try_into().unwrap()) as usize;
-        let name = String::from_utf8(take(&mut b, n)?)
-            .map_err(|_| "non-utf8 env name in inspector reply".to_owned())?;
-        env_names.push(name);
+    let code_count = u32::from_be_bytes(take(&mut b, 4)?.try_into().unwrap()) as usize;
+    if code_count > MAX_CODE {
+        return Err(format!("inspector reply lists {code_count} mapped files"));
+    }
+    let mut code = Vec::with_capacity(code_count);
+    for _ in 0..code_count {
+        let ino = u64::from_be_bytes(take(&mut b, 8)?.try_into().unwrap());
+        let deleted = match take(&mut b, 1)?[0] {
+            0 => false,
+            1 => true,
+            _ => return Err("bad flag in inspector reply".into()),
+        };
+        let n = u32::from_be_bytes(take(&mut b, 4)?.try_into().unwrap()) as usize;
+        let path = PathBuf::from(OsStr::from_bytes(&take(&mut b, n)?));
+        code.push(MappedCode { path, ino, deleted });
     }
     if !b.is_empty() {
         return Err("trailing bytes in inspector reply".into());
@@ -342,7 +447,7 @@ fn decode_reply(mut b: &[u8]) -> Result<Inspected, String> {
         dev,
         ino,
         sha256,
-        env_names,
+        code,
     })
 }
 
@@ -393,30 +498,71 @@ fn strip_deleted_suffix(path: &Path) -> PathBuf {
     }
 }
 
-fn read_environ_names(environ_path: &Path) -> Result<Vec<String>, String> {
-    let f = File::open(environ_path)
-        .map_err(|e| format!("can't open {}: {e}", environ_path.display()))?;
+/// Every file `maps` shows mapped executable, once each.
+fn read_mapped_code(maps_path: &Path) -> Result<Vec<MappedCode>, String> {
+    let f = File::open(maps_path)
+        .map_err(|e| format!("can't open {}: {e}", maps_path.display()))?;
     let mut raw = Vec::new();
-    f.take((MAX_ENVIRON + 1) as u64)
+    f.take((MAX_MAPS + 1) as u64)
         .read_to_end(&mut raw)
-        .map_err(|e| format!("can't read {}: {e}", environ_path.display()))?;
-    if raw.len() > MAX_ENVIRON {
-        return Err("caller environment exceeds 256 KiB".into());
+        .map_err(|e| format!("can't read {}: {e}", maps_path.display()))?;
+    if raw.len() > MAX_MAPS {
+        return Err("the caller's memory map is too large".into());
     }
-    let mut names = Vec::new();
-    for entry in raw.split(|&b| b == 0) {
-        if entry.is_empty() {
+    parse_maps(&raw)
+}
+
+/// Parses `/proc/<pid>/maps` lines, `address perms offset dev inode path`,
+/// where the path is padded with spaces and may contain some. Keeps
+/// executable mappings of files; anonymous memory and `[vdso]` have inode 0.
+fn parse_maps(raw: &[u8]) -> Result<Vec<MappedCode>, String> {
+    let mut code: Vec<MappedCode> = Vec::new();
+    for line in raw.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let bad = || {
+            format!(
+                "unexpected line in maps: {:?}",
+                String::from_utf8_lossy(line)
+            )
+        };
+        let mut rest = line;
+        let mut fields: [&[u8]; 5] = [&[]; 5];
+        for field in &mut fields {
+            rest = trim_start(rest);
+            let end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
+            *field = &rest[..end];
+            rest = &rest[end..];
+        }
+        let path = trim_start(rest);
+        let executable = fields[1].get(2) == Some(&b'x');
+        let ino: u64 = std::str::from_utf8(fields[4])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(bad)?;
+        if !executable || ino == 0 || !path.starts_with(b"/") {
             continue;
         }
-        let name_bytes = match entry.iter().position(|&b| b == b'=') {
-            Some(pos) => &entry[..pos],
-            None => entry,
+        let (path, deleted) = match path.strip_suffix(b" (deleted)") {
+            Some(p) => (p, true),
+            None => (path, false),
         };
-        // Non-UTF-8 variable names are preserved lossily so they can never
-        // smuggle past prefix checks.
-        names.push(String::from_utf8_lossy(name_bytes).into_owned());
+        let entry = MappedCode {
+            path: PathBuf::from(OsStr::from_bytes(path)),
+            ino,
+            deleted,
+        };
+        if !code.contains(&entry) {
+            if code.len() == MAX_CODE {
+                return Err(format!("the caller maps more than {MAX_CODE} files as code"));
+            }
+            code.push(entry);
+        }
     }
-    Ok(names)
+    Ok(code)
+}
+
+fn trim_start(b: &[u8]) -> &[u8] {
+    let start = b.iter().position(|&c| c != b' ').unwrap_or(b.len());
+    &b[start..]
 }
 
 #[cfg(test)]
@@ -434,10 +580,45 @@ mod tests {
         assert_eq!(info.exe_path, std::env::current_exe().unwrap());
         assert_ne!(info.ino, 0);
         assert_eq!(info.sha256_hex().len(), 64);
+        assert!(
+            info.code
+                .iter()
+                .any(|c| c.path == info.exe_path && c.ino == info.ino && !c.deleted),
+            "{:?}",
+            info.code
+        );
     }
 
     #[test]
-    fn inspects_over_unix_socket_and_checks_peer_uid() {
+    fn maps_lines() {
+        let maps = b"\
+55d0c0a00000-55d0c0a20000 r--p 00000000 fd:01 1234                       /usr/bin/app
+55d0c0a20000-55d0c0a80000 r-xp 00020000 fd:01 1234                       /usr/bin/app
+7f0000000000-7f0000001000 r-xp 00000000 00:00 0 
+7f0100000000-7f0100001000 r-xp 00001000 fd:01 99                         /home/u/my libs/evil.so (deleted)
+7f0200000000-7f0200001000 r-xp 00001000 fd:01 98                         /usr/lib/libc.so.6
+7f0300000000-7f0300001000 r--p 00000000 fd:01 97                         /usr/share/fonts/x.ttf
+7f0400000000-7f0400001000 r-xp 00002000 fd:01 98                         /usr/lib/libc.so.6
+ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]
+";
+        let entry = |path: &str, ino, deleted| MappedCode {
+            path: path.into(),
+            ino,
+            deleted,
+        };
+        assert_eq!(
+            parse_maps(maps).unwrap(),
+            vec![
+                entry("/usr/bin/app", 1234, false),
+                entry("/home/u/my libs/evil.so", 99, true),
+                entry("/usr/lib/libc.so.6", 98, false),
+            ]
+        );
+        assert!(parse_maps(b"garbage\n").is_err());
+    }
+
+    #[test]
+    fn inspects_over_unix_socket_and_checks_both_peers() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("inspect.sock");
         let my_uid = rustix::process::getuid().as_raw();
@@ -445,12 +626,15 @@ mod tests {
         let sock_srv = sock.clone();
         let handle = thread::spawn(move || {
             let listener = UnixListener::bind(&sock_srv).unwrap();
-            // First connection: allowed uid.
+            // The daemon is the allowed user.
             let (s1, _) = listener.accept().unwrap();
             handle_client(s1, my_uid).unwrap();
-            // Second connection: wrong allowed uid.
+            // It isn't.
             let (s2, _) = listener.accept().unwrap();
             handle_client(s2, my_uid + 1).unwrap();
+            // It is, but it expects another inspector.
+            let (s3, _) = listener.accept().unwrap();
+            handle_client(s3, my_uid).unwrap();
         });
 
         while !sock.exists() {
@@ -460,13 +644,37 @@ mod tests {
         let pid = rustix::process::getpid();
         let pidfd = pidfd_open(pid, PidfdFlags::empty()).unwrap();
 
-        let ok = request_inspection(&sock, pidfd.as_fd(), Some(my_uid)).unwrap();
+        let ok = request_inspection(&sock, pidfd.as_fd(), my_uid).unwrap();
         assert_eq!(ok.exe_path, std::env::current_exe().unwrap());
 
-        let refused = request_inspection(&sock, pidfd.as_fd(), Some(my_uid));
-        assert!(refused.is_err());
+        let refused = request_inspection(&sock, pidfd.as_fd(), my_uid).unwrap_err();
+        assert!(refused.contains("isn't allowed"), "{refused}");
+
+        let impostor = request_inspection(&sock, pidfd.as_fd(), my_uid + 1).unwrap_err();
+        assert!(impostor.contains("runs as uid"), "{impostor}");
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn anchors_are_real_and_out_of_others_reach() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let me = rustix::process::geteuid().as_raw();
+        assert_eq!(anchor(&state).unwrap().uid(), me);
+        assert!(anchor(Path::new("relative/state")).is_err());
+
+        std::os::unix::fs::symlink(&state, dir.path().join("link")).unwrap();
+        let err = anchor(&dir.path().join("link")).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+
+        let open = dir.path().join("open");
+        fs::create_dir_all(open.join("state")).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let err = anchor(&open.join("state")).unwrap_err();
+        assert!(err.contains("writable"), "{err}");
     }
 }
 

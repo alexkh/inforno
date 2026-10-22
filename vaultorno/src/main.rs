@@ -3,13 +3,14 @@
 //! it was started.
 
 use std::fs;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use vaultorno::identity::{
-    InProcessInspector, Inspector, ManifestIdentity, SignedIdentity, SocketInspector,
-};
+use vaultorno::activation;
+use vaultorno::identity::{Inspector, ManifestIdentity, SignedIdentity, SocketInspector};
+use vaultorno::master_key::{CREDENTIAL_FILE, MasterKey};
 use vaultorno::server::{DEFAULT_BACKOFF_BASE, Server};
 use vaultorno::signing::{KeyFingerprint, KeyListFiles, edit_revoked_keys, parse_key_line};
 use vaultorno::store::Store;
@@ -20,21 +21,29 @@ use vaultorno_inspect::{DEFAULT_INSPECT_SOCKET, serve_inspect};
 const USAGE: &str = "\
 usage: vaultorno <mode> [options]
 
-modes in this build (Milestone 3):
-  daemon [--state-dir DIR] [--socket PATH] [--inspect-socket PATH] [--test-identity]
-      serve apps
-  inspect [--socket PATH] [--daemon-uid UID]
-      run the process identity inspector
+modes in this build (Milestone 4):
+  init [--state-dir DIR]
+      create the state folder and seal a new master key (as root, once)
+  daemon [--state-dir DIR] [--inspect-socket PATH]
+      serve apps on the socket vaultorno.socket passes as standard input, with
+      the master key systemd unseals into $CREDENTIALS_DIRECTORY
+  inspect [--state-dir DIR]
+      inspect callers for the daemon, on the socket vaultorno_inspect.socket
+      passes; only the owner of the state folder may ask
   sweep [--state-dir DIR]
       delete expired lockers and stale vaults
   revoke [--undo] [--state-dir DIR] <public key or .pub file>
       refuse statements signed by a key from now on (as root)
 
-later milestones: init, status, check, vaults, log, forget
+later milestones: status, check, vaults, log, forget
+
+development builds only (--features test_identity):
+  daemon --test-identity [--socket PATH] [--in-process-inspector]
+  inspect [--socket PATH]
+      --socket binds PATH instead of taking a socket from systemd
 
 defaults:
   --state-dir      /var/lib/vaultorno
-  --socket         /run/vaultorno.sock (daemon) or /run/vaultorno_inspect.sock (inspect)
   --inspect-socket /run/vaultorno_inspect.sock";
 
 fn main() -> ExitCode {
@@ -56,7 +65,8 @@ fn main() -> ExitCode {
         "inspect" => inspect(rest),
         "sweep" => run_sweep(rest),
         "revoke" => revoke(rest),
-        "init" | "status" | "check" | "vaults" | "log" | "forget" => {
+        "init" => init(rest),
+        "status" | "check" | "vaults" | "log" | "forget" => {
             fail(&format!("`vaultorno {mode}` arrives in a later milestone"))
         }
         "help" | "--help" | "-h" => {
@@ -77,27 +87,39 @@ fn fail(msg: &str) -> ExitCode {
 
 struct Options {
     state_dir: PathBuf,
-    socket: PathBuf,
     inspect_socket: PathBuf,
     test_identity: bool,
+    /// Bind this socket instead of taking one from systemd.
+    #[cfg(feature = "test_identity")]
+    socket: Option<PathBuf>,
+    /// Inspect callers in the daemon's own process, never through whatever
+    /// inspector runs on this machine.
+    #[cfg(feature = "test_identity")]
+    in_process_inspector: bool,
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut opts = Options {
         state_dir: PathBuf::from("/var/lib/vaultorno"),
-        socket: PathBuf::from(vaultorno_client::protocol::DEFAULT_SOCKET),
         inspect_socket: PathBuf::from(DEFAULT_INSPECT_SOCKET),
         test_identity: false,
+        #[cfg(feature = "test_identity")]
+        socket: None,
+        #[cfg(feature = "test_identity")]
+        in_process_inspector: false,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--state-dir" => opts.state_dir = it.next().ok_or("--state-dir needs a folder")?.into(),
-            "--socket" => opts.socket = it.next().ok_or("--socket needs a path")?.into(),
             "--inspect-socket" => {
                 opts.inspect_socket = it.next().ok_or("--inspect-socket needs a path")?.into()
             }
             "--test-identity" => opts.test_identity = true,
+            #[cfg(feature = "test_identity")]
+            "--socket" => opts.socket = Some(it.next().ok_or("--socket needs a path")?.into()),
+            #[cfg(feature = "test_identity")]
+            "--in-process-inspector" => opts.in_process_inspector = true,
             other => return Err(format!("unknown option {other:?}")),
         }
     }
@@ -127,15 +149,32 @@ fn serve(opts: Options) -> ExitCode {
         );
     }
 
-    let store = match Store::open(&opts.state_dir) {
+    // Before anything touches the state or the socket: no master key, no
+    // daemon (§6).
+    let key = match MasterKey::from_credentials_directory() {
+        Ok(k) => k,
+        Err(e) => return fail(&e),
+    };
+    eprintln!(
+        "vaultorno daemon: master key: {}",
+        key.sealing().describe()
+    );
+    // No socket from systemd, no daemon: refused before the state is touched.
+    let listener = match daemon_listener(&opts) {
+        Ok(l) => l,
+        Err(e) => return fail(&e),
+    };
+    let store = match Store::open(&opts.state_dir, key) {
         Ok(s) => s,
         Err(e) => return fail(&format!("can't open {}: {e}", opts.state_dir.display())),
     };
 
-    let inspector: Arc<dyn Inspector> = if opts.test_identity && !opts.inspect_socket.exists() {
-        Arc::new(InProcessInspector)
+    let inspector: Arc<dyn Inspector> = Arc::new(SocketInspector::new(&opts.inspect_socket));
+    #[cfg(feature = "test_identity")]
+    let inspector: Arc<dyn Inspector> = if opts.in_process_inspector {
+        Arc::new(vaultorno::identity::InProcessInspector)
     } else {
-        Arc::new(SocketInspector::new(&opts.inspect_socket, None))
+        inspector
     };
     let identity = SignedIdentity::new(
         ManifestIdentity::new(inspector, opts.test_identity),
@@ -147,36 +186,85 @@ fn serve(opts: Options) -> ExitCode {
         Arc::new(SystemClock),
         DEFAULT_BACKOFF_BASE,
     );
-    match server.listen(&opts.socket) {
+    match server.listen(listener) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(&format!("can't listen on {}: {e}", opts.socket.display())),
+        Err(e) => fail(&format!("serving stopped: {e}")),
     }
 }
 
-fn inspect(args: &[String]) -> ExitCode {
-    let mut socket = PathBuf::from(DEFAULT_INSPECT_SOCKET);
-    let mut daemon_uid: Option<u32> = None;
+/// The daemon's listening socket: the one systemd passes (§14) or, in a
+/// development build given `--socket`, one it binds itself.
+#[cfg_attr(not(feature = "test_identity"), allow(unused_variables))]
+fn daemon_listener(opts: &Options) -> Result<UnixListener, String> {
+    #[cfg(feature = "test_identity")]
+    if let Some(path) = &opts.socket {
+        return activation::bind(path, 0o666)
+            .map_err(|e| format!("can't listen on {}: {e}", path.display()));
+    }
+    activation::from_systemd(Path::new(vaultorno_client::protocol::DEFAULT_SOCKET))
+}
+
+fn init(args: &[String]) -> ExitCode {
+    let mut state_dir = PathBuf::from("/var/lib/vaultorno");
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--socket" => match it.next() {
-                Some(p) => socket = p.into(),
-                None => return fail("--socket needs a path"),
-            },
-            "--daemon-uid" => match it.next().and_then(|s| s.parse::<u32>().ok()) {
-                Some(uid) => daemon_uid = Some(uid),
-                None => return fail("--daemon-uid needs a numeric uid"),
+            "--state-dir" => match it.next() {
+                Some(d) => state_dir = d.into(),
+                None => return fail("--state-dir needs a folder"),
             },
             other => return fail(&format!("unknown option {other:?}")),
         }
     }
-    let allowed_uid = daemon_uid.unwrap_or_else(|| rustix::process::geteuid().as_raw());
-    match serve_inspect(&socket, allowed_uid) {
+    match vaultorno::init::init(&state_dir) {
+        Ok(sealing) => {
+            println!(
+                "sealed a new master key into {} ({})",
+                state_dir.join(CREDENTIAL_FILE).display(),
+                sealing.describe()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e),
+    }
+}
+
+fn inspect(args: &[String]) -> ExitCode {
+    // The daemon's user is whoever owns its state folder (§3).
+    let mut state_dir = PathBuf::from("/var/lib/vaultorno");
+    #[cfg(feature = "test_identity")]
+    let mut socket: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--state-dir" => match it.next() {
+                Some(d) => state_dir = d.into(),
+                None => return fail("--state-dir needs a folder"),
+            },
+            #[cfg(feature = "test_identity")]
+            "--socket" => match it.next() {
+                Some(p) => socket = Some(p.into()),
+                None => return fail("--socket needs a path"),
+            },
+            other => return fail(&format!("unknown option {other:?}")),
+        }
+    }
+    let systemd = || activation::from_systemd(Path::new(DEFAULT_INSPECT_SOCKET));
+    #[cfg(feature = "test_identity")]
+    let listener = match &socket {
+        Some(path) => activation::bind(path, 0o660)
+            .map_err(|e| format!("can't listen on {}: {e}", path.display())),
+        None => systemd(),
+    };
+    #[cfg(not(feature = "test_identity"))]
+    let listener = systemd();
+    let listener = match listener {
+        Ok(l) => l,
+        Err(e) => return fail(&e),
+    };
+    match serve_inspect(listener, &state_dir) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(&format!(
-            "can't serve inspector on {}: {e}",
-            socket.display()
-        )),
+        Err(e) => fail(&format!("the inspector stopped: {e}")),
     }
 }
 
@@ -185,7 +273,8 @@ fn run_sweep(args: &[String]) -> ExitCode {
         Ok(o) => o,
         Err(e) => return fail(&e),
     };
-    let store = match Store::open(&opts.state_dir) {
+    // Headers only: the sweep never needs the master key (§6).
+    let store = match Store::open_without_key(&opts.state_dir) {
         Ok(s) => s,
         Err(e) => return fail(&format!("can't open {}: {e}", opts.state_dir.display())),
     };

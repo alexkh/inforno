@@ -3,18 +3,15 @@
 //! client's envelopes and checks only their shape: it has no key to them.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
 use vaultorno_client::protocol::{
-    ErrorCode, Frame, FrameError, LockerInfo, MAX_LOCKERS_PER_APP, PROTOCOL, Request, Response,
-    ShapeError, check_envelope_shape, read_frame, write_frame,
+    ErrorCode, Frame, FrameError, LockerInfo, MAX_ENVIRONMENT, MAX_LOCKERS_PER_APP, PROTOCOL,
+    Request, Response, ShapeError, check_envelope_shape, read_frame, write_frame,
 };
 use vaultorno_client::time::Clock;
 use zeroize::Zeroize;
@@ -28,8 +25,6 @@ pub const MAX_CONNECTIONS_PER_USER: usize = 32;
 pub const MAX_VAULTS_PER_USER: usize = 64;
 /// How long a new connection has to say `Hello`.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-/// What `Welcome.sealer` reports in Milestone 1.
-pub const SEALER: &str = "none: Milestone 1 has no outer encryption";
 
 /// Base delay for progressive refusal back-off in production (§10).
 pub const DEFAULT_BACKOFF_BASE: Duration = Duration::from_millis(25);
@@ -127,25 +122,17 @@ impl Server {
         &self.store
     }
 
-    /// Listens on `socket` (mode `0666`: access is decided per connection)
-    /// until the listener fails. Socket activation arrives in Milestone 4.
-    pub fn listen(self: &Arc<Self>, socket: &Path) -> io::Result<()> {
-        if let Ok(meta) = fs::symlink_metadata(socket) {
-            if !meta.file_type().is_socket() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("{} isn't a socket", socket.display()),
-                ));
-            }
-            fs::remove_file(socket)?;
-        }
-        let listener = UnixListener::bind(socket)?;
-        fs::set_permissions(socket, fs::Permissions::from_mode(0o666))?;
+    /// Serves connections on `listener`: the one `vaultorno.socket` passes
+    /// (mode `0666`: access is decided per connection), or one a development
+    /// daemon bound (`activation.rs`).
+    pub fn listen(self: &Arc<Self>, listener: UnixListener) -> io::Result<()> {
         for stream in listener.incoming() {
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("vaultorno daemon: accept failed: {e}");
+                    // E.g. out of file descriptors: don't spin.
+                    thread::sleep(Duration::from_millis(100));
                     continue;
                 }
             };
@@ -162,15 +149,26 @@ impl Server {
         Ok(())
     }
 
-    /// Serves one connection from `peer` until it closes.
+    /// Serves one connection from `peer` until it closes. The names of the
+    /// caller's environment variables come from its `Hello` (§7.5).
     pub fn serve(&self, stream: UnixStream, peer: Peer) {
+        self.serve_inner(stream, peer, true)
+    }
+
+    /// As [`Server::serve`], but checks `peer.environment` and ignores what
+    /// `Hello` names, so in-process tests choose it.
+    pub fn serve_with_environment(&self, stream: UnixStream, peer: Peer) {
+        self.serve_inner(stream, peer, false)
+    }
+
+    fn serve_inner(&self, stream: UnixStream, peer: Peer, from_hello: bool) {
         let Some(_slot) = self.claim_slot(peer.uid) else {
             refuse_busy(&stream);
             return;
         };
         // Any error, including a malformed or oversized frame, closes the
         // connection (§9).
-        let _ = self.session(&stream, peer);
+        let _ = self.session(&stream, peer, from_hello);
     }
 
     fn claim_slot(&self, uid: u32) -> Option<Slot<'_>> {
@@ -183,7 +181,12 @@ impl Server {
         Some(Slot { server: self, uid })
     }
 
-    fn session(&self, stream: &UnixStream, peer: Peer) -> Result<(), FrameError> {
+    fn session(
+        &self,
+        stream: &UnixStream,
+        mut peer: Peer,
+        from_hello: bool,
+    ) -> Result<(), FrameError> {
         let mut io = stream;
         stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
         let Some(first) = read_frame::<_, Request>(&mut io)? else {
@@ -199,12 +202,22 @@ impl Server {
                 signature,
                 succession,
                 succession_signature,
+                environment,
             } => {
                 if protocol != PROTOCOL {
                     return reply(error(
                         ErrorCode::ProtocolMismatch,
                         format!("this daemon speaks protocol {PROTOCOL}"),
                     ));
+                }
+                if environment.len() > MAX_ENVIRONMENT {
+                    return reply(error(
+                        ErrorCode::ProtocolMismatch,
+                        format!("hello names more than {MAX_ENVIRONMENT} variables"),
+                    ));
+                }
+                if from_hello {
+                    peer.environment = environment;
                 }
                 (statement, signature, succession, succession_signature)
             }
@@ -282,7 +295,7 @@ impl Server {
                 vault: ident.vault.clone(),
                 binary: ident.binary.clone(),
                 level: ident.level.clone(),
-                sealer: SEALER.into(),
+                sealer: self.store.sealer().into(),
                 half: half.to_vec(),
                 statement_expires: ident.statement_expires,
                 refused,
@@ -556,6 +569,9 @@ fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
         uid,
         pid: Some(pid),
         pidfd: Some(Arc::new(pidfd)),
+        // The caller's client names these in Hello (§7.5): step 2. Until
+        // then a real connection reports none.
+        environment: Vec::new(),
     })
 }
 

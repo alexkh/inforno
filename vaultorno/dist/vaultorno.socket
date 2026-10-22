@@ -1,0 +1,11 @@
+# Open to every user: access is decided per connection (design doc §7).
+[Unit]
+Description=vaultorno socket, a locker room for disposable secrets
+
+[Socket]
+ListenStream=/run/vaultorno.sock
+SocketMode=0666
+Accept=no
+
+[Install]
+WantedBy=sockets.target

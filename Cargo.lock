@@ -9783,7 +9783,9 @@ name = "vaultorno"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chacha20poly1305 0.10.1",
  "getrandom 0.3.4",
+ "hkdf 0.12.4",
  "rustix 1.1.4",
  "serde_json",
  "sha2 0.10.9",

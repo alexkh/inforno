@@ -174,9 +174,12 @@ By design, therefore:
   can't forge contents or swap them between lockers (§6).
 - **Metadata.** The daemon sees locker names, size classes, revisions,
   expiries, and which binary reads or writes what, and when.
-- **The inspector below `hermetic`.** It holds `CAP_SYS_PTRACE`, which could
-  read an app's memory while the key or plaintext is there. Only
-  `ptrace_scope = 3` removes that (§4).
+- **A compromised inspector, a little.** It holds `CAP_SYS_PTRACE`, but its
+  unit takes away the ways to use that on memory: the `ptrace` and
+  `process_vm_*` system calls are denied, and an app's `/proc/<pid>/mem` is
+  its user's alone, which the capability doesn't override (§14, §18). It can
+  still follow an app's `/proc/<pid>/fd/*` into files others may open, such
+  as a `memfd`, so apps keep no secret in one (§13).
 
 ### The daemon is blind
 
@@ -218,7 +221,7 @@ What each part of vaultorno can see:
 | Part | Sees | Can it read contents? |
 |---|---|---|
 | The daemon, the `vaultorno` user, its state and master key | its halves, ciphertext, metadata | No, at every level |
-| The inspector | which executable a process runs; its capability *could* read app memory | No at `hermetic`; below it, only if compromised |
+| The inspector | which executable a process runs, and which files it maps as code | No, unless an app keeps a secret where others may open it, such as a `memfd` (§13) |
 | The admin commands | names, size classes, revisions, expiries | No |
 | Root | everything | Yes; out of scope |
 
@@ -268,7 +271,15 @@ Rules:
 - **Each side checks its peer** on the inspector socket: the inspector
   accepts only the `vaultorno` user, and the daemon expects the
   `vaultorno_inspect` user. With the same code in both processes, user IDs
-  and socket ownership are what tell them apart from an impostor.
+  and socket ownership are what tell them apart from an impostor. Neither
+  looks a user up by name, which would need NSS. Each learns the other's
+  user ID from a path systemd sets up and only root can change: the owner
+  of `/var/lib/vaultorno` (`StateDirectory=`) names the daemon's user, and
+  the owner of `/run/vaultorno_inspect.sock` (`SocketUser=`) names the
+  inspector's. The inspector reads the daemon's `SO_PEERCRED`. The daemon
+  can't read the inspector's that way, because on an activated socket it
+  names PID 1, which called `listen()`. Instead it sets `SO_PASSCRED` and
+  checks the credentials the kernel attaches to each reply.
 - **The inspector stays small and separate in the source,** even though it
   ships in the same file: its own crate, depending only on `rustix` and
   `sha2`, so a reviewer can see everything that mode can reach.
@@ -706,11 +717,13 @@ Every `daemon_half` and locker file has the same fixed layout:
   as they are, with no nonce, outer encryption or tag. Version `1` adds them
   in Milestone 4. Each build reads only the layout it writes.
 - **Per-file key:** HKDF-SHA256 over the master key, with info
-  `vaultorno/v1/<uid or SID>/<vault>/<file name>`.
+  `vaultorno/v1/<uid or SID>/<vault>/<name>`, where the name is the file's
+  path in the vault: `daemon_half` or `lockers/<locker>`. A locker named
+  `daemon_half` therefore never shares the half's key.
 - **Associated data:** the first 21 bytes (magic, version, revision, expiry),
-  then the user ID or SID, vault and file name. A file moved to another
-  user, vault or name fails to decrypt, and so does an edited revision or
-  expiry.
+  then `<uid or SID> ‖ 0x00 ‖ <vault> ‖ 0x00 ‖ <name>`. A file moved to
+  another user, vault or name fails to decrypt, and so does an edited
+  revision or expiry.
 - **The header is readable without the key,** so `List`, the sweep and the
   admin commands read revisions and expiries without decrypting anything.
   The daemon verifies them when it decrypts.
@@ -725,13 +738,20 @@ Every `daemon_half` and locker file has the same fixed layout:
 
 1. **At install:** the package's install script runs `sudo vaultorno init`,
    which creates the state directory (with `CACHEDIR.TAG`) and seals 32
-   random bytes with
-   `systemd-creds encrypt --name=master_key - /var/lib/vaultorno/master_key.cred`
-   (TPM2 when available, otherwise the host key). It refuses if a master key
-   already exists: replacing it would make every vault unreadable.
+   random bytes, followed by a label saying how they're sealed, with
+   `systemd-creds encrypt --name=master_key --with-key=<label>`: `host+tpm2`
+   when `systemd-creds has-tpm2` reports full support, otherwise `host`. It
+   keeps `master_key.cred` only once it unseals to the same bytes, and
+   refuses if a master key already exists: replacing it would make every
+   vault unreadable.
 2. **In the unit:** `LoadCredentialEncrypted=master_key:/var/lib/vaultorno/master_key.cred`.
    At every start, systemd unseals it and places it in
-   `$CREDENTIALS_DIRECTORY/master_key`, readable only by the daemon.
+   `$CREDENTIALS_DIRECTORY/master_key`, readable only by the daemon. The
+   daemon refuses to start without it, and reports the label in
+   `Welcome.sealer`; only root can seal a credential, so the label is a
+   fact. Tests and development daemons point `$CREDENTIALS_DIRECTORY` at a
+   folder holding an unsealed key labelled `unsealed`. The sweep needs no
+   key.
 3. **The daemon** derives each file's outer key from it. Its files are
    therefore useless on any other machine, and so is a copy of
    `master_key.cred`. Even with the master key, they hold only the client's
@@ -755,9 +775,11 @@ version of `inforno_core::vault`; both layers reuse it.
    - opens `/proc/<pid>/exe`, which is the inode actually running even if
      the path was replaced since, and hashes it (SHA-256);
    - reports its path, device and inode;
-   - reads `/proc/<pid>/environ` (the environment at exec time) and reports
-     which variables are set, by name only, so the daemon can check them
-     against the reject list;
+   - reads `/proc/<pid>/maps` and reports every file mapped executable,
+     with its inode, so the daemon can check the code the process has
+     loaded besides its executable. It can't read `/proc/<pid>/environ` or
+     `/proc/<pid>/mem`: both are their owner's alone, and `CAP_SYS_PTRACE`
+     doesn't override file permissions (§18);
    - confirms through the pidfd that the process is still alive, which
      rules out process-ID reuse.
 4. **Identity, in this order:**
@@ -774,8 +796,23 @@ version of `inforno_core::vault`; both layers reuse it.
      not writable by group or others.
    - **Executables must be world-readable** (`0755`, as cargo builds them),
      or the inspector can't hash them.
-5. **Environment:** refuse if a rejected variable is set. The built-in list
-   is variables that make a process load code:
+5. **Loaded code and environment.** Refuse if any file mapped executable,
+   other than the executable itself, could have been changed by anyone but
+   root. It must pass a manifest binary's checks (root-owned, not writable
+   by group or others, every parent folder too), and still be the file that
+   was loaded, neither deleted nor replaced. That catches code the loader
+   pulled in before `main` (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`), and
+   code loaded from user-writable files with no variable involved, as long
+   as it was loaded by `Hello`. Paths the daemon can't see (`/home`, `/tmp`)
+   are refused. Anonymous executable memory isn't judged: a library that
+   copies itself there and unmaps its file is malware written against
+   vaultorno.
+
+   Also refuse if a rejected variable is set, which stops code loaded after
+   `Hello`. The caller's own client names the variables set, in `Hello`,
+   because the inspector can't read another user's environment. The report
+   counts only because the check above found no foreign code in the
+   process. The built-in list is variables that make a process load code:
    - `LD_*` (preload, audit, library path);
    - `VK_*`: Vulkan layers and drivers (`VK_LAYER_PATH`, `VK_ADD_LAYER_PATH`,
      `VK_INSTANCE_LAYERS`, `VK_ICD_FILENAMES`, `VK_DRIVER_FILES`, …).
@@ -787,10 +824,10 @@ version of `inforno_core::vault`; both layers reuse it.
    - plus the app's own `reject_env` from its statement or manifest. A
      trailing `*` matches a prefix.
 
-   A denylist is never complete: this stops generic malware, not malware
-   written for one app. Code loaded from user-writable **files** rather than
-   variables (e.g. Vulkan layers in `~/.local/share/vulkan/`) is invisible
-   to the daemon; see §13.
+   Neither check is complete: they stop generic malware, not malware written
+   for one app. Code loaded after `Hello` from user-writable **files** rather
+   than variables (e.g. Vulkan layers in `~/.local/share/vulkan/`) is
+   invisible to the daemon; see §13.
 6. **Debugging protection:** read `/proc/sys/kernel/yama/ptrace_scope` and
    compare it with the level's minimum.
 7. **Vault, binary and lockers** all come from the identity; the client
@@ -942,7 +979,8 @@ enum Request {
             statement: Option<String>,                     // the statement file (§5), if signed
             signature: Option<String>,                     // its SSHSIG
             succession: Option<String>,                    // a succession statement, after a key rotation (§8)
-            succession_signature: Option<String> },        // its SSHSIG, by the old key
+            succession_signature: Option<String>,          // its SSHSIG, by the old key
+            environment: Vec<String> },                    // names of the variables set at start (§7.5)
     List,
     Get { locker: String },
     Put { locker: String, data: Vec<u8>, expected: u64 },  // a client envelope (§6); empty data empties the locker
@@ -1120,6 +1158,8 @@ genuine app does is the app's responsibility:
 - **Offer no way to export secrets** that a config file or argument can
   trigger without the user.
 - **Keep plaintext briefly** and zeroize it.
+- **Keep no secret in a `memfd`.** Its file is open to everyone (mode
+  `0777`), and the inspector can follow an app's `/proc/<pid>/fd/*`.
 - **Never hand the vaultorno socket to less trusted code** (sandboxes,
   agents); give them only what they need.
 
@@ -1141,7 +1181,15 @@ genuine app does is the app's responsibility:
   `vaultorno_inspect.socket` → `vaultorno_inspect.service`, both
   socket-activated, on `/run/vaultorno.sock` and
   `/run/vaultorno_inspect.sock`. `vaultorno_sweep.timer` starts
-  `vaultorno_sweep.service` daily.
+  `vaultorno_sweep.service` daily. They live in `vaultorno/dist/`, with the
+  `sysusers.d` entry. The hardening tests (§17, §18) run each service's
+  settings from there as written; the excerpts below are their core.
+  Each service gets its listening socket as standard input
+  (`StandardInput=socket`), which safe Rust can take; `LISTEN_FDS`'
+  descriptor 3 would need `unsafe`. Each checks the socket is bound where
+  clients connect. A release build refuses to start any other way; only a
+  development build binds a socket itself (`--socket`). The daemon requires
+  the inspector's socket and starts after it.
 - **No configuration files.** The package installs the executable, the
   units, the timer and the `sysusers.d` entry, and its install script runs
   `vaultorno init` (§6). Apps' own packages install their statements or
@@ -1161,7 +1209,7 @@ genuine app does is the app's responsibility:
 | Holds | the master key; each vault's daemon half and lockers, sealed under it (the lockers are client ciphertext) | nothing |
 | Capabilities | none | `CAP_SYS_PTRACE` |
 | Input | protocol messages from anyone | one pidfd per request |
-| Output | its half and ciphertext, to verified binaries | process and user ID, executable path, device, inode and SHA-256, names of the environment variables set |
+| Output | its half and ciphertext, to verified binaries | process and user ID, executable path, device, inode and SHA-256, the files it maps as code |
 
 - **The inspector mode is a few hundred lines,** in its own crate, with a
   fixed-size request (§3). The rest of the executable is in its process too,
@@ -1169,9 +1217,11 @@ genuine app does is the app's responsibility:
 - **A compromised daemon** can hand its halves and ciphertext to the wrong
   process, refuse service or roll lockers back, but can't decrypt lockers or
   read other processes' memory: it never has a user's half.
-- **A compromised inspector** holds no lockers. It can read process memory,
-  including the app key and plaintext inside apps, unless
-  `ptrace_scope = 3` (the `hermetic` level).
+- **A compromised inspector** holds no lockers, and can't read process
+  memory: `ptrace` and `process_vm_*` are denied to it, and an app's
+  `/proc/<pid>/mem` is closed to it by file permissions (§18). It can still
+  open files an app holds open that others may open, such as a `memfd`
+  (§13).
 - **Neither can read a user's half:** they run as their own users, the file
   is `0600` in a `0700` directory, and `CAP_SYS_PTRACE` doesn't override file
   permissions. `ProtectHome=yes` also hides users' home folders from the
@@ -1442,20 +1492,24 @@ Inforno's realm store (§15) is planned separately, once settled.
   accept good enough, or should the daemon require Linux 6.5+
   (`SO_PEERPIDFD`)? The inspector gets the process ID from the pidfd through
   `/proc/self/fdinfo`, or `PIDFD_GET_INFO` on Linux 6.13+.
-- **Hardening to verify (M4):**
-  - `ReadOnlyPaths=/proc` should block **writes** through
-    `/proc/<pid>/mem`. It does **not** block reads; that's why the inspector
-    is a separate process.
-  - Does Yama `ptrace_scope = 3` block `/proc/<pid>/mem` while still
-    allowing `exe` and `environ`, as `hermetic` assumes?
-  - Does `ProtectHome=yes` still let the inspector open `/proc/<pid>/exe`
-    for binaries under `/home`?
-  - Can either process open a user's half by another route, e.g. through an
-    app's `/proc/<pid>/cwd`, `/proc/<pid>/root` or `/proc/<pid>/fd/*`? File
-    permissions should still apply; test it.
-  - Does `StateDirectory=` re-own `master_key.cred` to `vaultorno`, and does
-    that matter? The file is sealed, so it shouldn't.
-  - Write a test that tries each path from inside the services.
+- **Hardening, verified in M4** by `tests/hardening.rs`, which runs probes
+  under each unit's own settings:
+  - An app's `/proc/<pid>/mem` is closed to the inspector, for reading and
+    for writing, by file permissions alone (mode `0600`, the app's user's).
+    `CAP_SYS_PTRACE` passes the ptrace check but doesn't override them.
+    `ReadOnlyPaths=/proc` adds a block on writes to its own processes.
+  - For the same reason it can't read an app's `/proc/<pid>/environ`, so the
+    caller's client names the environment instead (§7.5).
+  - `ProtectHome=yes` still lets it open `/proc/<pid>/exe` of binaries under
+    `/home`: the link reaches the file without its view of `/home`. Its unit
+    now says `yes`.
+  - Neither service reaches a user's half through `/proc/<pid>/cwd`, `/root`
+    or `/fd/*`. The daemon and the sweep don't even see other users'
+    processes (`ProtectProc=invisible`), and file permissions stop the
+    inspector.
+  - Still open: whether `ptrace_scope = 3` still allows `exe` and `maps`, as
+    `hermetic` assumes; whether `StateDirectory=` re-owning
+    `master_key.cred` matters (it's sealed, so it shouldn't).
 - **Log in the journal instead?** Writing to the systemd journal would
   remove the log file and its rotation, and `journalctl -u vaultorno` would
   read it. But members of groups such as `adm` or `systemd-journal`, often

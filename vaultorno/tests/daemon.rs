@@ -14,12 +14,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use tempfile::TempDir;
 use vaultorno::identity::{Peer, TestIdentity};
+use vaultorno::master_key::{MasterKey, Sealing};
 use vaultorno::server::{MAX_CONNECTIONS_PER_USER, MAX_VAULTS_PER_USER, Server};
 use vaultorno::store::Store;
 use vaultorno::sweep::{SweepReport, sweep};
 use vaultorno_client::protocol::{
-    ENVELOPE_MAGIC, ErrorCode, Frame, MAX_FRAME, PROTOCOL, Request, Response, read_frame,
-    write_frame,
+    ENVELOPE_MAGIC, ErrorCode, Frame, MAX_ENVIRONMENT, MAX_FRAME, PROTOCOL, Request, Response,
+    read_frame, write_frame,
 };
 use vaultorno_client::testing::{
     APP, Harness, START, reader_statement, statement, writer_statement,
@@ -39,10 +40,15 @@ struct Env {
     homes: TempDir,
 }
 
+/// The master key the tests' stores are sealed under (§6).
+fn test_key() -> MasterKey {
+    MasterKey::new(&[0x4d; 32], Sealing::Unsealed)
+}
+
 fn env() -> Env {
     let state = tempfile::tempdir().unwrap();
     let clock = Arc::new(FakeClock::new(START));
-    let store = Store::open(state.path().join("state")).unwrap();
+    let store = Store::open(state.path().join("state"), test_key()).unwrap();
     let server = Server::new(store, Box::new(TestIdentity), clock.clone());
     Env {
         server,
@@ -145,6 +151,7 @@ impl Raw {
             signature: None,
             succession: None,
             succession_signature: None,
+            environment: Vec::new(),
         })
         .expect("a reply to hello")
     }
@@ -205,8 +212,10 @@ fn users_never_see_each_other() {
         b"user 1001"
     );
 
-    let half =
-        |uid| fs::read(env.store().vault_dir(uid, "test_suite").join("daemon_half")).unwrap();
+    let half = |uid| {
+        let lock = env.store().lock_vault(uid, "test_suite").unwrap();
+        *env.store().daemon_half(&lock, uid, "test_suite").unwrap()
+    };
     assert_ne!(half(1000), half(1001), "each user's vault has its own half");
 }
 
@@ -219,7 +228,11 @@ fn a_locker_copied_to_another_user_fails_to_open() {
     let target = env.locker_file(1001, "api_keys");
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::copy(env.locker_file(1000, "api_keys"), &target).unwrap();
-    assert!(matches!(b.get("api_keys"), Err(Error::KeyMismatch)));
+    // The daemon's layer refuses it before the client's could (§6).
+    match b.get("api_keys") {
+        Err(Error::Storage(msg)) => assert!(msg.contains("doesn't decrypt"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +436,7 @@ fn another_protocol_version_is_refused() {
         signature: None,
         succession: None,
         succession_signature: None,
+        environment: Vec::new(),
     });
     assert_eq!(code(&reply), Some(ErrorCode::ProtocolMismatch));
 }
@@ -437,6 +451,7 @@ fn a_succession_without_its_signature_is_refused() {
         signature: None,
         succession: Some("{}".into()),
         succession_signature: None,
+        environment: Vec::new(),
     });
     assert_eq!(code(&reply), Some(ErrorCode::ProtocolMismatch));
 }
@@ -528,6 +543,7 @@ fn describe_says_what_the_daemon_checked() {
     assert!(d.contains("statement until 2027-01-14"), "{d}");
     assert_eq!(vault.binary(), Some("writer"));
     assert_eq!(vault.vault_name(), Some("test_suite"));
+    assert_eq!(vault.sealer(), Sealing::Unsealed.describe());
 }
 
 // ---------------------------------------------------------------------------
@@ -648,11 +664,49 @@ fn a_changed_daemon_half_shows_as_key_mismatch() {
         .put("api_keys", b"x", 0)
         .unwrap();
     let path = env.store().vault_dir(UID, "test_suite").join("daemon_half");
+    // An edited half no longer decrypts (§6): the daemon won't serve it.
     let mut bytes = fs::read(&path).unwrap();
     bytes[21] ^= 0xff;
-    fs::write(&path, bytes).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    match env.open(UID, writer_statement(START)) {
+        Err(Error::Storage(msg)) => assert!(msg.contains("daemon_half"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    // A lost half is replaced by a new one, which leaves the lockers
+    // unreadable, never readable.
+    fs::remove_file(&path).unwrap();
     let vault = env.open(UID, writer_statement(START)).unwrap();
     assert!(matches!(vault.get("api_keys"), Err(Error::KeyMismatch)));
+}
+
+#[test]
+fn a_daemon_with_another_master_key_reads_nothing() {
+    let env = env();
+    env.open(UID, writer_statement(START))
+        .unwrap()
+        .put("api_keys", b"x", 0)
+        .unwrap();
+    let wrong = Server::new(
+        Store::open(
+            env.store().root(),
+            MasterKey::new(&[0x99; 32], Sealing::Unsealed),
+        )
+        .unwrap(),
+        Box::new(TestIdentity),
+        env.clock.clone(),
+    );
+    let (client, daemon) = UnixStream::pair().unwrap();
+    thread::spawn(move || wrong.serve(daemon, Peer::without_pidfd(UID, None)));
+    match env.open_with(UID, client, APP, writer_statement(START)) {
+        Err(Error::Storage(msg)) => assert!(msg.contains("daemon_half"), "{msg}"),
+        other => panic!("{other:?}"),
+    }
+    let vault = env.open(UID, writer_statement(START)).unwrap();
+    assert_eq!(
+        vault.get("api_keys").unwrap().data.expose_secret(),
+        b"x",
+        "the right key still reads it"
+    );
 }
 
 #[test]
@@ -703,7 +757,8 @@ fn an_envelope_moved_between_lockers_fails_to_open() {
         env.locker_file(UID, "short"),
     )
     .unwrap();
-    assert!(matches!(vault.get("short"), Err(Error::Corrupt)));
+    // The daemon's layer refuses it before the client's could (§6).
+    assert!(matches!(vault.get("short"), Err(Error::Storage(_))));
 }
 
 // ---------------------------------------------------------------------------
@@ -716,7 +771,7 @@ fn locker_files_use_the_fixed_layout() {
     let stored = vault.put("api_keys", b"x", 0).unwrap();
     let bytes = fs::read(env.locker_file(UID, "api_keys")).unwrap();
     assert_eq!(&bytes[..4], b"VLTD");
-    assert_eq!(bytes[4], 0, "Milestone 1 layout");
+    assert_eq!(bytes[4], 1, "Milestone 4 layout");
     assert_eq!(
         u64::from_be_bytes(bytes[5..13].try_into().unwrap()),
         stored.revision
@@ -725,8 +780,9 @@ fn locker_files_use_the_fixed_layout() {
         Some(u64::from_be_bytes(bytes[13..21].try_into().unwrap())),
         stored.expires
     );
-    assert_eq!(&bytes[21..25], b"VLT1", "the client's envelope follows");
-    assert_eq!(bytes.len() - 21, 1024, "one size class");
+    // A nonce, then the client's envelope sealed again under the master key.
+    assert!(!contains(&bytes[21..], b"VLT1"), "the envelope is sealed");
+    assert_eq!(bytes.len() - 21 - 24 - 16, 1024, "one size class");
 }
 
 #[test]
@@ -839,7 +895,7 @@ fn manifest_env(test_fallback: bool) -> ManifestEnv {
         test_fallback,
     );
     let clock = Arc::new(FakeClock::new(START));
-    let store = Store::open(root.path().join("state")).unwrap();
+    let store = Store::open(root.path().join("state"), test_key()).unwrap();
     let server = Server::new(store, Box::new(identity), clock);
 
     ManifestEnv {
@@ -857,7 +913,7 @@ fn manifest_env(test_fallback: bool) -> ManifestEnv {
 }
 
 impl ManifestEnv {
-    fn inspected_for(&self, bin: &Path, env_names: &[&str]) -> vaultorno_inspect::Inspected {
+    fn inspected_for(&self, bin: &Path) -> vaultorno_inspect::Inspected {
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::MetadataExt;
         let meta = fs::metadata(bin).unwrap();
@@ -870,7 +926,7 @@ impl ManifestEnv {
             dev: meta.dev(),
             ino: meta.ino(),
             sha256,
-            env_names: env_names.iter().map(|s| (*s).to_owned()).collect(),
+            code: Vec::new(),
         }
     }
 
@@ -880,12 +936,23 @@ impl ManifestEnv {
         env_names: &[&str],
         statement: Option<StatementFiles>,
     ) -> Result<Vault, Error> {
-        self.inspector
-            .set_default(self.inspected_for(bin, env_names));
+        self.connect_inspected(self.inspected_for(bin), env_names, statement)
+    }
+
+    /// Connects as a caller the inspector reports as `inspected`, whose
+    /// client names `env_names` as set (§7.5).
+    fn connect_inspected(
+        &self,
+        inspected: vaultorno_inspect::Inspected,
+        env_names: &[&str],
+        statement: Option<StatementFiles>,
+    ) -> Result<Vault, Error> {
+        self.inspector.set_default(inspected);
         let (client, daemon) = UnixStream::pair().unwrap();
         let server = self.server.clone();
         let uid = self.trusted_uid;
-        thread::spawn(move || server.serve(daemon, Peer::without_pidfd(uid, Some(4242))));
+        let peer = Peer::without_pidfd(uid, Some(4242)).with_environment(env_names);
+        thread::spawn(move || server.serve_with_environment(daemon, peer));
         let home = self.root.path().join("home");
         fs::create_dir_all(&home).unwrap();
         Vault::connect(DaemonOptions {
@@ -954,6 +1021,87 @@ fn a_rejected_environment_variable_gets_a_binary_refused() {
     // Next clean open sees the refused count on `pkg_inforno`.
     let clean = env.connect_as(&env.writer_bin, &["PATH"], None).unwrap();
     assert_eq!(clean.refused(), 6);
+}
+
+#[test]
+fn hello_names_the_callers_environment() {
+    let env = manifest_env(false);
+    env.inspector.set_default(env.inspected_for(&env.writer_bin));
+    let hello = |names: &[&str]| {
+        let (client, daemon) = UnixStream::pair().unwrap();
+        let server = env.server.clone();
+        // What the peer was given is replaced by what Hello names.
+        let peer =
+            Peer::without_pidfd(env.trusted_uid, Some(4242)).with_environment(&["LD_PRELOAD"]);
+        thread::spawn(move || server.serve(daemon, peer));
+        Raw::new(client).send(Request::Hello {
+            protocol: PROTOCOL,
+            statement: None,
+            signature: None,
+            succession: None,
+            succession_signature: None,
+            environment: names.iter().map(|s| (*s).to_owned()).collect(),
+        })
+    };
+    assert!(matches!(
+        hello(&["PATH", "HOME"]),
+        Some(Response::Welcome { .. })
+    ));
+    match hello(&["PATH", "GTK_MODULES"]) {
+        Some(Response::Error {
+            code: ErrorCode::NotAllowed,
+            message,
+        }) => assert_eq!(message, "GTK_MODULES set"),
+        other => panic!("{other:?}"),
+    }
+    let many = vec!["X"; MAX_ENVIRONMENT + 1];
+    assert_eq!(code(&hello(&many)), Some(ErrorCode::ProtocolMismatch));
+}
+
+#[test]
+fn foreign_code_gets_a_binary_refused() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use vaultorno_inspect::MappedCode;
+
+    let env = manifest_env(false);
+    let lib = env.bin_dir.join("libfine.so");
+    fs::write(&lib, b"not really a library").unwrap();
+    fs::set_permissions(&lib, fs::Permissions::from_mode(0o755)).unwrap();
+    let lib_ino = fs::metadata(&lib).unwrap().ino();
+    let writer_ino = fs::metadata(&env.writer_bin).unwrap().ino();
+    let mapped = |path: &Path, ino: u64, deleted: bool| MappedCode {
+        path: path.to_path_buf(),
+        ino,
+        deleted,
+    };
+    let with_code = |code: Vec<MappedCode>| {
+        let mut inspected = env.inspected_for(&env.writer_bin);
+        inspected.code = code;
+        env.connect_inspected(inspected, &["PATH"], None)
+    };
+
+    // Libraries only root can change (here, the trusted user), and the
+    // executable itself, which its manifest covers.
+    with_code(vec![
+        mapped(&env.writer_bin, writer_ino, false),
+        mapped(&lib, lib_ino, false),
+    ])
+    .unwrap();
+
+    let refusal = |code: MappedCode| match with_code(vec![code]) {
+        Err(Error::NotAllowed(msg)) => msg,
+        other => panic!("expected NotAllowed, got {other:?}"),
+    };
+    let msg = refusal(mapped(&lib, lib_ino, true));
+    assert!(msg.contains("replaced or removed"), "{msg}");
+    let msg = refusal(mapped(&lib, lib_ino + 1, false));
+    assert!(msg.contains("isn't the file that was loaded"), "{msg}");
+    // A path the daemon can't see, e.g. under /home with ProtectHome=yes.
+    let msg = refusal(mapped(&env.root.path().join("home/libevil.so"), 7, false));
+    assert!(msg.contains("can't stat"), "{msg}");
+    fs::set_permissions(&lib, fs::Permissions::from_mode(0o775)).unwrap();
+    let msg = refusal(mapped(&lib, lib_ino, false));
+    assert!(msg.contains("writable by group or others"), "{msg}");
 }
 
 #[test]
@@ -1039,7 +1187,7 @@ fn manifest_permission_and_ptrace_scope_checks() {
 fn progressive_backoff_slows_repeated_refusals() {
     let state = tempfile::tempdir().unwrap();
     let clock = Arc::new(FakeClock::new(START));
-    let store = Store::open(state.path().join("state")).unwrap();
+    let store = Store::open(state.path().join("state"), test_key()).unwrap();
     let server = Server::with_backoff(
         store,
         Box::new(TestIdentity),
@@ -1136,7 +1284,7 @@ fn signed_env() -> SignedEnv {
         false,
     );
     let state = root.path().join("state");
-    let store = Store::open(&state).unwrap();
+    let store = Store::open(&state, test_key()).unwrap();
     let identity = SignedIdentity::new(manifests, &state);
     let clock = Arc::new(FakeClock::new(START));
     let server = Server::new(store, Box::new(identity), clock.clone());
@@ -1163,7 +1311,7 @@ impl SignedEnv {
         path
     }
 
-    fn inspected(&self, bin: &Path, env_names: &[&str]) -> vaultorno_inspect::Inspected {
+    fn inspected(&self, bin: &Path) -> vaultorno_inspect::Inspected {
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::MetadataExt;
         let meta = fs::metadata(bin).unwrap();
@@ -1174,12 +1322,12 @@ impl SignedEnv {
             dev: meta.dev(),
             ino: meta.ino(),
             sha256: Sha256::digest(fs::read(bin).unwrap()).into(),
-            env_names: env_names.iter().map(|s| (*s).to_owned()).collect(),
+            code: Vec::new(),
         }
     }
 
     fn sha256_of(&self, bin: &Path) -> String {
-        self.inspected(bin, &[]).sha256_hex()
+        self.inspected(bin).sha256_hex()
     }
 
     /// A statement for `bin`, issued now and valid 90 days, with `extra`
@@ -1218,11 +1366,12 @@ impl SignedEnv {
         signature: Option<String>,
         succession: Option<SuccessionFiles>,
     ) -> Result<Vault, Error> {
-        self.inspector.set_default(self.inspected(bin, env_names));
+        self.inspector.set_default(self.inspected(bin));
         let (client, daemon) = UnixStream::pair().unwrap();
         let server = self.server.clone();
         let uid = self.uid;
-        thread::spawn(move || server.serve(daemon, Peer::without_pidfd(uid, Some(4343))));
+        let peer = Peer::without_pidfd(uid, Some(4343)).with_environment(env_names);
+        thread::spawn(move || server.serve_with_environment(daemon, peer));
         Vault::connect(DaemonOptions {
             app: "inforno".into(),
             socket: PathBuf::from("/nonexistent"),

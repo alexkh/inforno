@@ -1,0 +1,37 @@
+# Deletes expired lockers and stale vaults (design doc §6). Reads headers
+# only, so it needs no master key.
+[Unit]
+Description=vaultorno sweep
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/vaultorno sweep
+User=vaultorno
+Group=vaultorno
+StateDirectory=vaultorno
+StateDirectoryMode=0700
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+LimitCORE=0

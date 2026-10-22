@@ -1,0 +1,13 @@
+# The inspector's socket (design doc §3, §14). Its owner names the
+# inspector's user to the daemon, which checks every reply against it; only
+# the daemon's group may connect. vaultorno.service pulls it in, so it has
+# no [Install].
+[Unit]
+Description=vaultorno inspector socket
+
+[Socket]
+ListenStream=/run/vaultorno_inspect.sock
+SocketUser=vaultorno_inspect
+SocketGroup=vaultorno
+SocketMode=0660
+Accept=no

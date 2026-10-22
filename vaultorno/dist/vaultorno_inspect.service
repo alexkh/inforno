@@ -1,0 +1,45 @@
+# The inspector (design doc §3, §14): which executable is this process
+# running? It answers only the owner of /var/lib/vaultorno.
+[Unit]
+Description=vaultorno inspector
+Requires=vaultorno_inspect.socket
+After=vaultorno_inspect.socket
+
+[Service]
+ExecStart=/usr/bin/vaultorno inspect
+StandardInput=socket
+StandardOutput=journal
+StandardError=journal
+User=vaultorno_inspect
+Group=vaultorno_inspect
+UMask=0077
+AmbientCapabilities=CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+# It still opens /proc/<pid>/exe of binaries under /home: the link reaches
+# the file without its view of /home (§18, tests/hardening.rs).
+ProtectHome=yes
+# An app's /proc/<pid>/mem is closed to it anyway by the file's permissions
+# (0600, the app's user's); this also covers its own processes' (§18).
+ReadOnlyPaths=/proc
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# With CAP_SYS_PTRACE, pidfd_getfd would take any process's open files.
+SystemCallFilter=~ptrace process_vm_readv process_vm_writev pidfd_getfd
+MemoryDenyWriteExecute=yes
+LimitCORE=0
