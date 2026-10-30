@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -794,6 +794,9 @@ fn the_sweep_deletes_expired_lockers_and_stale_vaults() {
     drop(vault);
     let lockers = env.store().lockers_dir(UID, "test_suite");
     fs::write(lockers.join("short.tmp"), b"leftover").unwrap();
+    // The sweep judges temp files and stale vaults by modification times,
+    // so here they follow the fake clock, never the real one.
+    set_mtime(&lockers.join("short.tmp"), START);
 
     env.clock.advance(7 * DAY);
     let r = sweep(env.store(), env.clock.now()).unwrap();
@@ -812,11 +815,27 @@ fn the_sweep_deletes_expired_lockers_and_stale_vaults() {
     let r = sweep(env.store(), env.clock.now()).unwrap();
     assert_eq!(r.expired_lockers, 1);
     assert!(env.store().vault_exists(UID, "test_suite"), "not stale yet");
+    // Emptying `lockers/` just stamped it with the real time.
+    set_mtime(&lockers, env.clock.now());
 
-    env.clock.advance(91 * DAY);
+    env.clock.advance(89 * DAY);
+    let r = sweep(env.store(), env.clock.now()).unwrap();
+    assert_eq!(r.stale_vaults, 0, "a day short of stale");
+    assert!(env.store().vault_exists(UID, "test_suite"));
+
+    env.clock.advance(DAY);
     let r = sweep(env.store(), env.clock.now()).unwrap();
     assert_eq!(r.stale_vaults, 1);
     assert!(!env.store().vault_exists(UID, "test_suite"));
+}
+
+/// Sets a file's or folder's modification time to `t`, Unix seconds on the
+/// fake clock.
+fn set_mtime(path: &Path, t: u64) {
+    fs::File::open(path)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(t))
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -1825,4 +1844,57 @@ fn a_bad_succession_is_refused_and_not_recorded() {
     assert!(msg.contains("from revoked key"), "{msg}");
 
     assert!(!env.state.join(SUCCESSIONS).exists(), "nothing recorded");
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 6: the log (§11)
+
+#[test]
+fn the_log_records_events_and_never_contents() {
+    const CANARY: &[u8] = b"CANARY-log-5d1e0c";
+    let env = env();
+    let expired = statement(
+        APP,
+        "writer",
+        START - 100 * DAY,
+        &[("api_keys", "write", None)],
+    );
+    assert!(env.open(UID, expired).is_err());
+    let vault = env.open(UID, writer_statement(START)).unwrap();
+    vault.put("api_keys", CANARY, 0).unwrap();
+    vault.put("short", CANARY, 0).unwrap();
+    assert_eq!(vault.get("api_keys").unwrap().data.expose_secret(), CANARY);
+    env.clock.advance(8 * DAY);
+    assert_eq!(vault.get("short").unwrap().revision, 0, "expired after 7 days");
+
+    // A locker name built to forge a line of its own.
+    let mut raw = Raw::new(env.stream(UID));
+    assert!(matches!(
+        raw.hello(writer_statement(START)),
+        Response::Welcome { .. }
+    ));
+    let forged = "x\n1999-01-01T00:00:00Z vault=forged result=ok";
+    let reply = raw.send(Request::Get {
+        locker: forged.into(),
+    });
+    assert_eq!(code(&reply), Some(ErrorCode::UnknownLocker));
+
+    let log = fs::read_to_string(env.store().root().join(format!("users/{UID}/log"))).unwrap();
+    for expected in [
+        r#"vault=test_suite binary=- exe=- request=hello result=refused check="statement expired on"#,
+        "vault=test_suite binary=writer exe=- request=hello result=ok",
+        "request=put locker=api_keys result=ok",
+        "request=put locker=short result=ok",
+        "request=get locker=api_keys result=ok",
+        "request=expire locker=short result=deleted by=daemon",
+        "request=get locker=short result=empty",
+        r#"request=get locker="x\u{a}1999-01-01T00:00:00Z vault=forged result=ok" result=unknown_locker"#,
+    ] {
+        assert!(log.contains(expected), "missing {expected}\n{log}");
+    }
+    assert!(
+        log.lines().all(|l| l.starts_with("2026-")),
+        "every line is one event:\n{log}"
+    );
+    assert!(!contains(log.as_bytes(), CANARY), "contents in the log");
 }

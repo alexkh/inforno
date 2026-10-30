@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock, RwLock, Mutex};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use dotenv::dotenv;
 use eframe::egui::{self};
 use egui_commonmark::CommonMarkCache;
 use rusqlite::Connection;
@@ -89,6 +88,10 @@ pub struct ChatMsgUi {
 
 pub struct MyAppPermanent {
     pub rt: Handle,
+    /// Inforno's vault, opened once in main and kept across reloads.
+    pub keys: inforno_core::api_keys::KeyStore,
+    /// What startup found out about the vault; taken by the first `State::new`.
+    pub vault_notices: Mutex<Option<Vec<String>>>,
     pub sandbox: Option<PathBuf>,
     pub pending_project_init: Mutex<Option<PathBuf>>,
     pub active_realm_name: Mutex<Option<String>>,
@@ -142,6 +145,8 @@ pub struct State {
     pub vault_error: Option<String>,
     /// Which vaultorno backend holds saved keys, and until when.
     pub key_storage: crate::key_manager::KeyStorage,
+    /// Startup warnings about the vault, shown in the key manager.
+    pub vault_notices: Vec<String>,
     pub preset_editor_state: PresetEditorState,
     pub openr_model_names: Vec<String>,
     pub ollama_model_names: Vec<String>,
@@ -352,14 +357,11 @@ impl State {
         let mut vault_error = None;
         let mut key_storage = crate::key_manager::KeyStorage::default();
 
-        dotenv().ok(); // OPENROUTER_API_URLS may still come from .env
-
-        match crate::key_manager::load_openrouter_key() {
+        match crate::key_manager::load_openrouter_key(&permanent.keys) {
             Ok((key, storage)) => {
                 key_storage = storage;
                 if let Some(key) = key {
-                    api_key.key = key;
-                    api_key.is_set = true;
+                    api_key = ApiKey::new(key.key, key.hosts);
                     key_saved = true;
                 }
             }
@@ -367,6 +369,21 @@ impl State {
                 eprintln!("Saved API keys aren't available: {error}");
                 vault_error = Some(error);
             }
+        }
+
+        // Once per run, not on every sandbox reload: what startup found out
+        // about the vault, and whether to ask for keys (vaultorno design doc
+        // §15): none saved, or about to expire.
+        let mut vault_notices = Vec::new();
+        let mut ask_for_keys = false;
+        if let Some(notices) = permanent.vault_notices.lock().unwrap().take() {
+            ask_for_keys = !key_saved
+                || inforno_core::api_keys::expires_within(
+                    key_storage.expires,
+                    inforno_core::api_keys::RENEW_DAYS,
+                )
+                || !notices.is_empty();
+            vault_notices = notices;
         }
 
         // --- 3. Cache Database and Async Model Fetching ---
@@ -484,7 +501,7 @@ impl State {
             cache_conn,
             db_conn: conn,
             db_chats: chats,
-            show_key_manager: false,
+            show_key_manager: ask_for_keys,
             show_preset_editor: false,
             show_realm_config: false,
             show_workflow_editor: false,
@@ -501,6 +518,7 @@ impl State {
             key_saved,
             vault_error,
             key_storage,
+            vault_notices,
             preset_editor_state: PresetEditorState {
                 ollama_downloading: Arc::new(
                 Mutex::new(OllamaDownloading::default())),

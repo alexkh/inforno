@@ -434,7 +434,7 @@ key (§8). `autorno_statement.json`:
   "level": "airtight",
   "reject_env": [],
   "lockers": {
-    "api_keys":        { "access": "write", "lifetime_days": 30 },
+    "api_keys":        { "access": "write", "lifetime_days": 90 },
     "realm_store_key": { "access": "write", "lifetime_days": 7 }
   }
 }
@@ -488,7 +488,7 @@ no expiry.
   "app": "inforno",
   "binaries": {
     "inforno": { "path": "/usr/bin/inforno",
-                 "lockers": { "api_keys": { "access": "write", "lifetime_days": 30 } } },
+                 "lockers": { "api_keys": { "access": "write", "lifetime_days": 90 } } },
     "autorno": { "path": "/usr/bin/autorno",
                  "lockers": { "api_keys": { "access": "read" } } }
   }
@@ -897,7 +897,7 @@ cat > target/release/inforno_statement.json <<EOF
   "sha256": "$sha",
   "issued": "$(date -u +%FT%TZ)",
   "expires": "$(date -u -d '+7 days' +%FT%TZ)",
-  "lockers": { "api_keys": { "access": "write", "lifetime_days": 30 } }
+  "lockers": { "api_keys": { "access": "write", "lifetime_days": 90 } }
 }
 EOF
 ssh-keygen -Y sign -f ~/.ssh/vaultorno_sign_sk -n vaultorno/statement \
@@ -1116,6 +1116,23 @@ half, so none can read contents, even as root.
 `vaultorno daemon` and `vaultorno inspect` are run only by their systemd
 units (§14).
 
+- **Users** are given by ID, or by a name in `/etc/passwd`. Like the daemon,
+  the admin commands don't use NSS.
+- **Root in the `vaultorno` user's folder.** The state belongs to
+  `vaultorno`, so whatever root creates there gets its folder's owner, and
+  the daemon can still use it: a lock file, the log, a folder the sweep
+  makes. `forget` works within the state folder only:
+  - it opens every folder without following a symlink;
+  - it takes the vault's lock, like the daemon and the sweep;
+  - it deletes each file through the folder it found it in;
+  - it refuses a vault holding anything it doesn't expect.
+
+  A link planted in the state can't steer root elsewhere.
+- **`forget` while an app is connected:** the connection keeps its
+  identity. A locker it writes before reopening lands in a recreated vault
+  under the old key, and reads as `KeyMismatch` once the app reopens and
+  gets a new daemon's half. Forget a vault while its app is closed.
+
 ---
 
 ## 13. What apps must still do
@@ -1218,31 +1235,45 @@ genuine app does is the app's responsibility:
   process, refuse service or roll lockers back, but can't decrypt lockers or
   read other processes' memory: it never has a user's half.
 - **A compromised inspector** holds no lockers, and can't read process
-  memory: `ptrace` and `process_vm_*` are denied to it, and an app's
-  `/proc/<pid>/mem` is closed to it by file permissions (§18). It can still
-  open files an app holds open that others may open, such as a `memfd`
-  (§13).
+  memory: `ptrace`, `process_vm_*` and `pidfd_getfd` (which would take any
+  process's open files) are denied to it, and an app's `/proc/<pid>/mem` is
+  closed to it by file permissions (§18). It can still open, through
+  `/proc/<pid>/fd/*`, files an app holds open that others may open, such as
+  a `memfd` (§13).
 - **Neither can read a user's half:** they run as their own users, the file
   is `0600` in a `0700` directory, and `CAP_SYS_PTRACE` doesn't override file
   permissions. `ProtectHome=yes` also hides users' home folders from the
   daemon; it doesn't affect `~vaultorno`, which is under `/var/lib`.
 
 ```ini
-# vaultorno.service
+# vaultorno.service (its core; every unit in vaultorno/dist also sets
+# ProtectKernelTunables=, ProtectKernelModules=, ProtectKernelLogs=,
+# ProtectControlGroups=, ProtectClock=, ProtectHostname=,
+# RestrictNamespaces=, RestrictRealtime=, RestrictSUIDSGID=,
+# LockPersonality= and SystemCallArchitectures=native)
+[Unit]
+Requires=vaultorno.socket vaultorno_inspect.socket
+After=vaultorno.socket vaultorno_inspect.socket
+
 [Service]
 ExecStart=/usr/bin/vaultorno daemon
+StandardInput=socket
 User=vaultorno
 Group=vaultorno
 StateDirectory=vaultorno
 StateDirectoryMode=0700
 LoadCredentialEncrypted=master_key:/var/lib/vaultorno/master_key.cred
+UMask=0077
 CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 PrivateNetwork=yes
+# Callers are reached through pidfds and the inspector, never /proc.
+ProtectProc=invisible
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
 MemoryDenyWriteExecute=yes
@@ -1250,41 +1281,56 @@ LimitCORE=0
 ```
 
 ```ini
-# vaultorno_inspect.service
+# vaultorno_inspect.service (its core)
 [Service]
 ExecStart=/usr/bin/vaultorno inspect
+StandardInput=socket
 User=vaultorno_inspect
+Group=vaultorno_inspect
+UMask=0077
 AmbientCapabilities=CAP_SYS_PTRACE
 CapabilityBoundingSet=CAP_SYS_PTRACE
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only        # verify whether `yes` still lets /proc/<pid>/exe open (§18)
-ReadOnlyPaths=/proc          # blocks writes through /proc/<pid>/mem (verify, §18)
+# It still opens /proc/<pid>/exe of binaries under /home (§18).
+ProtectHome=yes
+# An app's /proc/<pid>/mem is closed to it anyway by file permissions;
+# this also covers its own processes' (§18).
+ReadOnlyPaths=/proc
+PrivateTmp=yes
 PrivateDevices=yes
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
-SystemCallFilter=~ptrace process_vm_readv process_vm_writev
+# With CAP_SYS_PTRACE, pidfd_getfd would take any process's open files.
+SystemCallFilter=~ptrace process_vm_readv process_vm_writev pidfd_getfd
 MemoryDenyWriteExecute=yes
 LimitCORE=0
 ```
 
 ```ini
-# vaultorno_sweep.service (started daily by vaultorno_sweep.timer)
+# vaultorno_sweep.service (its core; started daily by vaultorno_sweep.timer)
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/vaultorno sweep
 User=vaultorno
 Group=vaultorno
 StateDirectory=vaultorno
+StateDirectoryMode=0700
+UMask=0077
 CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
+PrivateTmp=yes
 PrivateDevices=yes
 PrivateNetwork=yes
+ProtectProc=invisible
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+LimitCORE=0
 ```
 
 - **Packaging:** an Arch PKGBUILD first.
@@ -1299,7 +1345,7 @@ SystemCallFilter=@system-service
 
 | Locker | Contents (Inforno's own format) | Read | Write | Lifetime |
 |---|---|---|---|---|
-| `api_keys` | provider keys, each with its allowed hosts | inforno, autorno | inforno | 30 days |
+| `api_keys` | provider keys, each with its allowed hosts | inforno, autorno | inforno | 90 days |
 | `realm_store_key` | a cached copy of the realm store's key (proposal below) | inforno, autorno | inforno | 7 days |
 
 - **Formats are Inforno's** (versioned serde JSON in `inforno_core`).
@@ -1308,8 +1354,9 @@ SystemCallFilter=@system-service
 - **Inforno and autorno share keys** because both statements name
   `api_keys`; only Inforno's says `write`. Both combine the same two halves.
 - **When `api_keys` expires,** Inforno asks the user to enter keys again and
-  suggests issuing fresh ones. Where a provider allows expiring keys,
-  Inforno sets the expiry to match.
+  suggests issuing fresh ones. Inforno can't set a key's expiry at its
+  provider, so it advises creating keys that expire within 90 days, with a
+  spend limit, as OpenRouter allows (§13).
 - **Allowed hosts live inside `api_keys`**, so editing Inforno's normal
   config can't send a key elsewhere.
 - **"Set temporarily"** stays in Inforno's memory.
@@ -1374,9 +1421,8 @@ store may be visible inside a Realm; add a test for that.
    fallback and, with the daemon, combines the half from `Welcome` with the
    user's half from the home folder; the key manager and the security report
    show which backend it got.
-2. One-time moves: `~/.local/share/inforno/api-keys.cred` (today's file) and
-   the old keyring entry into `api_keys`. The client encrypts them like any
-   other `Put`, and their 30 days start then.
+2. Nothing to migrate: no released version of Inforno saved keys anywhere
+   else.
 3. If `Welcome.refused` is above zero, tell the user that other programs
    tried to open Inforno's vault.
 4. If `api_keys` is empty or about to expire, ask for keys; if
@@ -1420,9 +1466,11 @@ store may be visible inside a Realm; add a test for that.
 | M8 | macOS `Keychain` backend in the client, with expiry | — |
 | M9 | `fido2` option: the user's half wrapped by a security key (§18) | The vault opens only with the security key and a touch |
 
-M1 is done. Not yet in it, by design: refused-request back-off (with real
-identities, M2), the log (M6), `Vault::reset`, and deleting a user's half
-whose vault was swept as stale.
+M1 to M5 are done; M6 is under way. Still open from M1: `Vault::reset`,
+and deleting a user's half whose vault was swept as stale. The client
+can't tell a new daemon's half from an old one, so the second needs
+`Welcome` to say when `Hello` created the half, and an order between
+binaries opening at once.
 
 Inforno's realm store (§15) is planned separately, once settled.
 
@@ -1601,4 +1649,3 @@ below was taken out to keep it a small locker room; none is lost.
 | The `spans` crate in the daemon | Vaultorno has no patterns | Internal to Inforno and autorno | Delegation comes back |
 | Per-key audit | The daemon sees lockers, not keys | Per-locker log | — |
 | macOS per-user agent for delegation | There is no delegation | `Keychain` backend | — |
-

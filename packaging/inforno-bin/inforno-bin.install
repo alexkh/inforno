@@ -1,0 +1,29 @@
+_scope_note() {
+    local scope
+    scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)
+    case "$scope" in
+        2|3) return ;;
+    esac
+    cat <<EOF
+:: inforno-bin's binaries are signed upstream. vaultorno serves them only at
+   kernel.yama.ptrace_scope 2 or more (airtight); this machine has ${scope:-no Yama}.
+   To raise it, as root:
+     echo 'kernel.yama.ptrace_scope = 2' > /etc/sysctl.d/50-ptrace_scope.conf
+     sysctl --system
+   Then only root can trace or debug programs (gdb, strace, crash reporters).
+   Or install the source build, inforno, which needs only 1.
+EOF
+}
+
+post_install() {
+    _scope_note
+    cat <<'EOF'
+:: Keys entered with the source build (vault pkg_inforno) are in another
+   vault: enter them again.
+:: The statements expire 90 days after a release: keep this package updated.
+EOF
+}
+
+post_upgrade() {
+    _scope_note
+}

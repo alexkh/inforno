@@ -1,0 +1,54 @@
+# Inforno and autorno, built from source. A source build can't match an
+# upstream statement's hash, so a package manifest vouches for it instead:
+# watertight, vault pkg_inforno (vaultorno/DESIGN.md §5).
+# Until the first release, the source is a tarball of the workspace:
+#   git archive --prefix=inforno-$pkgver/ -o packaging/inforno/inforno-$pkgver.tar.gz HEAD
+
+pkgname=inforno
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='LLM chat app, and autorno, its headless harness'
+arch=('x86_64')
+url='https://github.com/alexkh/inforno'
+license=('MIT')
+# Add the runtime libraries namcap reports for inforno and autorno.
+depends=('vaultorno' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+conflicts=('inforno-bin')
+install=inforno.install
+# Until the first release, a tarball of the workspace (see the top). Once
+# v$pkgver is tagged, switch to the tag, and fill in its sum with updpkgsums:
+#   source=("inforno-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+source=("inforno-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_dir="inforno-$pkgver"
+
+prepare() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p inforno -p autorno
+}
+
+check() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The manifest grants what the statements grant.
+  cargo test --frozen --release -p xtask
+}
+
+package() {
+  cd "$_dir"
+  install -Dm0755 -t "$pkgdir/usr/bin/" target/release/inforno target/release/autorno
+  install -Dm0644 packaging/inforno/inforno.json \
+    "$pkgdir/usr/share/vaultorno/manifests/inforno.json"
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
+}

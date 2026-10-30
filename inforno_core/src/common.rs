@@ -107,6 +107,15 @@ pub struct FileOpMsg {
 pub struct ApiKey {
     pub key: SecretString,
     pub is_set: bool,
+    /// Hosts this key may be sent to (`api_keys::check_host`); none means
+    /// nowhere.
+    pub hosts: Vec<String>,
+}
+
+impl ApiKey {
+    pub fn new(key: SecretString, hosts: Vec<String>) -> Self {
+        Self { key, is_set: true, hosts }
+    }
 }
 
 #[derive(Error, Debug)]

@@ -265,14 +265,17 @@ fn real_inspect_mode_over_socket() {
 }
 
 #[test]
-fn later_modes_and_unknown_modes_fail_cleanly() {
-    for mode in ["status", "check", "vaults", "log", "forget"] {
-        let out = Command::new(BIN).arg(mode).output().unwrap();
-        assert!(!out.status.success(), "{mode}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("later milestone"),
-            "{mode}"
-        );
+fn unknown_modes_and_options_fail_cleanly() {
+    let cases: [&[&str]; 5] = [
+        &["status", "extra"],
+        &["vaults", "--locker", "a"],
+        &["log"],
+        &["forget"],
+        &["check"],
+    ];
+    for args in cases {
+        let out = Command::new(BIN).args(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
     }
     assert_eq!(
         Command::new(BIN)
@@ -474,4 +477,178 @@ fn real_init_seals_a_master_key_that_unseals() {
     println!("sealed with {}", key.sealing().describe());
 
     assert!(!init().status.success(), "a second init refuses");
+}
+
+/// Runs an admin command on `state` with an empty environment. Returns
+/// whether it succeeded, and everything it printed.
+fn admin(args: &[&str], state: &Path) -> (bool, String) {
+    let out = Command::new(BIN)
+        .args(args)
+        .arg("--state-dir")
+        .arg(state)
+        .env_clear()
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), text)
+}
+
+/// `status`, `vaults`, `log` and `check` show metadata, never a secret:
+/// not the contents, either half or the master key, raw, in hex or in
+/// base64 (§12).
+#[cfg(feature = "test_identity")]
+#[test]
+fn admin_commands_show_metadata_never_secrets() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use vaultorno::store::Store;
+
+    const SECRET: &[u8] = b"sk-admin-canary-7c41e9";
+    let dir = tempfile::tempdir().unwrap();
+    let (state, socket, home) = (
+        dir.path().join("state"),
+        dir.path().join("vaultorno.sock"),
+        dir.path().join("home"),
+    );
+    let _daemon = start(&state, &socket);
+    client(
+        &socket,
+        &home,
+        "writer",
+        &["api_keys:write:30"],
+        &["put", "api_keys", hex(SECRET).as_str(), "0"],
+    )
+    .unwrap();
+
+    let uid = rustix::process::getuid().as_raw();
+    let user_half = fs::read(home.join(".local/share/vaultorno/e2e_test/user_half")).unwrap();
+    let daemon_half = {
+        let store = Store::open(&state, MasterKey::new(&[0x5a; 32], Sealing::Unsealed)).unwrap();
+        let lock = store.lock_vault(uid, "test_e2e").unwrap();
+        let half = store.daemon_half(&lock, uid, "test_e2e").unwrap().to_vec();
+        half
+    };
+    let secrets = [SECRET.to_vec(), user_half, daemon_half, vec![0x5a; 32]];
+
+    let uid_s = uid.to_string();
+    let runs = [
+        ("status", admin(&["status"], &state)),
+        ("vaults", admin(&["vaults", "--user", uid_s.as_str()], &state)),
+        ("log", admin(&["log", "--user", uid_s.as_str()], &state)),
+        ("check", admin(&["check", CLIENT], &state)),
+    ];
+    for (name, (_, text)) in &runs {
+        assert!(
+            !text.contains(std::str::from_utf8(SECRET).unwrap()),
+            "{name} printed the contents:\n{text}"
+        );
+        for secret in &secrets {
+            for form in [hex(secret), STANDARD.encode(secret)] {
+                assert!(!text.contains(&form), "{name} printed a secret:\n{text}");
+            }
+        }
+    }
+
+    let (ok, status) = &runs[0].1;
+    assert!(*ok, "{status}");
+    let (ok, vaults) = &runs[1].1;
+    assert!(*ok, "{vaults}");
+    assert!(
+        vaults.contains("test_e2e") && vaults.contains("api_keys"),
+        "{vaults}"
+    );
+    let (ok, log) = &runs[2].1;
+    assert!(*ok, "{log}");
+    assert!(log.contains("request=hello result=ok"), "{log}");
+    assert!(log.contains("request=put locker=api_keys result=ok"), "{log}");
+}
+
+/// `forget` takes names, never paths. It doesn't follow a link planted in
+/// the state, and leaves a vault holding anything unexpected whole (§12).
+#[test]
+fn forget_stays_inside_the_state_folder() {
+    use vaultorno::store::{Header, Store};
+
+    const UID: u32 = 4242;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let store = Store::open(&state, MasterKey::new(&[0x5a; 32], Sealing::Unsealed)).unwrap();
+    let fill = |vault: &str, lockers: &[&str]| {
+        let lock = store.lock_vault(UID, vault).unwrap();
+        store.daemon_half(&lock, UID, vault).unwrap();
+        for locker in lockers {
+            let header = Header {
+                revision: 1,
+                expires: 0,
+            };
+            store
+                .write_locker(&lock, UID, vault, locker, &header, b"envelope")
+                .unwrap();
+        }
+    };
+    let forget =
+        |args: &[&str]| admin(&[&["forget", "--user", "4242"][..], args].concat(), &state);
+    fill("test_e2e", &["a", "b"]);
+
+    // Names, never paths.
+    let bad: [&[&str]; 5] = [
+        &["../../etc"],
+        &["pkg_../x"],
+        &["/etc"],
+        &["users/4242/test_e2e"],
+        &["test_e2e", "--locker", "../daemon_half"],
+    ];
+    for args in bad {
+        let (ok, text) = forget(args);
+        assert!(!ok, "{args:?}: {text}");
+    }
+    assert!(store.locker_path(UID, "test_e2e", "a").exists());
+    assert!(store.vault_dir(UID, "test_e2e").join("daemon_half").exists());
+
+    // A vault folder, or a vault's lockers folder, that links elsewhere.
+    let victim = dir.path().join("victim");
+    fs::create_dir_all(victim.join("lockers")).unwrap();
+    fs::write(victim.join("daemon_half"), b"keep").unwrap();
+    fs::write(victim.join("lockers/a"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&victim, state.join(format!("users/{UID}/test_link"))).unwrap();
+    // A link is never a vault, so there's nothing to forget.
+    forget(&["test_link"]);
+    fill("test_lnk", &[]);
+    std::os::unix::fs::symlink(victim.join("lockers"), store.lockers_dir(UID, "test_lnk"))
+        .unwrap();
+    let linked: [&[&str]; 2] = [&["test_lnk"], &["test_lnk", "--locker", "a"]];
+    for args in linked {
+        let (ok, text) = forget(args);
+        assert!(!ok, "{args:?}: {text}");
+    }
+    assert_eq!(fs::read(victim.join("daemon_half")).unwrap(), b"keep");
+    assert_eq!(fs::read(victim.join("lockers/a")).unwrap(), b"keep");
+
+    // A vault holding something forget doesn't know is left whole.
+    fill("test_odd", &["a"]);
+    fs::write(store.vault_dir(UID, "test_odd").join("notes"), b"x").unwrap();
+    let (ok, text) = forget(&["test_odd"]);
+    assert!(!ok && text.contains("unexpected"), "{text}");
+    assert!(store.locker_path(UID, "test_odd", "a").exists());
+
+    // One locker, then the whole vault.
+    let (ok, text) = forget(&["test_e2e", "--locker", "a"]);
+    assert!(ok, "{text}");
+    assert!(!store.locker_path(UID, "test_e2e", "a").exists());
+    assert!(store.locker_path(UID, "test_e2e", "b").exists());
+    let (ok, text) = forget(&["test_e2e"]);
+    assert!(ok, "{text}");
+    assert!(!store.vault_exists(UID, "test_e2e"));
+
+    let (ok, log) = admin(&["log", "--user", "4242"], &state);
+    assert!(ok, "{log}");
+    assert_eq!(log.matches("request=forget").count(), 2, "{log}");
+    assert!(
+        log.contains("vault=test_e2e request=forget locker=a result=deleted by=admin"),
+        "{log}"
+    );
 }

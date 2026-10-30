@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "app": "inforno",
+  "binaries": {
+    "inforno": {
+      "path": "/usr/bin/inforno",
+      "lockers": { "api_keys": { "access": "write", "lifetime_days": 90 } }
+    },
+    "autorno": {
+      "path": "/usr/bin/autorno",
+      "lockers": { "api_keys": { "access": "read" } }
+    }
+  }
+}

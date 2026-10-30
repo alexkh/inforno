@@ -84,7 +84,7 @@ make xwin
 **`src/openr.rs`**
 - OpenRouter API integration using `openrouter-rs` crate
 - Streaming chat with abort capability
-- API key management (from env, keyring, or UI input)
+- Sends a saved key only to the hosts saved with it (`api_keys::check_host`); custom endpoints from `OPENROUTER_API_URLS` use their own token, never a saved key
 - Model fetching and caching
 
 **`src/ollama.rs`**
@@ -120,6 +120,7 @@ make xwin
 ## Key Implementation Details
 
 ### Async Runtime
+- `inforno_core::api_keys::startup()` must stay the very first thing in `main()`, before the Tokio runtime or anything else starts a thread. It changes the environment and makes the process non-dumpable (`vaultorno/DESIGN.md` §13), which is why `main()` builds the runtime by hand instead of using `#[tokio::main]`
 - Tokio runtime created in `main()` with `_enter` guard kept alive
 - Async tasks spawned via `tokio::spawn` using the runtime handle
 - Streaming uses `std::sync::mpsc` channels for GUI updates
@@ -131,10 +132,10 @@ When rendering markdown from LLMs, some models produce indented triple backticks
 
 This is stored in DB verbatim; fix applied only at read time.
 
-### API Key Storage Priority
-1. Environment variable `OPENROUTER_API_KEY` (from `.env` or system)
-2. System keyring (cross-platform via `keyring` crate)
-3. Manual entry via UI (stored in keyring)
+### API Keys
+- Saved in vaultorno's `api_keys` locker through `inforno_core::api_keys` (`vaultorno/DESIGN.md` §15), or set for the session only in the key manager. Never read from environment variables or `.env`.
+- The vault is opened once in `main()` (`KeyStore`) and kept in `MyAppPermanent` across sandbox reloads.
+- Each saved key carries the hosts it may be sent to. Call `api_keys::check_host` before sending a key anywhere, and never send a saved key to a URL taken from configuration or the environment.
 
 ### Localization
 - Uses `rust-i18n` crate with files in `locales/` directory
@@ -183,6 +184,5 @@ This is stored in DB verbatim; fix applied only at read time.
 - **ollama-rs 0.3.4**: Ollama API client with streaming
 - **openrouter-rs 0.6.1**: OpenRouter API client
 - **tokio 1.50.0**: Async runtime with full features
-- **keyring 3.6.3**: Cross-platform secure credential storage
 - **typst 0.14.2 / mitex 0.2.4**: Math rendering (LaTeX to SVG)
 - Uses Rust edition 2024

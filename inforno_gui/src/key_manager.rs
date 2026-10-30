@@ -1,9 +1,8 @@
 use eframe::egui::{self, RichText, TextEdit, Vec2b};
 use rust_i18n::t;
-use secrecy::SecretString;
 use secrecy::zeroize::Zeroize;
 
-use inforno_core::api_keys::{self, OPENROUTER, format_date};
+use inforno_core::api_keys::{self, KeyStore, OPENROUTER, RENEW_DAYS, SavedKey, format_date};
 use inforno_core::common::ApiKey;
 use crate::state::State;
 
@@ -18,6 +17,11 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
             ui.disable();
         }
 
+        for notice in &state.vault_notices {
+            ui.colored_label(ui.visuals().warn_fg_color, notice);
+            ui.add_space(6.0);
+        }
+
         ui.label(RichText::new(t!("openrouter_api_key")).strong());
 
         if let Some(error) = &state.vault_error {
@@ -26,20 +30,33 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
             ui.label("You can still set a key for this session only; it stays in memory until Inforno closes.");
         }
 
+        // Within RENEW_DAYS of expiry, saving starts a new 30 days.
+        let renew_due = state.key_saved
+            && api_keys::expires_within(state.key_storage.expires, RENEW_DAYS);
+
         if state.key_saved {
             ui.add_space(20.0);
             ui.label(t!("openrouter_key_is_set"));
             if let Some(expires) = state.key_storage.expires {
-                ui.label(format!(
-                    "Saved keys expire on {}; you'll be asked for them again then.",
-                    format_date(expires)
-                ));
+                if renew_due {
+                    ui.colored_label(ui.visuals().warn_fg_color, format!(
+                        "Saved keys expire on {}. Enter your key again, ideally a freshly \
+                         issued one, and save it to keep it for another {} days.",
+                        format_date(expires),
+                        api_keys::LIFETIME_DAYS
+                    ));
+                } else {
+                    ui.label(format!(
+                        "Saved keys expire on {}; you'll be asked for them again then.",
+                        format_date(expires)
+                    ));
+                }
             }
             ui.weak(state.key_storage.description.as_str());
             ui.add_space(10.0);
 
             if ui.button(t!("delete_openrouter_key_btn")).clicked() {
-                match store_openrouter_key(None) {
+                match store_openrouter_key(&state.perma.keys, None, false) {
                     Ok(storage) => {
                         state.key_saved = false;
                         state.key_storage = storage;
@@ -74,12 +91,11 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
 
             if ui.add_enabled(is_button_enabled,
                     egui::Button::new(t!("set_key_temporarily_btn"))).clicked() {
-                let new_key = ApiKey {
-                    key: state.api_key_entered.clone().into(),
-                    is_set: true,
-                };
+                state.openrouter_api_key = ApiKey::new(
+                    state.api_key_entered.clone().into(),
+                    api_keys::default_hosts(OPENROUTER),
+                );
                 state.api_key_entered.zeroize();
-                state.openrouter_api_key = new_key;
             }
 
             ui.add_space(10.0);
@@ -92,14 +108,11 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
             if ui.add_enabled(is_button_enabled, egui::Button::new("💾 Save in vault"))
                     .on_hover_text(save_tooltip)
                     .clicked() {
-                let new_key = ApiKey {
-                    key: state.api_key_entered.clone().into(),
-                    is_set: true,
-                };
+                let new_key = SavedKey::new(OPENROUTER, state.api_key_entered.clone().into());
                 state.api_key_entered.zeroize();
 
                 // If saving fails, the key still works for this session.
-                match store_openrouter_key(Some(&new_key.key)) {
+                match store_openrouter_key(&state.perma.keys, Some(&new_key), renew_due) {
                     Ok(storage) => {
                         state.key_saved = true;
                         state.key_storage = storage;
@@ -110,7 +123,7 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
                         state.vault_error = Some(error);
                     },
                 }
-                state.openrouter_api_key = new_key;
+                state.openrouter_api_key = ApiKey::new(new_key.key, new_key.hosts);
             }
         });
 
@@ -129,16 +142,28 @@ pub struct KeyStorage {
 }
 
 /// The saved OpenRouter key, if any, and what holds it.
-pub fn load_openrouter_key() -> Result<(Option<SecretString>, KeyStorage), String> {
-    let vault = api_keys::open_vault().map_err(|e| e.to_string())?;
-    let (mut keys, expires) = api_keys::read_keys(&vault).map_err(|e| e.to_string())?;
-    let storage = KeyStorage { description: vault.describe(), expires };
-    Ok((keys.remove(OPENROUTER), storage))
+pub fn load_openrouter_key(keys: &KeyStore) -> Result<(Option<SavedKey>, KeyStorage), String> {
+    keys.with_vault(|vault| {
+        let (mut saved, expires) = api_keys::read_keys(vault)?;
+        let storage = KeyStorage { description: vault.describe(), expires };
+        Ok((saved.remove(OPENROUTER), storage))
+    })
+    .map_err(|e| e.to_string())
 }
 
-/// Saves the OpenRouter key in vaultorno, or removes it (`None`).
-pub fn store_openrouter_key(key: Option<&SecretString>) -> Result<KeyStorage, String> {
-    let vault = api_keys::open_vault().map_err(|e| e.to_string())?;
-    let expires = api_keys::set_key(&vault, OPENROUTER, key).map_err(|e| e.to_string())?;
-    Ok(KeyStorage { description: vault.describe(), expires })
+/// Saves the OpenRouter key, or removes it (`None`). With `renew`, the saved
+/// keys are replaced by this one, which starts a new 30 days.
+pub fn store_openrouter_key(
+    keys: &KeyStore,
+    key: Option<&SavedKey>,
+    renew: bool,
+) -> Result<KeyStorage, String> {
+    keys.with_vault(|vault| {
+        let expires = match (key, renew) {
+            (Some(key), true) => api_keys::renew_key(vault, OPENROUTER, key)?,
+            (key, _) => api_keys::set_key(vault, OPENROUTER, key)?,
+        };
+        Ok(KeyStorage { description: vault.describe(), expires })
+    })
+    .map_err(|e| e.to_string())
 }

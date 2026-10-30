@@ -1,54 +1,85 @@
-# vaultorno, Milestone 1
+# vaultorno
 
-A locker room for disposable secrets. See the design document for the why;
-this is the first milestone of the how.
+A locker room for disposable secrets. `DESIGN.md` is the authority;
+section numbers (§) refer to it.
+
+Milestones 1 to 4 are done. Milestone 5, Inforno on vaultorno, is under way.
 
 ## What's here
 
 | Crate | What |
 |---|---|
-| `vaultorno_client` | The only API apps use: `Vault::open`, `get`, `put`, `update`, `list`. Encrypts every locker inside the app's process with the app key (the daemon's half and the user's half, combined with HKDF), so the daemon only ever sees ciphertext. Also the `Local` backend for when no daemon is installed. |
-| `vaultorno` | One executable, run in modes. In this milestone: `vaultorno daemon` (with a test-only identity) and `vaultorno sweep`. Depends on `vaultorno_client` with default features off, so none of the key code is linked into it. |
+| `vaultorno_client` | The only API apps use: `Vault::open`, `get`, `put`, `update`, `list`. Encrypts every locker inside the app's process, with a key made of the daemon's half and the user's half (§6), so the daemon only sees ciphertext. Also the `Local` backend, for when no daemon is installed, and `startup`, which an app calls first thing in `main` (§13). |
+| `vaultorno` | One executable, run in modes: `daemon`, `inspect`, `sweep`, `init`, `revoke` (§3, §12). Depends on `vaultorno_client` with default features off, so none of the key code is linked into it. |
+| `vaultorno_inspect` | Which executable a process runs and which files it maps as code (§7). Depends only on `rustix` and `sha2`. |
 
-## Try it
+`dist/` holds the units, the timer and the `sysusers.d` entry (§14).
+`cargo xtask build`, in the workspace, builds the release binaries and
+signs their statements (§8).
+
+## Tests
 
 ```sh
-cargo test --workspace --all-features      # everything, including the end-to-end tests
-
-# a development daemon (it trusts unsigned statements: development only)
-cargo run -p vaultorno --features test_identity -- \
-    daemon --test-identity --state-dir /tmp/vaultorno_dev/state --socket /tmp/vaultorno_dev/vaultorno.sock
-
-# an app's round trip, in another terminal
-cargo run -p vaultorno_client --example round_trip -- /tmp/vaultorno_dev/vaultorno.sock
+cargo test --release --workspace --all-features
+cargo test --release -p vaultorno
 ```
 
-A build without `--features test_identity` refuses to serve: it has no
-identity checks yet.
+As root: `tests/hardening.rs`, and
+`cargo test --release -p vaultorno --test end_to_end -- --ignored real_init`.
 
-## Milestone 1, done when…
+## Installing on this machine
 
-| Criterion | Where |
-|---|---|
-| Round trip from an example client | `examples/round_trip.rs`; `tests/end_to_end.rs` against the real binary |
-| Per-user separation | `users_never_see_each_other`, `a_locker_copied_to_another_user_fails_to_open` |
-| Conflicting writers detected | the shared suite's `conflicting_writers_detected` |
-| Lockers expire; writes don't extend them | `expiry_set_at_fill_and_not_extended`, `expired_locker_reads_empty`, the sweep test |
-| Limits enforced | locker and frame size, 16 lockers per app, 32 connections, 64 vaults |
-| No plaintext canary reaches the daemon | `no_plaintext_canary_reaches_the_daemon` checks every frame both ways (base64 fields decoded) and every state file |
-| Same tests pass on `Local` | `vaultorno_client::backend_suite!` runs 14 cases on both backends |
+Until the PKGBUILD (Milestone 6), from the workspace root:
 
-## Moving it into the Inforno workspace
+```sh
+cargo build --release -p vaultorno
+sudo install -m 0755 target/release/vaultorno /usr/bin/vaultorno
+sudo install -m 0644 vaultorno/dist/vaultorno.conf /usr/lib/sysusers.d/vaultorno.conf
+sudo systemd-sysusers
+sudo install -m 0644 vaultorno/dist/*.service vaultorno/dist/*.socket \
+    vaultorno/dist/*.timer /etc/systemd/system/
+sudo vaultorno init
+sudo systemctl daemon-reload
+sudo systemctl enable --now vaultorno.socket vaultorno_sweep.timer
+```
 
-Copy both crate folders, add them to the workspace's `members`, and drop this
-workspace's `Cargo.toml`. The crypto (XChaCha20-Poly1305, HKDF-SHA256) and
-the `Local` backend were written fresh here; swap in `inforno_core::vault`'s
-tested code where you prefer it.
+`vaultorno init` seals a new master key with `systemd-creds`, in the TPM2
+when there is one, and refuses to replace an existing one.
 
-## Not in this milestone
+Apps always connect to `/run/vaultorno.sock`, so this is the only way to
+run Inforno on vaultorno. Sign its build first with `cargo xtask build`
+(statements valid 7 days; `--key` and `--days` to change).
 
-Identity checks (package manifests in M2, signed statements in M3), the
-inspector, the master key and outer encryption (M4), the log and admin
-commands (M6), Windows (M7), macOS (M8). `Vault::reset` and refused-request
-back-off come with the identities.
+## A development daemon
 
+For test clients only: it trusts unsigned statements (vaults
+`test_<app>`), binds a socket of its own, and needs an unsealed master key
+where systemd would put the sealed one.
+
+```sh
+cargo build --release -p vaultorno --features test_identity
+D=/tmp/vaultorno_dev
+mkdir -p -m 0700 $D/credentials
+# 32 random bytes, then the label `unsealed` (§6)
+{ head -c 32 /dev/urandom; printf unsealed; } > $D/credentials/master_key
+chmod 0600 $D/credentials/master_key
+CREDENTIALS_DIRECTORY=$D/credentials target/release/vaultorno daemon \
+    --test-identity --in-process-inspector \
+    --state-dir $D/state --socket $D/vaultorno.sock
+```
+
+- `--in-process-inspector` inspects callers in the daemon itself, running as
+  you, instead of through an inspector service. It can therefore inspect
+  only your own dumpable processes. A client that calls `startup()` is
+  non-dumpable and gets refused.
+- Clients connect with `DaemonOptions::socket`. Run them outside cargo,
+  e.g. with `env -i`: cargo sets `LD_LIBRARY_PATH`, which the daemon
+  refuses (§7.5).
+- A release build has no `--test-identity`, `--socket` or
+  `--in-process-inspector`, and starts only from its units.
+
+## Not done yet
+
+The admin commands `status`, `check`, `vaults`, `log` and `forget`, and the
+log (Milestone 6); Windows (Milestone 7); macOS (Milestone 8);
+`Vault::reset`.

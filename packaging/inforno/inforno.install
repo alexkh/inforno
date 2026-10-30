@@ -1,0 +1,9 @@
+post_install() {
+    cat <<'EOF'
+:: Inforno opens its vault through the package manifest in
+   /usr/share/vaultorno/manifests/inforno.json (watertight, vault pkg_inforno),
+   which needs kernel.yama.ptrace_scope 1 or more.
+:: Keys entered with inforno-bin are in another vault: enter them again.
+:: `vaultorno check /usr/bin/inforno` shows what the daemon will decide.
+EOF
+}

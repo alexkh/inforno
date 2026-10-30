@@ -13,10 +13,11 @@ use vaultorno_client::protocol::{
     ErrorCode, Frame, FrameError, LockerInfo, MAX_ENVIRONMENT, MAX_LOCKERS_PER_APP, PROTOCOL,
     Request, Response, ShapeError, check_envelope_shape, read_frame, write_frame,
 };
-use vaultorno_client::time::Clock;
+use vaultorno_client::time::{Clock, format_date};
 use zeroize::Zeroize;
 
 use crate::identity::{Identify, Identity, Peer};
+use crate::log;
 use crate::store::{Header, Store, VaultLock};
 
 /// Connections one user may hold open (§10).
@@ -116,6 +117,70 @@ impl Server {
 
     fn clear_backoff(&self, peer: &Peer) {
         lock(&self.backoff_streaks).remove(&(peer.uid, peer.pid));
+    }
+
+    /// Appends one event to `uid`'s log (§11).
+    fn record(&self, uid: u32, fields: &[(&str, &str)]) {
+        log::record(self.store.root(), uid, self.clock.now(), fields);
+    }
+
+    /// Logs how a `Hello` ended: the vault (`-` until it's known), the
+    /// binary, and the executable the inspector hashed, if it got that far.
+    fn log_hello(
+        &self,
+        peer: &Peer,
+        vault: &str,
+        binary: &str,
+        result: &str,
+        extra: &[(&str, &str)],
+    ) {
+        let mut fields = vec![
+            ("vault", vault),
+            ("binary", binary),
+            ("exe", exe_of(peer)),
+            ("request", "hello"),
+            ("result", result),
+        ];
+        fields.extend_from_slice(extra);
+        self.record(peer.uid, &fields);
+    }
+
+    /// Logs a `Get` or `Put` and how it ended.
+    fn log_request(
+        &self,
+        peer: &Peer,
+        ident: &Identity,
+        request: &str,
+        locker: &str,
+        result: &str,
+    ) {
+        let vault = log::vault_label(Some(&ident.app), &ident.vault);
+        self.record(
+            peer.uid,
+            &[
+                ("vault", vault.as_str()),
+                ("binary", ident.binary.as_str()),
+                ("exe", exe_of(peer)),
+                ("request", request),
+                ("locker", locker),
+                ("result", result),
+            ],
+        );
+    }
+
+    /// Logs a locker the daemon deleted because it expired (§6).
+    fn log_expired(&self, uid: u32, ident: &Identity, locker: &str) {
+        let vault = log::vault_label(Some(&ident.app), &ident.vault);
+        self.record(
+            uid,
+            &[
+                ("vault", vault.as_str()),
+                ("request", "expire"),
+                ("locker", locker),
+                ("result", "deleted"),
+                ("by", "daemon"),
+            ],
+        );
     }
 
     pub fn store(&self) -> &Store {
@@ -244,6 +309,7 @@ impl Server {
         // refuse everything rather than guess (§9).
         if let Err(message) = self.identity.check_state() {
             eprintln!("vaultorno daemon: refusing every hello: {message}");
+            self.log_hello(&peer, "-", "-", "error", &[("check", message.as_str())]);
             return reply(error(ErrorCode::Storage, message));
         }
         let now = self.clock.now();
@@ -260,12 +326,17 @@ impl Server {
                     i
                 }
                 Err(refusal) => {
-                    // Until the log (§11, Milestone 6): why, never what.
-                    eprintln!(
-                        "vaultorno daemon: refused uid {} pid {}: {}",
-                        peer.uid,
-                        peer.pid.map_or_else(|| "?".to_owned(), |p| p.to_string()),
-                        refusal.message
+                    // To the user's log, not the journal (§11): why, never what.
+                    let label = refusal
+                        .vault
+                        .as_deref()
+                        .map_or_else(|| "-".to_owned(), |v| log::vault_label(None, v));
+                    self.log_hello(
+                        &peer,
+                        &label,
+                        "-",
+                        "refused",
+                        &[("check", refusal.message.as_str())],
                     );
                     // Anyone can sign with a fresh key, so a fingerprint vault
                     // is counted only once it exists; manifest vaults are
@@ -279,10 +350,26 @@ impl Server {
                     return reply(error(ErrorCode::NotAllowed, refusal.message));
                 }
             };
+        let label = log::vault_label(Some(&ident.app), &ident.vault);
         let half = match self.open_vault(&peer, &ident) {
             Ok(Ok(half)) => half,
-            Ok(Err(refused)) => return reply(refused),
-            Err(e) => return reply(error(ErrorCode::Storage, e.to_string())),
+            Ok(Err(refused)) => {
+                if let Response::Error { message, .. } = &refused {
+                    self.log_hello(&peer, &label, &ident.binary, "refused", &[("check", message)]);
+                }
+                return reply(refused);
+            }
+            Err(e) => {
+                let message = e.to_string();
+                self.log_hello(
+                    &peer,
+                    &label,
+                    &ident.binary,
+                    "error",
+                    &[("check", message.as_str())],
+                );
+                return reply(error(ErrorCode::Storage, message));
+            }
         };
         let refused = lock(&self.refused)
             .remove(&(peer.uid, ident.vault.clone()))
@@ -306,9 +393,15 @@ impl Server {
             half.zeroize();
         }
         sent?;
-        eprintln!(
-            "vaultorno daemon: uid {} opened {} as {} ({})",
-            peer.uid, ident.vault, ident.binary, ident.level
+        let expires = ident
+            .statement_expires
+            .map_or_else(|| "-".to_owned(), format_date);
+        self.log_hello(
+            &peer,
+            &label,
+            &ident.binary,
+            "ok",
+            &[("level", ident.level.as_str()), ("expires", expires.as_str())],
         );
 
         stream.set_read_timeout(None)?;
@@ -340,6 +433,12 @@ impl Server {
     }
 
     fn handle(&self, peer: &Peer, ident: &Identity, request: Request) -> Response {
+        // Get and Put are logged; List shows nothing Hello didn't grant.
+        let logged = match &request {
+            Request::Get { locker } => Some(("get", locker.clone())),
+            Request::Put { locker, .. } => Some(("put", locker.clone())),
+            Request::Hello { .. } | Request::List => None,
+        };
         let result = match request {
             Request::Hello { .. } => {
                 return error(ErrorCode::ProtocolMismatch, "already said hello");
@@ -353,6 +452,9 @@ impl Server {
             } => self.put(peer, ident, &locker, &data, expected),
         };
         let resp = result.unwrap_or_else(|e| error(ErrorCode::Storage, e.to_string()));
+        if let Some((request, locker)) = &logged {
+            self.log_request(peer, ident, request, locker, outcome(&resp));
+        }
         if matches!(
             resp,
             Response::Error {
@@ -381,6 +483,7 @@ impl Server {
             Some((h, _)) if h.is_expired(now) => {
                 self.store
                     .delete_locker(lock, peer.uid, &ident.vault, locker)?;
+                self.log_expired(peer.uid, ident, locker);
                 Ok(None)
             }
             other => Ok(other),
@@ -407,6 +510,7 @@ impl Server {
                     Some((h, _)) if h.is_expired(now) => {
                         self.store
                             .delete_locker(&lock, peer.uid, &ident.vault, name)?;
+                        self.log_expired(peer.uid, ident, name);
                         (0, 0, None)
                     }
                     Some((h, size)) => (h.revision, size as u32, Some(h.expires)),
@@ -509,7 +613,8 @@ impl Server {
                     {
                         Some((h, _)) if h.is_expired(now) => {
                             self.store
-                                .delete_locker(&lock, peer.uid, &ident.vault, &name)?
+                                .delete_locker(&lock, peer.uid, &ident.vault, &name)?;
+                            self.log_expired(peer.uid, ident, &name);
                         }
                         Some(_) => filled.push(name),
                         None => {}
@@ -565,14 +670,27 @@ fn is_key_vault(vault: &str) -> bool {
 
 fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
     let (uid, pid, pidfd) = vaultorno_inspect::peer_pidfd(stream)?;
+    // The environment's names come from Hello (§7.5).
     Ok(Peer {
-        uid,
-        pid: Some(pid),
         pidfd: Some(Arc::new(pidfd)),
-        // The caller's client names these in Hello (§7.5): step 2. Until
-        // then a real connection reports none.
-        environment: Vec::new(),
+        ..Peer::without_pidfd(uid, Some(pid))
     })
+}
+
+/// The first 8 hex digits of the caller's executable's SHA-256, as the log
+/// names it; `-` before the inspector has looked.
+fn exe_of(peer: &Peer) -> &str {
+    peer.exe_sha256.get().map_or("-", |h| h.get(..8).unwrap_or(h))
+}
+
+/// How a `Get` or `Put` ended, as the log names it.
+fn outcome(resp: &Response) -> &'static str {
+    match resp {
+        Response::Locker { revision: 0, .. } => "empty",
+        Response::Stored { revision: 0, .. } => "emptied",
+        Response::Error { code, .. } => log::code_name(*code),
+        _ => "ok",
+    }
 }
 
 fn new_revision(previous: u64) -> io::Result<u64> {

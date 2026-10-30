@@ -1,11 +1,3 @@
-/*
-minimal program using openrouter api
-[dependencies]
-dotenv = "0.15.0"
-openrouter_api = { version = "0.1.6", features = ["tracing"] }
-tokio = "1.47.1"
-*/
-
 use futures_util::StreamExt;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::Sender};
 
@@ -16,28 +8,30 @@ use crate::common::{ApiKey, ChatQue, ChatStreamEvent, DbOpenrModel, mask_key_sec
 
 fn build_openr_client(query: &ChatQue) -> Result<OpenRouterClient, String> {
     let mut builder = OpenRouterClient::builder();
-    let mut used_key = query.preset.api_key.key.expose_secret().to_string();
-    
+
     if let Some(nickname) = &query.preset.options.openrouter_custom_url {
+        // A custom endpoint gets its own token from OPENROUTER_API_URLS, never
+        // a saved key: the environment is attacker-controlled (vaultorno §13).
         let configs = crate::common::get_custom_openr_configs();
-        if let Some(cfg) = configs.iter().find(|c| c.nickname == *nickname) {
-            builder.base_url(cfg.url.as_str());
-            used_key = cfg.token.clone();
-        } else {
+        let Some(cfg) = configs.iter().find(|c| c.nickname == *nickname) else {
             // Refuse to execute if the requested nickname isn't locally defined
             return Err(format!("Custom URL nickname '{}' not found in OPENROUTER_API_URLS environment settings.", nickname));
-        }
-        
-        if used_key.trim().is_empty() {
-            used_key = "dummy_token".to_string();
-        }
+        };
+        let token = if cfg.token.trim().is_empty() { "dummy_token" } else { cfg.token.as_str() };
+        println!("using custom endpoint '{}' with key: {}", cfg.nickname, mask_key_secure(token));
+        builder.base_url(cfg.url.as_str());
+        builder.api_key(token);
+    } else {
+        // The saved key goes only to the hosts saved with it.
+        let key = &query.preset.api_key;
+        crate::api_keys::check_host(&key.hosts, crate::api_keys::OPENROUTER_API)?;
+        // print the first two and last two characters of the key in case we are not
+        // sure whether the right key is used
+        println!("using key: {}", mask_key_secure(key.key.expose_secret()));
+        builder.base_url(crate::api_keys::OPENROUTER_API);
+        builder.api_key(key.key.expose_secret());
     }
 
-    // print the first two and last two characters of the key in case we are not
-    // sure whether the right key is used
-    println!("using key: {}", mask_key_secure(&used_key));
-
-    builder.api_key(used_key);
     builder.build().map_err(|e| e.to_string())
 }
 
@@ -256,10 +250,11 @@ pub async fn do_openr_chat_stream(
 }
 
 pub async fn openr_fetch_models(api_key: &ApiKey) -> Result<Vec<DbOpenrModel>,
-        openrouter_rs::error::OpenRouterError> {
-    // Create an OpenRouter client.
-    // Create client
+        Box<dyn std::error::Error + Send + Sync>> {
+    // The key goes only to the hosts saved with it.
+    crate::api_keys::check_host(&api_key.hosts, crate::api_keys::OPENROUTER_API)?;
     let client = OpenRouterClient::builder()
+        .base_url(crate::api_keys::OPENROUTER_API)
         .api_key(api_key.key.expose_secret())
         .build()?;
 

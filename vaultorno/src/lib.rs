@@ -7,8 +7,11 @@
 #![forbid(unsafe_code)]
 
 pub mod activation;
+pub mod admin;
+pub mod check;
 pub mod identity;
 pub mod init;
+pub mod log;
 pub mod master_key;
 pub mod server;
 pub mod signing;

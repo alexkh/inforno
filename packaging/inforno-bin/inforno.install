@@ -1,0 +1,49 @@
+# Inforno and autorno as released upstream, with their signed statements:
+# airtight, vault named by the release key (vaultorno/DESIGN.md §5, §8).
+# The release tarball holds what `cargo xtask build --key <release key>
+# --days 90` leaves in target/release: inforno, autorno, and each one's
+# _statement.json and _statement.json.sig.
+
+pkgname=inforno-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='LLM chat app, and autorno, its headless harness (upstream-signed binaries)'
+arch=('x86_64')
+url='https://example.invalid/inforno'
+license=('unknown')
+# Add the runtime libraries namcap reports for inforno and autorno.
+depends=('vaultorno' 'gcc-libs' 'glibc')
+provides=("inforno=$pkgver")
+conflicts=('inforno')
+install=inforno-bin.install
+# Installed byte for byte: each statement names its executable's SHA-256,
+# which stripping would change.
+options=('!strip' '!debug')
+source=("inforno-$pkgver-x86_64.tar.gz::https://example.invalid/inforno/releases/v$pkgver/inforno-$pkgver-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+_dir="inforno-$pkgver-x86_64"
+_bins=(inforno autorno)
+
+check() {
+  cd "$_dir"
+  local bin want have
+  for bin in "${_bins[@]}"; do
+    want=$(sed -n 's/^ *"sha256": "\([0-9a-f]\{64\}\)".*/\1/p' "${bin}_statement.json")
+    have=$(sha256sum "$bin" | cut -d' ' -f1)
+    if [[ $want != "$have" ]]; then
+      echo "$bin doesn't match its statement" >&2
+      return 1
+    fi
+  done
+}
+
+package() {
+  cd "$_dir"
+  local bin
+  for bin in "${_bins[@]}"; do
+    install -Dm0755 "$bin" "$pkgdir/usr/bin/$bin"
+    install -Dm0644 -t "$pkgdir/usr/share/vaultorno/statements/inforno/" \
+      "${bin}_statement.json" "${bin}_statement.json.sig"
+  done
+}

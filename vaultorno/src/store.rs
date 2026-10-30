@@ -27,12 +27,13 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::XNonce;
 use chacha20poly1305::aead::{Aead, Payload};
-use rustix::fs::{FlockOperation, flock};
+use rustix::fs::{FlockOperation, Mode, OFlags, flock, fstat, openat};
 use vaultorno_client::names::is_valid_name;
 use vaultorno_client::protocol::HALF_LEN;
 use zeroize::Zeroizing;
@@ -190,6 +191,14 @@ impl Store {
             .truncate(false)
             .mode(0o600)
             .open(dir.join(LOCK_FILE))?;
+        // The sweep may run as root (§12): a lock file it makes must still
+        // be the daemon's to open.
+        if running_as_root() {
+            own_like_dir(
+                rustix::fs::open(dir.as_path(), dir_flags(), Mode::empty())?,
+                &f,
+            )?;
+        }
         flock(&f, FlockOperation::LockExclusive).map_err(io::Error::from)?;
         Ok(VaultLock(f))
     }
@@ -416,6 +425,63 @@ pub fn entries(dir: &Path) -> io::Result<Vec<fs::DirEntry>> {
     }
 }
 
+/// Whether this process runs as root, as an admin command may (§12).
+pub fn running_as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// How a folder of the state is opened: never through a symlink.
+pub fn dir_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+/// Opens `parts` under `root`, one folder at a time and never through a
+/// symlink. Root runs admin commands in a folder the `vaultorno` user owns
+/// (§12); a link planted there must not steer it elsewhere.
+pub fn open_dir_beneath(root: &Path, parts: &[&str]) -> io::Result<OwnedFd> {
+    let mut fd = rustix::fs::open(root, dir_flags(), Mode::empty())?;
+    for part in parts {
+        if part.is_empty() || part.contains('/') || *part == "." || *part == ".." {
+            return Err(invalid(&format!("{part:?} isn't a folder name")));
+        }
+        fd = openat(&fd, *part, dir_flags(), Mode::empty())?;
+    }
+    Ok(fd)
+}
+
+/// Gives `file` the owner of `dir`, the folder it's in, when root made it.
+/// Whatever an admin command run as root creates in the state must stay
+/// the daemon's to use (§12). For anyone else there's nothing to do.
+pub fn own_like_dir(dir: impl AsFd, file: impl AsFd) -> io::Result<()> {
+    if !running_as_root() {
+        return Ok(());
+    }
+    let d = fstat(dir.as_fd())?;
+    let f = fstat(file.as_fd())?;
+    if (f.st_uid, f.st_gid) != (d.st_uid, d.st_gid) {
+        std::os::unix::fs::fchown(file.as_fd(), Some(d.st_uid), Some(d.st_gid))?;
+    }
+    Ok(())
+}
+
+/// Locks the vault folder `vault` was opened as, like
+/// [`Store::lock_vault`]. It creates nothing but the lock file, which gets
+/// the folder's owner. For `vaultorno forget`, which root runs (§12).
+pub fn lock_vault_at(vault: &OwnedFd) -> io::Result<VaultLock> {
+    let flags =
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let f = File::from(openat(vault, LOCK_FILE, flags, Mode::from_raw_mode(0o600))?);
+    let meta = f.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        return Err(invalid(
+            "the vault's lock isn't a regular file with one link",
+        ));
+    }
+    own_like_dir(vault, &f)?;
+    flock(&f, FlockOperation::LockExclusive).map_err(io::Error::from)?;
+    Ok(VaultLock(f))
+}
+
 /// Temp file, sync, rename, sync the folder. Callers hold the vault lock, so
 /// one temp name per file is enough.
 fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
@@ -439,9 +505,28 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 
 fn mkdir_private(path: &Path) -> io::Result<()> {
     match DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) if running_as_root() => own_like_parent(path),
+        Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        other => other,
+        Err(e) => Err(e),
     }
+}
+
+/// A folder root just made gets its parent's owner, so the daemon can use
+/// it (§12). The state folder itself gets `/var/lib`'s, root, until
+/// `StateDirectory=` hands it to the daemon.
+fn own_like_parent(path: &Path) -> io::Result<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        Some(_) => Path::new("."),
+        None => return Ok(()),
+    };
+    let p = fs::metadata(parent)?;
+    let m = fs::symlink_metadata(path)?;
+    if (m.uid(), m.gid()) != (p.uid(), p.gid()) {
+        std::os::unix::fs::lchown(path, Some(p.uid()), Some(p.gid()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

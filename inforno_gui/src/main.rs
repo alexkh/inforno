@@ -49,9 +49,24 @@ struct Args {
     realm: Option<String>,
 }
 
-// 1. Force a clean, multi-threaded Tokio runtime that wraps the whole process
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> eframe::Result {
+fn main() -> eframe::Result {
+    // Before anything else, while this is the only thread (vaultorno design
+    // doc §13): record the starting environment, keep the Vulkan loader to
+    // system drivers without implicit layers, drop the variables that could
+    // redirect key-carrying requests, and go non-dumpable.
+    if let Err(e) = inforno_core::api_keys::startup() {
+        eprintln!("inforno: {e}");
+        std::process::exit(1);
+    }
+
+    // 1. A multi-threaded Tokio runtime that wraps the whole process, built
+    // only now: #[tokio::main] would have started its threads before startup().
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("can't start the Tokio runtime");
+    let _enter = rt.enter();
     // Tracy queues every span in RAM until a viewer attaches, and the chat
     // view emits many spans per frame, so only enable it on demand.
     if std::env::var_os("INFORNO_TRACY").is_some() {
@@ -79,6 +94,11 @@ async fn main() -> eframe::Result {
     }
 
     let args = Args::parse();
+
+    // Inforno's vault: opened once, before eframe starts wgpu, and kept
+    // across sandbox reloads (vaultorno design doc §15).
+    let (keys, opened) = inforno_core::api_keys::KeyStore::open();
+    let vault_notices = vault_notices(&keys, opened);
 
     // 2. Simply grab the handle of the macro-created runtime!
     // No more manual `let rt = ...` and NO MORE `let _enter = ...`
@@ -248,6 +268,8 @@ async fn main() -> eframe::Result {
 
             Ok(Box::new(state::MyApp::new(cc, MyAppPermanent {
                 rt: rt_handle,
+                keys,
+                vault_notices: std::sync::Mutex::new(Some(vault_notices)),
                 sandbox,
                 pending_project_init: std::sync::Mutex::new(pending_project_init),
                 active_realm_name: std::sync::Mutex::new(active_realm_name),
@@ -348,4 +370,41 @@ fn saved_window_size() -> Option<egui::Vec2> {
     let mut it = text.split_whitespace().map(|s| s.parse::<f32>().ok());
     let (w, h) = (it.next()??, it.next()??);
     (w >= 400.0 && h >= 300.0).then(|| egui::vec2(w, h))
+}
+
+/// What the user should hear about Inforno's vault, once per run (vaultorno
+/// design doc §15). The key manager shows errors itself.
+fn vault_notices(
+    keys: &inforno_core::api_keys::KeyStore,
+    opened: Result<(), inforno_core::api_keys::KeysError>,
+) -> Vec<String> {
+    use inforno_core::api_keys::{self, STATEMENT_WARN_DAYS, expires_within, format_date};
+
+    let mut notices = Vec::new();
+    if let Err(e) = opened {
+        eprintln!("saved keys: not available: {e}");
+        return notices;
+    }
+    let Ok(st) = keys.with_vault(|vault| Ok(api_keys::status(vault))) else {
+        return notices;
+    };
+    eprintln!("saved keys: {}", st.description);
+    if st.refused > 0 {
+        notices.push(format!(
+            "Since Inforno last opened its saved keys, vaultorno refused {} attempt(s) to open \
+             them. That can be an outdated or unsigned copy of Inforno, one started with a \
+             debugger or an overlay, or another program trying to read your keys.",
+            st.refused
+        ));
+    }
+    if let Some(until) = st
+        .statement_expires
+        .filter(|&t| expires_within(Some(t), STATEMENT_WARN_DAYS))
+    {
+        notices.push(format!(
+            "This copy of Inforno may open its saved keys only until {}. Update it before then.",
+            format_date(until)
+        ));
+    }
+    notices
 }

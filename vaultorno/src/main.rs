@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use vaultorno::activation;
+use vaultorno::{activation, admin, check};
 use vaultorno::identity::{Inspector, ManifestIdentity, SignedIdentity, SocketInspector};
 use vaultorno::master_key::{CREDENTIAL_FILE, MasterKey};
 use vaultorno::server::{DEFAULT_BACKOFF_BASE, Server};
@@ -21,7 +21,7 @@ use vaultorno_inspect::{DEFAULT_INSPECT_SOCKET, serve_inspect};
 const USAGE: &str = "\
 usage: vaultorno <mode> [options]
 
-modes in this build (Milestone 4):
+modes:
   init [--state-dir DIR]
       create the state folder and seal a new master key (as root, once)
   daemon [--state-dir DIR] [--inspect-socket PATH]
@@ -32,10 +32,23 @@ modes in this build (Milestone 4):
       passes; only the owner of the state folder may ask
   sweep [--state-dir DIR]
       delete expired lockers and stale vaults
+  status [--state-dir DIR]
+      what vaultorno does on this machine; as root, also whether the master
+      key unseals, the revoked keys and the recorded successions
+  check [--statement FILE] [--state-dir DIR] <executable>
+      dry run of the identity check: which statement or manifest it would use,
+      which vault, level and lockers, or which check fails
+  vaults [--user U] [--state-dir DIR]
+      each user's vaults and lockers: sizes, revisions, expiries (as root)
+  log --user U [--state-dir DIR]
+      a user's log (as root)
   revoke [--undo] [--state-dir DIR] <public key or .pub file>
       refuse statements signed by a key from now on (as root)
+  forget [--locker L] [--user U] [--state-dir DIR] <vault>
+      delete a vault, or one of its lockers; <vault> is its name, SHA256:
+      fingerprint or key id; without --user, every user's (as root)
 
-later milestones: status, check, vaults, log, forget
+U is a user ID, or a name in /etc/passwd.
 
 development builds only (--features test_identity):
   daemon --test-identity [--socket PATH] [--in-process-inspector]
@@ -66,9 +79,15 @@ fn main() -> ExitCode {
         "sweep" => run_sweep(rest),
         "revoke" => revoke(rest),
         "init" => init(rest),
-        "status" | "check" | "vaults" | "log" | "forget" => {
-            fail(&format!("`vaultorno {mode}` arrives in a later milestone"))
-        }
+        "status" => finish(admin::status(rest)),
+        "check" => match check::check(rest) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => fail(&e),
+        },
+        "vaults" => finish(admin::vaults(rest)),
+        "log" => finish(admin::show_log(rest)),
+        "forget" => finish(admin::forget(rest)),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             ExitCode::SUCCESS
@@ -83,6 +102,13 @@ fn main() -> ExitCode {
 fn fail(msg: &str) -> ExitCode {
     eprintln!("vaultorno: {msg}");
     ExitCode::FAILURE
+}
+
+fn finish(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&e),
+    }
 }
 
 struct Options {

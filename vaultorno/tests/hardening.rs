@@ -37,6 +37,7 @@ use rustix::process::{Pid, PidfdFlags, pidfd_open};
 use vaultorno::master_key::{
     CREDENTIAL_FILE, CREDENTIAL_NAME, CREDENTIALS_DIRECTORY, MasterKey, Sealing,
 };
+use vaultorno::store::{Header, Store};
 use vaultorno_client::protocol::DEFAULT_SOCKET;
 use vaultorno_inspect::{DEFAULT_INSPECT_SOCKET, inspect_pidfd};
 
@@ -573,12 +574,15 @@ fn running_any_mode_by_hand_gains_nothing() {
 
     let state_arg = state.path().to_str().unwrap();
     let key_line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAGf35LBmeMKO1jMA9oUql/3dGOKq+QS9ISbJkDJzoRu probe";
-    let modes: [&[&str]; 5] = [
+    let modes: [&[&str]; 8] = [
         &["daemon", "--state-dir", state_arg],
         &["inspect", "--state-dir", state_arg],
         &["sweep", "--state-dir", state_arg],
         &["init", "--state-dir", state_arg],
         &["revoke", "--state-dir", state_arg, key_line],
+        &["vaults", "--state-dir", state_arg],
+        &["log", "--user", "1000", "--state-dir", state_arg],
+        &["forget", "test_x", "--user", "1000", "--state-dir", state_arg],
     ];
     for args in modes {
         let out = Command::new(staged("vaultorno"))
@@ -602,4 +606,110 @@ fn running_any_mode_by_hand_gains_nothing() {
             "{args:?} changed root's state folder"
         );
     }
+
+    // `status` works for anyone, and changes nothing.
+    let out = Command::new(staged("vaultorno"))
+        .args(["status", "--state-dir", state_arg])
+        .env_clear()
+        .uid(NOBODY)
+        .gid(NOBODY)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "status as nobody: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        snapshot(state.path()),
+        before,
+        "status changed root's state folder"
+    );
+}
+
+/// Whatever root's admin commands create in the state (`users/`, lock
+/// files, the log) gets its folder's owner, so the daemon can still use it
+/// (§12). Here `nobody` stands in for the `vaultorno` user.
+#[test]
+#[ignore]
+fn admin_commands_as_root_leave_the_state_to_its_owner() {
+    setup();
+    let state = TempUnder::new("/var/tmp", "vaultorno_probe_owned", NOBODY, 0o700);
+    let dir = state.path();
+    let run = |args: &[&str]| {
+        let out = Command::new(staged("vaultorno"))
+            .args(args)
+            .arg("--state-dir")
+            .arg(dir)
+            .env_clear()
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // A sweep before the daemon ever ran: it makes `users/`.
+    run(&["sweep"]);
+
+    // Two vaults the daemon left, with no lock files and no log yet.
+    {
+        let store = Store::open(dir, MasterKey::new(&[0x5a; 32], Sealing::Unsealed)).unwrap();
+        for vault in ["test_x", "test_y"] {
+            let lock = store.lock_vault(1000, vault).unwrap();
+            store.daemon_half(&lock, 1000, vault).unwrap();
+            for locker in ["a", "b"] {
+                let header = Header {
+                    revision: 1,
+                    expires: 0,
+                };
+                store
+                    .write_locker(&lock, 1000, vault, locker, &header, b"envelope")
+                    .unwrap();
+            }
+        }
+    }
+    for path in walk(dir) {
+        std::os::unix::fs::lchown(&path, Some(NOBODY), Some(NOBODY)).unwrap();
+        if path.file_name().is_some_and(|n| n == "lock") {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    run(&["forget", "test_x", "--locker", "a", "--user", "1000"]);
+    run(&["sweep"]);
+    run(&["vaults"]);
+    run(&["log", "--user", "1000"]);
+    run(&["forget", "test_y", "--user", "1000"]);
+
+    assert!(dir.join("users/1000/log").is_file());
+    assert!(dir.join("users/1000/test_x/lock").is_file());
+    assert!(!dir.join("users/1000/test_y").exists());
+    for path in walk(dir) {
+        let m = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (m.uid(), m.gid()),
+            (NOBODY, NOBODY),
+            "{} is root's",
+            path.display()
+        );
+    }
+}
+
+/// Every path under `dir`, never through a symlink.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            out.extend(walk(&path));
+        }
+        out.push(path);
+    }
+    out
 }

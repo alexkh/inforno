@@ -20,15 +20,24 @@ The Chats are stored locally in Sandbox files with the extension of .rno
 To use Openrouter, you need to provide an Openrouter key, which you can obtain
 by simply logging in to openrouter.ai and pressing the "Get API Key" button.
 
-You can enter API key into the application directly using the API Key button
-in the top menubar. Or, you can provide it as OPENROUTER_API_KEY environment
-variable. Third option is to use an .env file in the same directory or in any
-parent directory as the executable file. The format of the .env file is like
-this:
+Enter the key with the API Key button in the top menu bar:
 
-```
-OPENROUTER_API_KEY=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
-```
+- **Set temporarily** keeps it in memory until Inforno closes.
+- **Save in vault** keeps it for 90 days, encrypted: in vaultorno when it's
+  installed (see `vaultorno/README.md`), otherwise sealed for your user by
+  the OS (`systemd-creds` on Linux, DPAPI on Windows). When the 90 days are
+  up, Inforno asks for the key again, a good moment to issue a fresh one.
+
+On openrouter.ai, create keys that expire within 90 days and have a spend
+limit. Deleting Inforno's copy doesn't stop a key someone else has already
+copied; its expiration at OpenRouter does.
+
+Inforno doesn't read API keys from environment variables or `.env` files.
+
+With vaultorno installed, saving keys needs a signed build
+(`cargo xtask build`) that you start directly, not through `cargo run`.
+cargo sets `LD_LIBRARY_PATH`, and vaultorno refuses programs started with
+it.
 
 You need Rust compiler and cargo to build this project. Makefile is optional,
 it's just there to unify the devops across different build tools

@@ -202,6 +202,24 @@ impl KeyLists {
         self.revoked.contains(key)
     }
 
+    /// Every revoked key, sorted, for `vaultorno status` (§12).
+    pub fn revoked(&self) -> Vec<KeyFingerprint> {
+        let mut out: Vec<KeyFingerprint> = self.revoked.iter().copied().collect();
+        out.sort_by_key(|k| k.0);
+        out
+    }
+
+    /// Every recorded succession as (old key, new key), sorted.
+    pub fn successions(&self) -> Vec<(KeyFingerprint, KeyFingerprint)> {
+        let mut out: Vec<_> = self
+            .predecessor
+            .iter()
+            .map(|(to, from)| (*from, *to))
+            .collect();
+        out.sort_by_key(|(from, to)| (from.0, to.0));
+        out
+    }
+
     /// The key `key` succeeded, if a succession is recorded for it.
     pub fn predecessor_of(&self, key: &KeyFingerprint) -> Option<KeyFingerprint> {
         self.predecessor.get(key).copied()

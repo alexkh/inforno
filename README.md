@@ -23,6 +23,10 @@ The project is structured as a modular Cargo workspace:
 | **`inforno_core`** | `Library` | Core backend engine handling SQLite storage, OpenRouter & Ollama client streaming, Realm path isolation, and Rhai scripting execution. |
 | **`autorno`** | `Daemon` | (in development) Headless autonomous daemon worker that opens OS sockets to run automated prompt loops, scripts, and note cells across realms. |
 | **`bulat`** | `Library / Binary` | Fast, lightweight text editor and side-by-side code diffing tool with custom themes and extensible syntax highlighting. |
+| **`vaultorno`** | `Daemon` | A locker room for disposable secrets: keeps API keys per user and per app, without ever seeing them unencrypted. See [`vaultorno/README.md`](vaultorno/README.md). |
+| **`vaultorno_client`** | `Library` | The API apps use to keep secrets in vaultorno. Encrypts inside the app; falls back to OS sealing when vaultorno isn't installed. |
+| **`vaultorno_inspect`** | `Library` | vaultorno's inspector: which executable a process runs. |
+| **`xtask`** | `Tool` | `cargo xtask build`: builds the release binaries and signs their vaultorno statements. |
 
 ---
 
@@ -47,16 +51,16 @@ The project is structured as a modular Cargo workspace:
 
 ## 🔑 Key & Credentials Setup
 
-Chats and local state are stored securely in `.rno` SQLite database sandboxes.
+Chats and local state are stored in `.rno` SQLite database sandboxes.
 
-To use OpenRouter models, provide an API key using any of the following methods:
-1. **In-App Manager:** Click the **API Key** button in the top menubar.
-2. **Environment Variable:** Set `OPENROUTER_API_KEY`.
-3. **Local `.env` File:** Create a `.env` file in the working directory:
+To use OpenRouter models, click the **API Key** button in the top menubar:
 
-```env
-OPENROUTER_API_KEY=sk-or-v1-your-api-key-here
-```
+* **Set temporarily** keeps the key in memory until Inforno closes.
+* **Save in vault** keeps it for 90 days, encrypted: in [vaultorno](vaultorno/README.md) when it's installed, otherwise sealed for your user by the OS (`systemd-creds` on Linux, DPAPI on Windows). When the 90 days are up, Inforno asks for the key again, a good moment to issue a fresh one.
+
+On openrouter.ai, create keys that expire within 90 days and have a spend limit. Deleting Inforno's copy doesn't stop a key someone else has already copied; its expiration at OpenRouter does.
+
+Inforno never reads API keys from environment variables or `.env` files, and sends a saved key only to the hosts saved with it.
 
 ---
 
@@ -77,6 +81,15 @@ cargo run
 cargo run --release
 ```
 
+With vaultorno installed, saving keys needs a signed build that you start directly:
+
+```bash
+cargo xtask build        # builds the release binaries and signs their statements
+target/release/inforno
+```
+
+`cargo run` sets `LD_LIBRARY_PATH`, and vaultorno refuses programs started with it. Such a run still works, with keys set for the session only.
+
 ### Running Sub-Crates & Tools
 ```bash
 # Run the Autorno daemon
@@ -90,10 +103,10 @@ cargo run -p bulat -- left.rs right.rs
 ### Cross-Compiling for Windows
 ```bash
 # Build release executable for x86_64 Windows
-cargo build --target=x86_64-pc-windows-gnu --release --bin inforno_gui
+cargo build --target=x86_64-pc-windows-gnu --release --bin inforno
 
 # Set application icon (optional tool)
-rcedit target/x86_64-pc-windows-gnu/release/inforno_gui.exe --set-icon assets/icon.ico
+rcedit target/x86_64-pc-windows-gnu/release/inforno.exe --set-icon assets/icon.ico
 ```
 
 ---

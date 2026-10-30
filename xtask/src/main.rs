@@ -37,7 +37,7 @@ type LockerSpec = (&'static str, Access, Option<u32>);
 /// (§15), keyed by the member's folder; the package name comes from
 /// `cargo metadata`.
 const MEMBERS: &[(&str, &[LockerSpec])] = &[
-    ("inforno_gui", &[("api_keys", Access::Write, Some(30))]),
+    ("inforno_gui", &[("api_keys", Access::Write, Some(90))]),
     ("autorno", &[("api_keys", Access::Read, None)]),
 ];
 
@@ -459,6 +459,36 @@ mod tests {
         let text = statement_text("inforno_gui", &"0".repeat(64), MEMBERS[0].1, NOW, 7).unwrap();
         let checked = Statement::parse(&text).unwrap().check(NOW).unwrap();
         assert!(checked.lockers["api_keys"].write);
-        assert_eq!(checked.lockers["api_keys"].lifetime_secs, 30 * DAY);
+        assert_eq!(checked.lockers["api_keys"].lifetime_secs, 90 * DAY);
+    }
+
+    /// The source package's manifest grants what the statements grant
+    /// (vaultorno §5, §15). It lists each member's binary in `/usr/bin`,
+    /// with the same lockers and lifetimes.
+    #[test]
+    fn the_package_manifest_matches_the_statements() {
+        use vaultorno_client::protocol::{DEFAULT_LIFETIME_DAYS, Manifest};
+
+        let path = workspace_root().join("packaging/inforno/inforno.json");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let manifest = Manifest::parse(&text).unwrap().check().unwrap();
+        assert_eq!(manifest.app, APP);
+        assert_eq!(manifest.binaries.len(), MEMBERS.len());
+        for (dir, lockers) in MEMBERS {
+            // inforno_gui's package builds the binary `inforno`.
+            let bin = if *dir == "inforno_gui" { "inforno" } else { *dir };
+            let listed = &manifest.binaries[bin];
+            assert_eq!(listed.path, format!("/usr/bin/{bin}"));
+            assert_eq!(listed.lockers.len(), lockers.len(), "{bin}");
+            for (name, access, days) in *lockers {
+                let grant = listed.lockers[*name];
+                assert_eq!(grant.write, *access == Access::Write, "{bin}: {name}");
+                if grant.write {
+                    let days = days.unwrap_or(DEFAULT_LIFETIME_DAYS);
+                    assert_eq!(grant.lifetime_secs, u64::from(days) * DAY, "{bin}: {name}");
+                }
+            }
+        }
     }
 }

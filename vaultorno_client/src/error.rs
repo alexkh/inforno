@@ -46,6 +46,9 @@ pub enum Error {
     /// The OS sealer of the `Local` backend failed.
     #[error("sealer failed: {0}")]
     Sealer(String),
+    /// `startup` couldn't do what an app must do first (§13).
+    #[error("startup: {0}")]
+    Startup(String),
 }
 
 impl Error {

@@ -1,0 +1,57 @@
+# vaultorno, built from the Inforno workspace (vaultorno/DESIGN.md §14).
+# Until the first release, the source is a tarball of the workspace:
+#   git archive --prefix=inforno-$pkgver/ -o packaging/vaultorno/inforno-$pkgver.tar.gz HEAD
+
+pkgname=vaultorno
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Locker room for disposable secrets: daemon, inspector and admin commands'
+arch=('x86_64')
+url='https://github.com/alexkh/inforno'
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'systemd')
+makedepends=('cargo')
+install=vaultorno.install
+# Until the first release, a tarball of the workspace (see the top). Once
+# v$pkgver is tagged, switch to the tag, and fill in its sum with updpkgsums:
+#   source=("inforno-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+source=("inforno-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_dir="inforno-$pkgver"
+
+prepare() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p vaultorno
+}
+
+check() {
+  cd "$_dir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release -p vaultorno
+}
+
+package() {
+  cd "$_dir"
+  install -Dm0755 target/release/vaultorno "$pkgdir/usr/bin/vaultorno"
+  install -Dm0644 -t "$pkgdir/usr/lib/systemd/system/" \
+    vaultorno/dist/vaultorno.socket vaultorno/dist/vaultorno.service \
+    vaultorno/dist/vaultorno_inspect.socket vaultorno/dist/vaultorno_inspect.service \
+    vaultorno/dist/vaultorno_sweep.service vaultorno/dist/vaultorno_sweep.timer
+  install -Dm0644 vaultorno/dist/vaultorno.conf "$pkgdir/usr/lib/sysusers.d/vaultorno.conf"
+  # Owned by this package, so they are root's; apps' packages fill them (§5).
+  install -dm0755 "$pkgdir/usr/share/vaultorno/manifests" \
+    "$pkgdir/usr/share/vaultorno/statements"
+  install -Dm0644 -t "$pkgdir/usr/share/doc/vaultorno/" \
+    vaultorno/README.md vaultorno/DESIGN.md
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE
+}

@@ -1,0 +1,22 @@
+post_install() {
+    # Once, never on upgrade (§6, §14). A master key left by an earlier
+    # install is kept: replacing it would make every vault unreadable.
+    if [ -e /var/lib/vaultorno/master_key.cred ]; then
+        echo ':: vaultorno: keeping the master key already in /var/lib/vaultorno'
+    elif ! /usr/bin/vaultorno init; then
+        echo ':: vaultorno: init failed; run `vaultorno init` as root before starting it'
+    fi
+    cat <<'EOF'
+:: vaultorno serves apps once its socket and the daily sweep are enabled:
+     systemctl enable --now vaultorno.socket vaultorno_sweep.timer
+:: `vaultorno status` shows what it can vouch for on this machine.
+EOF
+}
+
+post_remove() {
+    cat <<'EOF'
+:: vaultorno's state is left in /var/lib/vaultorno, so a reinstall keeps
+   every vault. Its lockers are disposable; to forget them all, as root:
+     rm -r /var/lib/vaultorno
+EOF
+}

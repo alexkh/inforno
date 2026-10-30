@@ -8,7 +8,7 @@ use std::fs;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ssh_key::PublicKey;
 use vaultorno_client::names::is_valid_name;
@@ -47,6 +47,9 @@ pub struct Peer {
     /// environment; the report counts only because the caller holds no
     /// foreign code, which is checked first.
     pub environment: Vec<String>,
+    /// The SHA-256 of the executable the inspector found, in hex, once it
+    /// has looked. The log names it, refused or not (§11).
+    pub exe_sha256: OnceLock<String>,
 }
 
 impl Peer {
@@ -56,6 +59,7 @@ impl Peer {
             pid,
             pidfd: None,
             environment: Vec::new(),
+            exe_sha256: OnceLock::new(),
         }
     }
 
@@ -379,6 +383,7 @@ impl ManifestIdentity {
     fn inspect_peer(&self, peer: &Peer) -> Result<Option<Inspected>, Refusal> {
         match self.inspector.inspect(peer) {
             Ok(inspected) => {
+                let _ = peer.exe_sha256.set(inspected.sha256_hex());
                 if inspected.uid != peer.uid {
                     return Err(Refusal {
                         vault: None,
@@ -438,6 +443,14 @@ impl ManifestIdentity {
     /// The code `inspected` has loaded besides its executable (§7.5).
     fn check_code(&self, inspected: &Inspected) -> Result<(), String> {
         check_loaded_code(inspected, &self.root_dir, self.trusted_uid)
+    }
+
+    /// The same check with no package manifests at all, so that a statement
+    /// is judged on its own (`vaultorno check`, §12). An empty path names no
+    /// folder, which reads as no manifests.
+    pub fn without_manifests(mut self) -> Self {
+        self.manifests_dir = PathBuf::new();
+        self
     }
 }
 

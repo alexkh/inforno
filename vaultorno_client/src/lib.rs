@@ -29,6 +29,8 @@ mod files;
 pub mod local;
 #[cfg(feature = "seal")]
 pub mod seal;
+#[cfg(feature = "seal")]
+pub mod startup;
 #[cfg(all(feature = "seal", unix))]
 mod user_half;
 #[cfg(feature = "seal")]

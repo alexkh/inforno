@@ -117,7 +117,7 @@ fn publish(dir: &Path, sealed: &[u8]) -> io::Result<()> {
 }
 
 /// Whether `systemd-creds has-tpm2` reports full TPM2 support.
-fn has_tpm2() -> bool {
+pub(crate) fn has_tpm2() -> bool {
     Command::new(SYSTEMD_CREDS)
         .env_clear()
         .arg("has-tpm2")
@@ -128,7 +128,7 @@ fn has_tpm2() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn systemd_creds(args: &[&str], input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
+pub(crate) fn systemd_creds(args: &[&str], input: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
     let what = args[0];
     let mut child = Command::new(SYSTEMD_CREDS)
         .env_clear()

@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 use vaultorno_client::names::{is_valid_name, is_valid_vault_name};
 use vaultorno_client::time::DAY;
 
+use crate::log;
 use crate::store::{Store, entries, read_header};
 
 /// A vault with no filled locker for this long is deleted.
@@ -80,6 +81,18 @@ fn sweep_vault(
             Ok(Some((h, _))) if h.is_expired(now) => {
                 fs::remove_file(entry.path())?;
                 report.expired_lockers += 1;
+                log::record(
+                    store.root(),
+                    uid,
+                    now,
+                    &[
+                        ("vault", log::vault_label(None, vault).as_str()),
+                        ("request", "expire"),
+                        ("locker", name.as_str()),
+                        ("result", "deleted"),
+                        ("by", "sweep"),
+                    ],
+                );
             }
             // Live, or damaged: leave damaged files for the daemon to report.
             _ => filled += 1,
@@ -95,6 +108,16 @@ fn sweep_vault(
         if since + STALE_VAULT_SECS <= now {
             fs::remove_dir_all(&vault_dir)?;
             report.stale_vaults += 1;
+            log::record(
+                store.root(),
+                uid,
+                now,
+                &[
+                    ("vault", log::vault_label(None, vault).as_str()),
+                    ("request", "sweep"),
+                    ("result", "stale_vault_deleted"),
+                ],
+            );
         }
     }
     Ok(())
