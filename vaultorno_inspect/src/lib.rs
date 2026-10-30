@@ -660,6 +660,9 @@ ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsysca
     fn anchors_are_real_and_out_of_others_reach() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        // Under a umask of 002 the temp folder would be group-writable,
+        // which anchor refuses for the folder holding the path.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let state = dir.path().join("state");
         fs::create_dir(&state).unwrap();
         let me = rustix::process::geteuid().as_raw();
