@@ -234,10 +234,15 @@ fn real_inspect_mode_over_socket() {
     use rustix::process::{PidfdFlags, pidfd_open};
 
     let dir = tempfile::tempdir().unwrap();
+    // The inspector and its client refuse a socket or state folder that
+    // others could change. Under a umask of 002 these folders would be
+    // group-writable, so they get their modes explicitly.
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let sock = dir.path().join("inspect.sock");
     // The daemon's user is whoever owns its state folder (§3): here, us.
     let state = dir.path().join("state");
     fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     let inspector = Daemon(
         Command::new(BIN)
             .args(["inspect", "--socket"])
