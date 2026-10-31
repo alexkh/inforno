@@ -184,8 +184,15 @@ pub fn status(args: &[String]) -> Result<(), String> {
         .ok()
         .and_then(|t| t.trim().parse::<u32>().ok());
     row("ptrace_scope", &scope_line(scope));
-    if scope.is_some_and(|s| s < AIRTIGHT_PTRACE_SCOPE) {
-        println!("    to serve signed statements too, as root:");
+    if let Some(s) = scope.filter(|&s| s < AIRTIGHT_PTRACE_SCOPE) {
+        if s == 0 {
+            println!("    to serve package manifests, as root:");
+            println!("      echo 'kernel.yama.ptrace_scope = 1' > /etc/sysctl.d/50-ptrace_scope.conf");
+            println!("      sysctl --system");
+            println!("    after which a program can be traced only by those that started it");
+        }
+        let also = if s == 0 { "as well" } else { "too" };
+        println!("    to serve signed statements {also}, as root:");
         println!(
             "      echo 'kernel.yama.ptrace_scope = {AIRTIGHT_PTRACE_SCOPE}' \
              > /etc/sysctl.d/50-ptrace_scope.conf"
