@@ -136,6 +136,7 @@ This is stored in DB verbatim; fix applied only at read time.
 - Saved in vaultorno's `api_keys` locker through `inforno_core::api_keys` (`vaultorno/DESIGN.md` §15), or set for the session only in the key manager. Never read from environment variables or `.env`.
 - The vault is opened once in `main()` (`KeyStore`) and kept in `MyAppPermanent` across sandbox reloads.
 - Each saved key carries the hosts it may be sent to. Call `api_keys::check_host` before sending a key anywhere, and never send a saved key to a URL taken from configuration or the environment.
+- When vaultorno refuses for reasons about the machine (`vaultorno_client::Error::Unavailable`: `ptrace_scope` too low, or no Yama), Inforno stays strict. It never falls back to `Local` or any weaker store. `vault_notices` in `main.rs` tells the user what to raise and that everything without keys keeps working (`KeysError::platform_reason`).
 
 ### Localization
 - Uses `rust-i18n` crate with files in `locales/` directory

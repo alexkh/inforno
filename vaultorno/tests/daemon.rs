@@ -538,8 +538,8 @@ fn describe_says_what_the_daemon_checked() {
     let env = env();
     let vault = env.open(UID, writer_statement(START)).unwrap();
     let d = vault.describe();
-    assert!(d.starts_with("vaultorno, test identity"), "{d}");
-    assert!(d.contains("blind"), "{d}");
+    assert!(d.starts_with("vaultorno; checks passed: test identity"), "{d}");
+    assert!(d.contains("the daemon sees only ciphertext"), "{d}");
     assert!(d.contains("statement until 2027-01-14"), "{d}");
     assert_eq!(vault.binary(), Some("writer"));
     assert_eq!(vault.vault_name(), Some("test_suite"));
@@ -1155,14 +1155,11 @@ fn manifest_permission_and_ptrace_scope_checks() {
     use std::os::unix::fs::PermissionsExt;
     let env = manifest_env(false);
 
-    // 1. ptrace_scope = 0 is refused for watertight (needs >= 1).
+    // 1. ptrace_scope = 0 can't serve watertight (needs >= 1): a refusal
+    // about the machine, not the binary.
     fs::write(&env.ptrace_file, "0\n").unwrap();
-    match env.connect_as(&env.writer_bin, &["PATH"], None) {
-        Err(Error::NotAllowed(msg)) => {
-            assert!(msg.contains("ptrace_scope is 0, watertight needs 1"), "{msg}")
-        }
-        other => panic!("{other:?}"),
-    }
+    let msg = unavailable(env.connect_as(&env.writer_bin, &["PATH"], None));
+    assert_eq!(msg, "ptrace_scope is 0, watertight needs 1");
     fs::write(&env.ptrace_file, "1\n").unwrap();
 
     // 2. Group-writable binary is refused.
@@ -1200,6 +1197,40 @@ fn manifest_permission_and_ptrace_scope_checks() {
 
     // Restored permissions pass again.
     assert!(env.connect_as(&env.writer_bin, &["PATH"], None).is_ok());
+}
+
+#[test]
+fn a_machine_that_cant_serve_is_unavailable_and_not_counted() {
+    let env = manifest_env(false);
+    fs::write(&env.ptrace_file, "0\n").unwrap();
+    for _ in 0..3 {
+        let msg = unavailable(env.connect_as(&env.writer_bin, &["PATH"], None));
+        assert_eq!(msg, "ptrace_scope is 0, watertight needs 1");
+    }
+
+    // A kernel without Yama.
+    fs::remove_file(&env.ptrace_file).unwrap();
+    let msg = unavailable(env.connect_as(&env.writer_bin, &["PATH"], None));
+    assert!(msg.contains("no Yama"), "{msg}");
+
+    // Checks about the caller come first, and are still counted.
+    match env.connect_as(&env.writer_bin, &["PATH", "LD_PRELOAD"], None) {
+        Err(Error::NotAllowed(msg)) => assert_eq!(msg, "LD_PRELOAD set"),
+        other => panic!("{other:?}"),
+    }
+
+    fs::write(&env.ptrace_file, "1\n").unwrap();
+    let vault = env.connect_as(&env.writer_bin, &["PATH"], None).unwrap();
+    assert_eq!(vault.refused(), 1, "only the refusal about the caller counts");
+
+    let log = fs::read_to_string(
+        env.root
+            .path()
+            .join(format!("state/users/{}/log", env.trusted_uid)),
+    )
+    .unwrap();
+    assert_eq!(log.matches("result=unavailable").count(), 4, "{log}");
+    assert_eq!(log.matches("result=refused").count(), 1, "{log}");
 }
 
 #[test]
@@ -1445,6 +1476,13 @@ fn not_allowed(result: Result<Vault, Error>) -> String {
     }
 }
 
+fn unavailable(result: Result<Vault, Error>) -> String {
+    match result {
+        Err(Error::Unavailable(msg)) => msg,
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_signed_statement_opens_its_keys_vault() {
     let env = signed_env();
@@ -1459,7 +1497,11 @@ fn a_signed_statement_opens_its_keys_vault() {
     assert_eq!(writer.vault_name(), Some(vault.as_str()));
     assert_eq!(writer.binary(), Some("inforno"));
     assert_eq!(writer.statement_expires(), Some(START + 90 * DAY));
-    assert!(writer.describe().starts_with("vaultorno, airtight, blind"));
+    assert!(
+        writer
+            .describe()
+            .starts_with("vaultorno; checks passed: airtight (signed build)")
+    );
     writer.put("api_keys", b"sk-signed-1", 0).unwrap();
 
     // Another binary of the same app, signed by the same key, shares the
@@ -1643,20 +1685,22 @@ fn a_recorded_succession_carries_the_vault_to_a_new_key() {
 }
 
 #[test]
-fn airtight_needs_ptrace_scope_2_and_hermetic_is_refused() {
+fn airtight_needs_ptrace_scope_2() {
     let env = signed_env();
     let key = signing_key(1);
     let bin = env.binary("inforno", "writer");
     fs::write(&env.ptrace_file, "1\n").unwrap();
-    let msg = not_allowed(env.open(&bin, &key, WRITE));
+    let msg = unavailable(env.open(&bin, &key, WRITE));
     assert_eq!(msg, "ptrace_scope is 1, airtight needs 2");
+    // A stricter setting serves airtight too; nothing needs more than 2.
     fs::write(&env.ptrace_file, "3\n").unwrap();
     assert!(env.open(&bin, &key, WRITE).is_ok());
 
-    let text = env.statement(&bin, WRITE, serde_json::json!({ "level": "hermetic" }));
+    // A statement can't ask for a level: the field is unknown.
+    let text = env.statement(&bin, WRITE, serde_json::json!({ "level": "airtight" }));
     let sig = sign(&key, STATEMENT_NAMESPACE, &text);
     let msg = not_allowed(env.connect(&bin, &["PATH"], text, Some(sig)));
-    assert!(msg.contains("hermetic needs a TPM2-sealed master key"), "{msg}");
+    assert!(msg.contains("unknown field `level`"), "{msg}");
 }
 
 #[test]
@@ -1706,6 +1750,42 @@ fn a_manifest_still_vouches_when_a_statement_fails() {
     let vault = env.connect(&bin, &["PATH"], text, Some(sig)).unwrap();
     assert_eq!(vault.vault_name(), Some("pkg_inforno"));
     assert!(vault.describe().contains("watertight"));
+}
+
+#[test]
+fn a_manifest_that_vouches_is_unavailable_below_its_scope() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = signed_env();
+    let key = signing_key(1);
+    let bin = env.binary("inforno", "packaged");
+    let manifest = env.manifests_dir.join("inforno.json");
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "format": 1,
+            "app": "inforno",
+            "binaries": { "inforno": {
+                "path": bin.to_str().unwrap(),
+                "lockers": { "api_keys": { "access": "write" } }
+            } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o644)).unwrap();
+    let other = env.binary("other_build", "upstream build");
+    let text = env.statement(&other, WRITE, serde_json::json!({}));
+    let sig = sign(&key, STATEMENT_NAMESPACE, &text);
+
+    // The statement fails on the hash, the manifest on the machine: the
+    // machine is what the user can fix.
+    fs::write(&env.ptrace_file, "0\n").unwrap();
+    let msg = unavailable(env.connect(&bin, &["PATH"], text.clone(), Some(sig.clone())));
+    assert_eq!(msg, "ptrace_scope is 0, watertight needs 1");
+
+    fs::write(&env.ptrace_file, "1\n").unwrap();
+    let vault = env.connect(&bin, &["PATH"], text, Some(sig)).unwrap();
+    assert_eq!(vault.vault_name(), Some("pkg_inforno"));
 }
 
 /// A succession statement handing `from`'s vault to `to` (§8).

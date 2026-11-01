@@ -101,9 +101,9 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
             ui.add_space(10.0);
 
             let save_tooltip = if state.key_storage.description.is_empty() {
-                "Save in vaultorno".to_string()
+                "Save in your vault".to_string()
             } else {
-                format!("Save in {}", state.key_storage.description)
+                format!("Save in your vault: {}", state.key_storage.description)
             };
             if ui.add_enabled(is_button_enabled, egui::Button::new("💾 Save in vault"))
                     .on_hover_text(save_tooltip)

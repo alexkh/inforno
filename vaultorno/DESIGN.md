@@ -2,7 +2,8 @@
 
 > **Vaultorno is a locker room for disposable secrets.** Every app gets a
 > row of lockers for each user. A locker holds one blob of bytes, at most
-> 256 KiB, for at most 90 days, and an app has at most 16 lockers. At the
+> 256 KiB, for as long as the app declares (usually weeks), and an app has
+> at most 16 lockers. At the
 > door, vaultorno checks who is asking (which user, which genuine binary) and
 > opens only the lockers that binary's signed statement lists, for reading or
 > for writing. **It never holds the key to what is inside:** each app's key
@@ -16,28 +17,18 @@
 > re-issue (API keys, tokens, a cached unlock for another store), never
 > anything you would mind losing (§1).
 
-Status: Milestones 1 to 3 are implemented: the client, the daemon with
-package manifests and the inspector, the `Local` backend, signed statements,
-`revoked_keys`, `successions` (recorded from succession statements in
-`Hello`), `vaultorno revoke`, and `cargo xtask build`, which builds the
-release binaries and signs their statements. Everything else is design. The
-first user is Inforno (`inforno`, `autorno`).
-This revision:
+Status: Milestones 1 to 6 are implemented (§16):
+- the client and its `Local` backend;
+- the daemon with package manifests, signed statements, key lists and the
+  inspector;
+- the sealed master key and hardened units;
+- Inforno on vaultorno;
+- the admin commands and the log;
+- packages for Arch.
 
-- makes the daemon blind with a split key (§2, §6);
-- makes every locker expire, and limits vaultorno to disposable data (§1, §6);
-- replaces the root-owned per-app policy with statements each app signs
-  itself, which also expire (§5, §8);
-- removes the configuration file entirely: behaviour is built in, and
-  everything vaultorno keeps is visible state in the `vaultorno` user's home
-  (§5, §6);
-- puts the daemon, the inspector and the admin commands in one executable
-  (§3, §14);
-- uses JSON only where programs exchange structured data, and simpler
-  formats everywhere else (§3);
-- names every file in lowercase with underscores (§3);
-- moves Realm configs out of vaultorno, into a proposal for a separate store
-  (§15).
+Windows (M7), macOS (M8) and the `fido2` option (M9) are still design, as
+is everything marked "later" or "proposal". The first user is Inforno
+(`inforno`, `autorno`).
 
 Pieces:
 
@@ -67,8 +58,13 @@ it.
 
 By design, therefore:
 
-- **Every locker expires,** at most 90 days after it was filled (§6).
-  Rewriting it doesn't extend that.
+- **Every locker expires,** after the lifetime its app declares, and at
+  most 3700 days after it was filled (§6). Rewriting it doesn't extend
+  that.
+  - Expiry here is hygiene, like washing hands: disposable data shouldn't
+    be kept forever.
+  - The cap of about ten years is a backstop for unattended devices, not a
+    recommendation. Apps should choose far shorter lifetimes.
 - **Lockers are bound to one machine** and have no backup, export, sync or
   recovery. Backups and snapshots should leave vaultorno's state out
   entirely (§14).
@@ -212,9 +208,10 @@ split answers both:
   needs to be out of reach of other programs running as the user, which the
   identity checks provide.
 - **"It wouldn't stop the parties who could abuse the daemon's view."** Root
-  remains out of scope. The inspector's `CAP_SYS_PTRACE` remains a way into
-  app memory while `ptrace_scope` is below 3, which is why the full guarantee
-  holds only at `hermetic` and why `describe()` reports it (§9).
+  remains out of scope. The inspector holds `CAP_SYS_PTRACE`, but its unit
+  denies the system calls that would use it on memory, and file permissions
+  close an app's `/proc/<pid>/mem` to it (§14, §18). So the guarantee holds
+  at every level.
 
 What each part of vaultorno can see:
 
@@ -310,8 +307,8 @@ Rules:
     `inforno_core::vault`. Any program running as the user can open these
     files; used when the daemon isn't installed, and reported as such.
   - `Keychain`: macOS, later.
-- `describe()` tells the app which backend and level it got, how blind the
-  daemon is, and when its statement expires, for its security report.
+- `describe()` tells the app which backend and level it got and when its
+  statement expires, for its security report.
 
 ### Formats
 
@@ -363,8 +360,8 @@ filesystem, case-sensitive or not, and need no quoting in a shell.
 - **Revision**: a random 64-bit value that changes on every write. `0`
   means the locker is empty.
 - **Expiry**: when a locker is emptied automatically. It is set when the
-  locker is filled, from the lifetime in the writer's statement, at most 90
-  days later (§6).
+  locker is filled, from the lifetime in the writer's statement or
+  manifest, at most 3700 days later (§6).
 - **App key**: the key that encrypts a vault's lockers. It exists only
   inside app processes, derived from two halves (§6).
 - **Daemon's half**: 32 random bytes per vault, held by the daemon and
@@ -375,17 +372,38 @@ filesystem, case-sensitive or not, and need no quoting in a shell.
 
 ### Levels
 
+A level names which checks a binary passed when it opened its vault. It is
+not a guarantee about the machine, and a chain is only as strong as its
+weakest link: §2 lists what no level covers, and §13 what apps must still
+do. Read a level as a checklist that was met, and an outdated or misbehaving
+setup as a red flag whatever its level.
+
 From loosest to strictest:
 
 | Level | Identity | Other checks |
 |---|---|---|
 | `watertight` | **package manifest**: a root-owned binary at the path a root-owned manifest lists (trusts the package manager) | binary and every parent directory root-owned, not group/world-writable; environment check; `ptrace_scope >= 1` |
 | `airtight` | **signed statement**: valid, unexpired, by the app's key, for this exact executable (§8) | environment check; `ptrace_scope >= 2` |
-| `hermetic` (later) | as airtight | `ptrace_scope = 3`, so nothing (not even the inspector) can read another process's memory; master key must be TPM2-sealed. The only level at which no part of vaultorno can read contents (§2). Until the master key exists (M4), a statement asking for it is refused |
-
 The identity decides the level: a package manifest gives `watertight`, a
-signed statement `airtight`. A statement may ask for `hermetic`. There is no
-level without an identity; development builds are signed too (§8).
+signed statement `airtight`. There is no level without an identity;
+development builds are signed too (§8).
+
+The two levels also suit different lives:
+- **`airtight` is for software that keeps up with its releases.** A
+  statement lives at most 180 days, so a build that hasn't been updated in
+  six months loses access. That's intended: it retires unpatched builds.
+- **`watertight` is for unattended devices.** Root decides what's installed
+  there, and a manifest doesn't expire; give it a long locker lifetime
+  (§10).
+
+There is no level above `airtight`, because `ptrace_scope = 3` would add
+nothing:
+- programs running as the user are already kept out at 2;
+- vaultorno's one holder of `CAP_SYS_PTRACE`, the inspector, is kept from
+  app memory at any scope, by its unit and by file permissions (§14, §18);
+- root is out of scope either way.
+
+Scope 3 also can't be lowered again without a reboot.
 
 With `ptrace_scope = 1`, a program running as the user can start the genuine
 binary as its own child and attach to it. Watertight therefore stops generic
@@ -431,7 +449,6 @@ key (§8). `autorno_statement.json`:
   "sha256": "41ab…",
   "issued": "2026-10-16T00:00:00Z",
   "expires": "2027-01-14T00:00:00Z",
-  "level": "airtight",
   "reject_env": [],
   "lockers": {
     "api_keys":        { "access": "write", "lifetime_days": 90 },
@@ -455,14 +472,14 @@ Rules:
   releases, 7 days for development builds. To revoke a version, stop
   re-signing its statement.
 - **It lists the binary's lockers:** `read`, or `write` (which includes
-  read) with `lifetime_days` (default 30, at most 90). A binary can touch
+  read) with `lifetime_days` (default 30, at most 3700). A binary can touch
   only the lockers its statement names, and must name at least one. An app
   may use at most 16 locker names; the daemon checks this when a locker is
   first filled.
 - **`app`, `binary` and locker names** follow the naming rule (§3).
-- **`level`** is optional, `airtight` or `hermetic`. **`reject_env`**
-  (optional) adds the app's own code-loading variables, e.g. a plugin path,
-  to the built-in reject list (§7).
+- **`reject_env`** (optional) adds the app's own code-loading variables,
+  e.g. a plugin path, to the built-in reject list (§7). A statement can't
+  ask for a level: the identity decides it (§4).
 - **Several statements may exist for one executable,** e.g. an older one
   with broader access. Each stays valid until it expires, so narrowing
   access takes effect when the older statement runs out.
@@ -521,7 +538,7 @@ of the app's statement, or unnecessary:
 | Former setting | Now |
 |---|---|
 | per-app binaries, keys and locker lists | statements and package manifests, shipped by the app |
-| minimum level | decided by the identity; a statement may ask for `hermetic` |
+| minimum level | decided by the identity (§4) |
 | extra rejected variables | `reject_env` in the app's statement or manifest |
 | allowed users | none: every user may have vaults, each separate |
 | denied keys | `revoked_keys` in the `vaultorno` user's home, written by `vaultorno revoke` or by hand (§6, §12) |
@@ -829,7 +846,9 @@ version of `inforno_core::vault`; both layers reuse it.
    than variables (e.g. Vulkan layers in `~/.local/share/vulkan/`) is
    invisible to the daemon; see §13.
 6. **Debugging protection:** read `/proc/sys/kernel/yama/ptrace_scope` and
-   compare it with the level's minimum.
+   compare it with the level's minimum. This is checked last. A shortfall,
+   or a kernel without Yama, is refused with `Unavailable` rather than
+   `NotAllowed` (§9).
 7. **Vault, binary and lockers** all come from the identity; the client
    doesn't choose them. A binary opens only its own app's vault (access to
    another app's vault is deferred, Appendix A).
@@ -1004,6 +1023,7 @@ struct LockerInfo { name: String, revision: u64, size: u32,       // size: store
 enum ErrorCode {
     ProtocolMismatch, NotAllowed, UnknownLocker,
     Conflict, TooLarge, NotSealed, Storage, Busy,
+    Unavailable,                                       // the machine can't serve this level
 }
 ```
 
@@ -1023,9 +1043,18 @@ enum ErrorCode {
   statement runs out (§13).
 - **`Welcome.refused`** counts refused attempts to open this vault since its
   last successful open. The app can warn the user that other programs tried.
-- **`NotAllowed`** says which check failed ("statement expired on
-  2027-01-14", "VK_LAYER_PATH set", "ptrace_scope is 1, airtight needs 2").
-  Users need that to fix their setup; it gives an attacker nothing new.
+- **`NotAllowed`** says which check about the caller failed ("statement
+  expired on 2027-01-14", "VK_LAYER_PATH set"). Users need that to fix
+  their setup; it gives an attacker nothing new.
+- **`Unavailable`** is a refusal about the machine rather than the caller.
+  It means `ptrace_scope` is below the level's minimum, or the kernel has no
+  Yama ("ptrace_scope is 1, airtight needs 2").
+  - These checks come last, so the caller has already passed every check
+    about itself.
+  - It isn't counted in `Welcome.refused`, doesn't slow the caller down,
+    and is logged as `result=unavailable`.
+  - Only an administrator can fix it, so apps treat it as final for the
+    run (§13).
 - **`Storage`** also covers unreadable state, e.g. a line in `revoked_keys`
   that isn't a public key; the daemon then refuses everything rather than
   guess.
@@ -1036,7 +1065,7 @@ enum ErrorCode {
 use vaultorno_client::Vault;
 
 let vault = Vault::open("inforno")?;             // daemon or local fallback; sends a statement; combines the halves
-println!("{}", vault.describe());                // "vaultorno, airtight, blind, statement until 2027-01-14"
+println!("{}", vault.describe());                // "vaultorno; checks passed: airtight (signed build); …"
 
 let keys = vault.get("api_keys")?;               // decrypted here: Locker { data: SecretBox<[u8]>, revision, expires }
 vault.put("api_keys", &bytes, keys.revision)?;   // encrypted here; Err(Conflict) if it changed meanwhile
@@ -1050,8 +1079,10 @@ for locker in vault.list()? { /* name, revision, size, expires, read, write */ }
   while lockers aren't empty), `KeyMismatch` (an envelope's `key_id` isn't
   this app key's, i.e. one of the halves changed), `Corrupt` (an envelope
   fails to decrypt).
-- **`describe()` states the blindness exactly,** e.g. "blind; inspector
-  could read app memory: ptrace_scope is 2" below `hermetic`.
+- **`describe()`** names the backend and which checks the binary passed,
+  never more: a level is a checklist that was met, not a guarantee (§4).
+  For example: "vaultorno; checks passed: airtight (signed build);
+  statement until 2027-01-14; the daemon sees only ciphertext".
 - Contents are `SecretBox` in the client and zeroized on drop, as are both
   halves, the app key, padded buffers and decoded responses. The daemon never
   has plaintext to zeroize.
@@ -1065,7 +1096,7 @@ for locker in vault.list()? { /* name, revision, size, expires, read, write */ }
 | Lockers per app | 16 names across its statements (checked when a locker is first filled) |
 | Locker size | 256 KiB stored, i.e. 262,080 bytes of app data (§6) |
 | Stored sizes | powers of two from 1 KiB to 256 KiB |
-| Locker lifetime | default 30 days, at most 90 days |
+| Locker lifetime | default 30 days, at most 3700 days (a backstop for unattended devices) |
 | Statement validity | at most 180 days |
 | Vaults per user | 64; a vault with no filled locker for 90 days is deleted |
 | Message size | 512 KiB |
@@ -1149,6 +1180,9 @@ genuine app does is the app's responsibility:
   locker with the same contents. When a locker expires, ask the user.
 - **Refresh statements before they expire,** and warn the user well ahead
   (e.g. 14 days) when you can't.
+- **Treat `Unavailable` as final** for the run (§9). Tell the user what the
+  machine lacks and that only an administrator can change it. Don't fall
+  back to a weaker store behind their back.
 - **Use only `vaultorno_client`** to talk to vaultorno: it is what encrypts.
   A hand-written protocol client would send plaintext, and the daemon's shape
   check catches only accidents.
@@ -1168,8 +1202,9 @@ genuine app does is the app's responsibility:
   (`prctl(PR_SET_DUMPABLE, 0)`, as `ssh-agent` does), so other programs
   running as the user can't attach to it or read its memory, even where
   `ptrace_scope` would allow it. Release builds only; it also blocks
-  debuggers and core dumps. (It doesn't stop holders of `CAP_SYS_PTRACE`,
-  such as the inspector; only `hermetic` does.)
+  debuggers and core dumps. (It doesn't stop holders of `CAP_SYS_PTRACE`.
+  Vaultorno's one holder, the inspector, is kept from memory by its unit,
+  §14.)
 - **Keep whatever decides where secrets may go inside a locker**, e.g. an
   API key's allowed hosts, not in a config file.
 - **Offer no way to export secrets** that a config file or argument can
@@ -1208,8 +1243,8 @@ genuine app does is the app's responsibility:
   development build binds a socket itself (`--socket`). The daemon requires
   the inspector's socket and starts after it.
 - **No configuration files.** The package installs the executable, the
-  units, the timer and the `sysusers.d` entry, and its install script runs
-  `vaultorno init` (§6). Apps' own packages install their statements or
+  units, the timer and the `sysusers.d` entry, all under `/usr`, and
+  nothing in `/etc` (below). Apps' own packages install their statements or
   manifests in `/usr/share/vaultorno/`.
 - **No backups or snapshots of the state:** `~vaultorno` carries a
   `CACHEDIR.TAG`, which backup tools can be told to honour (e.g. the
@@ -1333,9 +1368,36 @@ MemoryDenyWriteExecute=yes
 LimitCORE=0
 ```
 
-- **Packaging:** an Arch PKGBUILD first.
 - **Windows:** one service running `vaultorno daemon` as
   `NT SERVICE\vaultorno`; no inspector (§7).
+
+### Packages
+
+Three Arch packages, in `packaging/` at the workspace root:
+
+| Package | Installs | Identity |
+|---|---|---|
+| `vaultorno` | the executable, the units, the timer and the `sysusers.d` entry | — |
+| `inforno` | Inforno and autorno built from source, and the manifest `/usr/share/vaultorno/manifests/inforno.json` | `watertight`, vault `pkg_inforno` |
+| `inforno-bin` | upstream's release binaries byte for byte (unstripped: each statement names its executable's hash), and their signed statements in `/usr/share/vaultorno/statements/inforno/` | `airtight`, the release key's vault |
+
+- **Install:** pacman's hooks create the system users. The install script
+  runs `vaultorno init` once, and skips it if a master key exists (§6).
+- **Units are not enabled:** the admin runs
+  `systemctl enable --now vaultorno.socket vaultorno_sweep.timer`. The
+  inspector's socket follows from the daemon's `Requires=`.
+- **Removal leaves the state,** master key included, so a reinstall finds
+  the vaults. Deleting `/var/lib/vaultorno` by hand starts over.
+- **`ptrace_scope`:** no sysctl drop-in is shipped.
+  - The setting is machine-wide and also decides what debuggers may attach
+    to, so it's the admin's choice.
+  - Stock Arch has 1, enough for `watertight`; Debian 13 has 0.
+  - `vaultorno status` explains how to raise it, and `inforno-bin`'s
+    install script says it needs 2.
+  - Below a level's minimum, `Hello` is refused with `Unavailable` (§9).
+- **Other distributions** install the same files by hand; the vaultorno
+  README has Debian's steps. A distribution's own build of an app uses a
+  package manifest, like `inforno` (§18).
 
 ---
 
@@ -1445,9 +1507,8 @@ store may be visible inside a Realm; add a test for that.
   internal to Inforno and autorno.
 - Folio path translation: home-folder paths in pasted text become Realm
   paths, otherwise `~/…`, with an Undo.
-- Security report: backend and level, blindness (including whether the
-  inspector could read memory), statement expiry, locker expiries, sealer,
-  refused count, Realm approval mode.
+- Security report: backend and level, statement expiry, locker expiries,
+  sealer, refused count, Realm approval mode.
 
 ---
 
@@ -1461,12 +1522,12 @@ store may be visible inside a Realm; add a test for that.
 | M3 | Signed statements (identity, lockers, expiry, `reject_env`), vaults by key fingerprint, `successions`, `revoked_keys` and `vaultorno revoke`; the `cargo xtask build` statement-and-signing flow | Signed development build of Inforno opens its own vault with no root configuration; a statement for another hash, an expired one, one signed by another key, or one signed by a revoked key gets no access to that vault |
 | M4 | `vaultorno init` and the master key via `LoadCredentialEncrypted=`, the daemon's halves and outer encryption sealed under it, hardened units, two system users with `~vaultorno` as the state directory, sweep timer, `CACHEDIR.TAG` | Locker files and halves unreadable on another machine; a process running as `vaultorno`, with the state directory and the unsealed master key, can't decrypt any locker or read any user's half; the daemon runs with no capabilities; running any mode by hand as a user gains nothing; hardening items in §18 verified |
 | M5 | Inforno on vaultorno: `api_keys` with expiry, key migration, statements in Inforno's release flow | No API key left in `~/.config` or `~/.local/share`; an expired `api_keys` makes Inforno ask again |
-| M6 | PKGBUILD, admin commands, log | Clean install on Arch from the package, with no configuration file anywhere |
+| M6 | Packages (`vaultorno`, `inforno`, `inforno-bin`), admin commands, log, `Unavailable` for refusals about the machine | Clean install on Arch from the packages, with no configuration file anywhere; the same by hand on Debian 13 |
 | M7 | Windows service, named pipe at identification level, DPAPI-sealed master key, the user's half under an ACL | Same tests pass on Windows; the service can't open the user's half |
 | M8 | macOS `Keychain` backend in the client, with expiry | — |
 | M9 | `fido2` option: the user's half wrapped by a security key (§18) | The vault opens only with the security key and a touch |
 
-M1 to M5 are done; M6 is under way. Still open from M1: `Vault::reset`,
+M1 to M6 are done. Still open from M1: `Vault::reset`,
 and deleting a user's half whose vault was swept as stale. The client
 can't tell a new daemon's half from an old one, so the second needs
 `Welcome` to say when `Hello` created the half, and an order between
@@ -1555,24 +1616,45 @@ Inforno's realm store (§15) is planned separately, once settled.
     or `/fd/*`. The daemon and the sweep don't even see other users'
     processes (`ProtectProc=invisible`), and file permissions stop the
     inspector.
-  - Still open: whether `ptrace_scope = 3` still allows `exe` and `maps`, as
-    `hermetic` assumes; whether `StateDirectory=` re-owning
-    `master_key.cred` matters (it's sealed, so it shouldn't).
-- **Log in the journal instead?** Writing to the systemd journal would
-  remove the log file and its rotation, and `journalctl -u vaultorno` would
-  read it. But members of groups such as `adm` or `systemd-journal`, often
-  the everyday user on a desktop, can read the system journal. The log holds
-  no secrets, only who opened what and which attempts were refused.
-- **Lifetimes:** are 30 days for lockers by default, 90 at most, and 180 for
-  statements (90 recommended for releases, 7 for development) right?
+  - Still open:
+    - Whether the inspector still reads `exe` and `maps` at
+      `ptrace_scope = 3`, which an admin may set though no level needs it.
+      Yama restricts only attaching, so it should.
+    - Whether `StateDirectory=` re-owning `master_key.cred` matters. It's
+      sealed, so it shouldn't.
+- **Log in the journal instead?** Settled: no. Members of `adm` or
+  `systemd-journal`, often the everyday user on a desktop, can read the
+  system journal. So each user's log is a file in the state that only root
+  reads (§11), and the journal keeps only daemon-wide events, such as
+  unreadable key lists.
+- **Lifetimes:** settled for lockers.
+  - **Locker default and cap:** 30 days by default, 3700 at most. Expiry is
+    hygiene, and the cap is a backstop for unattended devices, which should
+    use a manifest, since a statement can't outlive 180 days.
+  - **App choices:** each app picks its own lifetime; Inforno uses 90 days.
+  - **Statements:** still valid 180 days at most (90 recommended for
+    releases, 7 for development).
 - **Statement distribution:** ship refreshed statements only with package
   updates, or also let apps download them (they are signed, so the source
   doesn't matter)? What should an app do when its statement has expired and
   it's offline?
-- **Distribution builds:** a distribution that rebuilds Inforno can't use
-  upstream statements. A package manifest gives it `watertight`; a
-  distribution signing key would give `airtight`, but as a different app
-  with its own vault. Is that the right split?
+- **Distribution builds:** settled as proposed. A distribution that
+  rebuilds an app gets `watertight` from a package manifest, vault
+  `pkg_<app>`. A distribution signing key would give `airtight`, but as a
+  separate app with its own vault. Inforno's `inforno` package works this
+  way (§14).
+- **When the machine can't serve (Inforno):** settled.
+  - **Strict:** an `Unavailable` refusal (§9) is final for the run, and
+    Inforno never falls back to a weaker store.
+  - **Limited mode:** Inforno says what to raise and keeps working without
+    keys: notes, Ollama and local models.
+  - **Password mode (later):** keys in an Argon2id-encrypted file, unlocked
+    at the first use per session and held only in Inforno's memory.
+    - Offered only when the machine can't serve (no vaultorno,
+      `ptrace_scope` too low, no Yama), never after a refusal about the
+      binary.
+    - Once vaultorno can serve, Inforno offers to move the keys into it.
+    - Autorno gets no keys in password mode.
 - **Access to another app's vault** (e.g. a key-adding proxy reading
   `api_keys`): a grant statement signed by the vault owner's key, naming the
   other app's key and binary. Deferred until needed (Appendix A).
@@ -1633,7 +1715,7 @@ below was taken out to keep it a small locker room; none is lost.
 
 | Idea | Why taken out | Instead, for now | Would come back if |
 |---|---|---|---|
-| A configuration file (`/etc/vaultorno/policy.yml`) | Access belongs to apps, and the machine-wide settings weren't needed; without one, vaultorno has nothing to misconfigure and everything it does is printed by `vaultorno status` | Built-in constants; statements and manifests; `revoked_keys` as state (§5) | A machine needs a setting no statement can express, e.g. an admin requiring `hermetic` for every app |
+| A configuration file (`/etc/vaultorno/policy.yml`) | Access belongs to apps, and the machine-wide settings weren't needed; without one, vaultorno has nothing to misconfigure and everything it does is printed by `vaultorno status` | Built-in constants; statements and manifests; `revoked_keys` as state (§5) | A machine needs a setting no statement can express, e.g. an admin requiring `airtight` for every app |
 | Separate executables for daemon, inspector and admin | One file is simpler to build, package and review as a whole; separation is between processes, not files | One `vaultorno` with modes; privileges from the units (§3) | — |
 | YAML, and JSON outside messages and statements | Each format should be the simplest that does the job | JSON for messages, statements and manifests; OpenSSH key lines, fixed binary layouts and plain text elsewhere (§3) | — |
 | Lasting data (configs, approvals, recovery material) | Vaultorno is for disposable data: lockers expire and have no backup or recovery | The app's own store with its own recovery, e.g. Inforno's realm store (§15), with at most a cached unlock in a locker | — |

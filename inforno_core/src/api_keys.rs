@@ -32,7 +32,6 @@ use std::sync::Mutex;
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use vaultorno_client::ExposeSecret as _;
 use vaultorno_client::startup::Startup;
 use vaultorno_client::time::{Clock, DAY, SystemClock, format_rfc3339};
 use vaultorno_client::{StatementFiles, Vault};
@@ -48,8 +47,8 @@ pub const OPENROUTER: &str = "openrouter";
 /// The API every saved OpenRouter key is sent to; set explicitly on the
 /// client, never left to a library's default.
 pub const OPENROUTER_API: &str = "https://openrouter.ai/api/v1";
-/// Days a filled `api_keys` lives (design doc §15): the most vaultorno
-/// allows. The key itself should expire at its provider no later.
+/// Days a filled `api_keys` lives (design doc §15). The key itself should
+/// expire at its provider no later.
 pub const LIFETIME_DAYS: u32 = 90;
 /// Inforno asks for keys again once they expire within this many days.
 pub const RENEW_DAYS: u64 = 3;
@@ -90,7 +89,20 @@ pub enum KeysError {
 }
 
 impl KeysError {
-    /// Worth reconnecting for: the daemon went away or was busy.
+    /// vaultorno's reason, when it refused because of the machine rather
+    /// than this copy of Inforno: `ptrace_scope` too low, or no Yama
+    /// (vaultorno design doc §9). Only an administrator can change that, so
+    /// it's final for this run. Inforno never falls back to a weaker store;
+    /// it keeps to what needs no key.
+    pub fn platform_reason(&self) -> Option<&str> {
+        match self {
+            KeysError::Vault(vaultorno_client::Error::Unavailable(why)) => Some(why.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Worth reconnecting for: the daemon went away or was busy. Never a
+    /// refusal, whether about the binary or about the machine.
     fn is_transient(&self) -> bool {
         matches!(
             self,
@@ -505,6 +517,19 @@ mod tests {
         }
         assert!(check_host(&[], OPENROUTER_API).is_err());
         assert!(default_hosts("someone_else").is_empty());
+    }
+
+    #[test]
+    fn refusals_about_the_machine_are_final() {
+        use vaultorno_client::Error;
+        let why = "ptrace_scope is 1, airtight needs 2";
+        let machine = KeysError::Vault(Error::Unavailable(why.into()));
+        assert_eq!(machine.platform_reason(), Some(why));
+        assert!(!machine.is_transient());
+        let caller = KeysError::Vault(Error::NotAllowed("VK_LAYER_PATH set".into()));
+        assert_eq!(caller.platform_reason(), None);
+        assert!(!caller.is_transient());
+        assert!(KeysError::Vault(Error::Busy("x".into())).is_transient());
     }
 
     #[test]

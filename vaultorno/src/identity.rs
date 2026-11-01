@@ -87,12 +87,34 @@ pub struct Identity {
 pub struct Refusal {
     pub vault: Option<String>,
     pub message: String,
+    pub kind: RefusalKind,
+}
+
+/// Whom a refusal is about (§9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// The caller: its identity, statement, loaded code or environment.
+    /// Answered with `NotAllowed`, counted and slowed down.
+    Caller,
+    /// The machine, whoever asks: `ptrace_scope` below the level's minimum,
+    /// or no Yama. Answered with `Unavailable`. Checked last, so the caller
+    /// has passed every check about itself.
+    Machine,
 }
 
 fn refused(vault: Option<String>, message: impl Into<String>) -> Refusal {
     Refusal {
         vault,
         message: message.into(),
+        kind: RefusalKind::Caller,
+    }
+}
+
+fn unavailable(vault: Option<String>, message: impl Into<String>) -> Refusal {
+    Refusal {
+        vault,
+        message: message.into(),
+        kind: RefusalKind::Machine,
     }
 }
 
@@ -266,10 +288,10 @@ impl ManifestIdentity {
         let rd = match fs::read_dir(&self.manifests_dir) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(Refusal {
-                    vault: None,
-                    message: format!("can't read {}: {e}", self.manifests_dir.display()),
-                });
+                return Err(refused(
+                    None,
+                    format!("can't read {}: {e}", self.manifests_dir.display()),
+                ));
             }
             Ok(rd) => rd,
         };
@@ -291,32 +313,27 @@ impl ManifestIdentity {
             let vault_hint = Some(format!("pkg_{stem}"));
 
             // Check manifest file ownership & permissions before trusting it.
-            check_safe_path(&path, &self.root_dir, self.trusted_uid, false).map_err(|msg| {
-                Refusal {
-                    vault: vault_hint.clone(),
-                    message: msg,
-                }
-            })?;
+            check_safe_path(&path, &self.root_dir, self.trusted_uid, false)
+                .map_err(|msg| refused(vault_hint.clone(), msg))?;
 
-            let text = fs::read_to_string(&path).map_err(|e| Refusal {
-                vault: vault_hint.clone(),
-                message: format!("can't read {}: {e}", path.display()),
+            let text = fs::read_to_string(&path).map_err(|e| {
+                refused(
+                    vault_hint.clone(),
+                    format!("can't read {}: {e}", path.display()),
+                )
             })?;
             let manifest = Manifest::parse(&text)
                 .and_then(|m| m.check())
-                .map_err(|e| Refusal {
-                    vault: vault_hint.clone(),
-                    message: format!("{}: {}", path.display(), e.0),
-                })?;
+                .map_err(|e| refused(vault_hint.clone(), format!("{}: {}", path.display(), e.0)))?;
             if manifest.app != stem {
-                return Err(Refusal {
-                    vault: vault_hint,
-                    message: format!(
+                return Err(refused(
+                    vault_hint,
+                    format!(
                         "{}: manifest app {:?} doesn't match file name",
                         path.display(),
                         manifest.app
                     ),
-                });
+                ));
             }
             let vault = format!("pkg_{}", manifest.app);
 
@@ -333,34 +350,22 @@ impl ManifestIdentity {
                 }
 
                 // Matched! Now verify binary ownership/permissions, env, and ptrace_scope.
-                check_safe_path(bin_path, &self.root_dir, self.trusted_uid, true).map_err(
-                    |msg| Refusal {
-                        vault: Some(vault.clone()),
-                        message: msg,
-                    },
-                )?;
+                check_safe_path(bin_path, &self.root_dir, self.trusted_uid, true)
+                    .map_err(|msg| refused(Some(vault.clone()), msg))?;
 
                 // Loaded code first: the environment's names come from the
                 // caller's own client, which counts only in a clean process.
-                self.check_code(inspected).map_err(|msg| Refusal {
-                    vault: Some(vault.clone()),
-                    message: msg,
-                })?;
+                self.check_code(inspected)
+                    .map_err(|msg| refused(Some(vault.clone()), msg))?;
                 let mut extra_env = manifest.reject_env.clone();
                 extra_env.extend(bin.reject_env.iter().cloned());
                 if let Some(bad_var) = find_rejected_env(environment, &extra_env) {
-                    return Err(Refusal {
-                        vault: Some(vault),
-                        message: format!("{bad_var} set"),
-                    });
+                    return Err(refused(Some(vault), format!("{bad_var} set")));
                 }
 
-                check_ptrace_scope(&self.ptrace_scope_path, WATERTIGHT_LEVEL, 1).map_err(
-                    |msg| Refusal {
-                        vault: Some(vault.clone()),
-                        message: msg,
-                    },
-                )?;
+                // Last: about the machine, not the caller (§9).
+                check_ptrace_scope(&self.ptrace_scope_path, WATERTIGHT_LEVEL, 1)
+                    .map_err(|msg| unavailable(Some(vault.clone()), msg))?;
 
                 return Ok(Some(Identity {
                     app: manifest.app,
@@ -385,13 +390,13 @@ impl ManifestIdentity {
             Ok(inspected) => {
                 let _ = peer.exe_sha256.set(inspected.sha256_hex());
                 if inspected.uid != peer.uid {
-                    return Err(Refusal {
-                        vault: None,
-                        message: format!(
+                    return Err(refused(
+                        None,
+                        format!(
                             "inspected process uid {} doesn't match peer uid {}",
                             inspected.uid, peer.uid
                         ),
-                    });
+                    ));
                 }
                 Ok(Some(inspected))
             }
@@ -399,10 +404,7 @@ impl ManifestIdentity {
                 if self.test_fallback && peer.pidfd.is_none() {
                     return Ok(None);
                 }
-                Err(Refusal {
-                    vault: None,
-                    message: format!("inspection failed: {inspect_err}"),
-                })
+                Err(refused(None, format!("inspection failed: {inspect_err}")))
             }
         }
     }
@@ -422,23 +424,20 @@ impl ManifestIdentity {
         if self.test_fallback {
             // Even under the test fallback, an inspected process must hold
             // no foreign code and no rejected variable (§7.5).
-            let refuse = |message: String| Refusal {
-                vault: None,
-                message,
-            };
+            let refuse = |message: String| refused(None, message);
             self.check_code(inspected).map_err(refuse)?;
             if let Some(bad_var) = find_rejected_env(&peer.environment, &[]) {
                 return Err(refuse(format!("{bad_var} set")));
             }
             return TestIdentity.identify(peer, statement, signature, None, now);
         }
-        Err(Refusal {
-            vault: None,
-            message: format!(
+        Err(refused(
+            None,
+            format!(
                 "executable {} isn't listed in any package manifest",
                 inspected.exe_path.display()
             ),
-        })
+        ))
     }
     /// The code `inspected` has loaded besides its executable (§7.5).
     fn check_code(&self, inspected: &Inspected) -> Result<(), String> {
@@ -616,19 +615,13 @@ impl SignedIdentity {
         if let Some(bad_var) = find_rejected_env(environment, &checked.reject_env) {
             return Err(refused(hint(), format!("{bad_var} set")));
         }
-        if checked.level.is_some_and(|l| l != AIRTIGHT_LEVEL) {
-            // `hermetic` also needs the TPM2-sealed master key (§4).
-            return Err(refused(
-                hint(),
-                "hermetic needs a TPM2-sealed master key, which this build doesn't have (Milestone 4)",
-            ));
-        }
+        // Last: about the machine, not the caller (§9).
         check_ptrace_scope(
             &self.manifests.ptrace_scope_path,
             AIRTIGHT_LEVEL,
             AIRTIGHT_PTRACE_SCOPE,
         )
-        .map_err(|m| refused(hint(), m))?;
+        .map_err(|m| unavailable(hint(), m))?;
         // Recorded only once everything else has passed (§8).
         if let Some(succession) = &new_succession {
             self.record(succession, now).map_err(|m| refused(hint(), m))?;
@@ -679,11 +672,14 @@ impl Identify for SignedIdentity {
             now,
         ) {
             Ok(ident) => Ok(ident),
-            // A package manifest may still vouch for the binary (§7.4). If
-            // none does, the statement's reason is the one worth reporting;
-            // a signed statement never falls back to the test identity.
+            // A package manifest may still vouch for the binary (§7.4). If it
+            // vouches but the machine can't serve its level, that is what the
+            // user can fix; otherwise the statement's reason is the one worth
+            // reporting. A signed statement never falls back to the test
+            // identity.
             Err(refusal) => match self.manifests.match_manifest(&inspected, environment) {
                 Ok(Some(ident)) => Ok(ident),
+                Err(m) if m.kind == RefusalKind::Machine => Err(m),
                 _ => Err(refusal),
             },
         }
@@ -788,8 +784,16 @@ pub fn check_loaded_code(
 
 /// Checks `/proc/sys/kernel/yama/ptrace_scope` against a level's minimum (§7.6).
 pub fn check_ptrace_scope(path: &Path, level: &str, min_scope: u32) -> Result<(), String> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "this kernel has no Yama ({} is missing), and {level} needs ptrace_scope {min_scope}",
+                path.display()
+            )
+        } else {
+            format!("can't read {}: {e}", path.display())
+        }
+    })?;
     let scope = text
         .trim()
         .parse::<u32>()
@@ -820,19 +824,10 @@ impl Identify for TestIdentity {
         _succession: Option<(&str, &str)>,
         now: u64,
     ) -> Result<Identity, Refusal> {
-        let text = statement.ok_or_else(|| Refusal {
-            vault: None,
-            message: "hello carries no statement".into(),
-        })?;
-        let parsed = Statement::parse(text).map_err(|e| Refusal {
-            vault: None,
-            message: e.0,
-        })?;
+        let text = statement.ok_or_else(|| refused(None, "hello carries no statement"))?;
+        let parsed = Statement::parse(text).map_err(|e| refused(None, e.0))?;
         let vault = is_valid_name(&parsed.app).then(|| format!("test_{}", parsed.app));
-        let checked = parsed.check(now).map_err(|e| Refusal {
-            vault: vault.clone(),
-            message: e.0,
-        })?;
+        let checked = parsed.check(now).map_err(|e| refused(vault.clone(), e.0))?;
         Ok(Identity {
             vault: format!("test_{}", checked.app),
             app: checked.app,

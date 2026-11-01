@@ -16,7 +16,7 @@ use vaultorno_client::protocol::{
 use vaultorno_client::time::{Clock, format_date};
 use zeroize::Zeroize;
 
-use crate::identity::{Identify, Identity, Peer};
+use crate::identity::{Identify, Identity, Peer, RefusalKind};
 use crate::log;
 use crate::store::{Header, Store, VaultLock};
 
@@ -331,13 +331,19 @@ impl Server {
                         .vault
                         .as_deref()
                         .map_or_else(|| "-".to_owned(), |v| log::vault_label(None, v));
+                    let machine = refusal.kind == RefusalKind::Machine;
                     self.log_hello(
                         &peer,
                         &label,
                         "-",
-                        "refused",
+                        if machine { "unavailable" } else { "refused" },
                         &[("check", refusal.message.as_str())],
                     );
+                    // Checked only once the caller passed every check about
+                    // itself: nothing to count against the vault or slow down.
+                    if machine {
+                        return reply(error(ErrorCode::Unavailable, refusal.message));
+                    }
                     // Anyone can sign with a fresh key, so a fingerprint vault
                     // is counted only once it exists; manifest vaults are
                     // bounded by the manifests root installed.

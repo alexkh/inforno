@@ -373,7 +373,8 @@ fn saved_window_size() -> Option<egui::Vec2> {
 }
 
 /// What the user should hear about Inforno's vault, once per run (vaultorno
-/// design doc §15). The key manager shows errors itself.
+/// design doc §15). The key manager shows other errors itself; a refusal
+/// about the machine gets a notice, since the user can't fix it in Inforno.
 fn vault_notices(
     keys: &inforno_core::api_keys::KeyStore,
     opened: Result<(), inforno_core::api_keys::KeysError>,
@@ -383,6 +384,9 @@ fn vault_notices(
     let mut notices = Vec::new();
     if let Err(e) = opened {
         eprintln!("saved keys: not available: {e}");
+        if let Some(why) = e.platform_reason() {
+            notices.push(platform_notice(why));
+        }
         return notices;
     }
     let Ok(st) = keys.with_vault(|vault| Ok(api_keys::status(vault))) else {
@@ -407,4 +411,20 @@ fn vault_notices(
         ));
     }
     notices
+}
+
+/// The notice for a refusal about the machine (vaultorno design doc §9):
+/// what an administrator can change, and that Inforno still works without
+/// keys. Inforno never falls back to a weaker store.
+fn platform_notice(why: &str) -> String {
+    format!(
+        "Saved keys aren't available on this machine. vaultorno says: {why}.\n\n\
+         That setting decides which programs may read other programs' memory, \
+         and vaultorno won't hand out keys below the level it needs. An \
+         administrator can raise it; \"vaultorno status\" explains how, and what \
+         else it changes. Then restart Inforno.\n\n\
+         Until then, everything that needs no API key works as usual: notes, \
+         Ollama and other local models. In the key manager you can also set an \
+         OpenRouter key for this session only."
+    )
 }

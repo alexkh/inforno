@@ -25,6 +25,10 @@ pub enum Error {
     Storage(String),
     #[error("busy: {0}")]
     Busy(String),
+    /// The machine can't serve this vault, whoever asks: `ptrace_scope` too
+    /// low, or no Yama (§9). Only an administrator can change that.
+    #[error("unavailable on this machine: {0}")]
+    Unavailable(String),
     /// No valid statement was found for this executable (§5).
     #[error("no valid statement: {0}")]
     NoStatement(String),
@@ -62,6 +66,7 @@ impl Error {
             ErrorCode::NotSealed => Error::NotSealed(message),
             ErrorCode::Storage => Error::Storage(message),
             ErrorCode::Busy => Error::Busy(message),
+            ErrorCode::Unavailable => Error::Unavailable(message),
         }
     }
 }

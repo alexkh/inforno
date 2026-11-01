@@ -38,8 +38,9 @@ pub const MAX_DATA: usize = MAX_STORED - ENVELOPE_OVERHEAD;
 pub const MAX_LOCKERS_PER_APP: usize = 16;
 /// Lifetime of a written locker when its statement doesn't say.
 pub const DEFAULT_LIFETIME_DAYS: u32 = 30;
-/// Longest lifetime any locker may have.
-pub const MAX_LIFETIME_DAYS: u32 = 90;
+/// Longest lifetime any locker may have: about ten years, a backstop for
+/// unattended devices. Apps should choose far less (§1, §10).
+pub const MAX_LIFETIME_DAYS: u32 = 3700;
 /// Longest a statement may be valid.
 pub const MAX_STATEMENT_DAYS: u64 = 180;
 /// Length of each half of an app key.
@@ -211,6 +212,10 @@ pub enum ErrorCode {
     NotSealed,
     Storage,
     Busy,
+    /// The machine can't serve the caller's level, whoever asks:
+    /// `ptrace_scope` too low, or no Yama (§9). Unlike `NotAllowed`, it is
+    /// about the machine, not the caller, and retrying won't help.
+    Unavailable,
 }
 
 mod b64 {
@@ -317,8 +322,6 @@ pub struct Statement {
     pub sha256: String,
     pub issued: String,
     pub expires: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reject_env: Vec<String>,
     #[serde(deserialize_with = "unique_keys")]
@@ -350,7 +353,6 @@ pub struct CheckedStatement {
     pub sha256: String,
     pub issued: u64,
     pub expires: u64,
-    pub level: Option<String>,
     pub reject_env: Vec<String>,
     pub lockers: BTreeMap<String, Grant>,
 }
@@ -380,7 +382,7 @@ impl Statement {
     }
 
     /// Checks everything that doesn't need a signature or a hash: format,
-    /// names, times against `now`, levels, variables and lockers.
+    /// names, times against `now`, variables and lockers.
     pub fn check(&self, now: u64) -> Result<CheckedStatement, StatementError> {
         if self.format != 1 {
             return refuse(format!("statement format {} isn't supported", self.format));
@@ -418,10 +420,6 @@ impl Statement {
         if now >= expires {
             return refuse(format!("statement expired on {}", &self.expires[..10]));
         }
-        match self.level.as_deref() {
-            None | Some("airtight") | Some("hermetic") => {}
-            Some(other) => return refuse(format!("level {other:?} isn't airtight or hermetic")),
-        }
         for var in &self.reject_env {
             if !is_valid_env_pattern(var) {
                 return refuse(format!("reject_env entry {var:?} isn't a variable name"));
@@ -434,7 +432,6 @@ impl Statement {
             sha256: self.sha256.clone(),
             issued,
             expires,
-            level: self.level.clone(),
             reject_env: self.reject_env.clone(),
             lockers,
         })
@@ -802,9 +799,11 @@ mod tests {
         assert!(check("", r#"{"Api-Keys":{"access":"read"}}"#).is_err());
         assert!(check("", r#"{"a":{"access":"read","lifetime_days":3}}"#).is_err());
         assert!(check("", r#"{"a":{"access":"write","lifetime_days":0}}"#).is_err());
-        assert!(check("", r#"{"a":{"access":"write","lifetime_days":91}}"#).is_err());
+        assert!(check("", r#"{"a":{"access":"write","lifetime_days":3700}}"#).is_ok());
+        assert!(check("", r#"{"a":{"access":"write","lifetime_days":3701}}"#).is_err());
         assert!(check("", r#"{"a":{"access":"admin"}}"#).is_err());
-        assert!(check(r#","level":"open""#, r#"{"a":{"access":"read"}}"#).is_err());
+        // The identity decides the level; a statement can't ask for one.
+        assert!(check(r#","level":"airtight""#, r#"{"a":{"access":"read"}}"#).is_err());
         assert!(
             check(
                 r#","reject_env":["BAD-NAME"]"#,
@@ -855,6 +854,18 @@ mod tests {
                 assert_eq!(expected, u64::MAX);
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_codes_on_the_wire() {
+        for (code, name) in [
+            (ErrorCode::NotAllowed, "not_allowed"),
+            (ErrorCode::Unavailable, "unavailable"),
+        ] {
+            let json = serde_json::to_string(&code).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ErrorCode>(&json).unwrap(), code);
         }
     }
 

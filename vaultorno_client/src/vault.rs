@@ -260,16 +260,24 @@ impl Vault {
         &self.app
     }
 
-    /// Which backend and level this vault got, for the app's security report.
+    /// Which backend this vault got and which checks its binary passed, for
+    /// the app's security report.
     pub fn describe(&self) -> String {
         match &self.backend {
             Backend::Daemon(c) => {
                 let w = &c.welcome;
-                let mut s = format!("vaultorno, {}, blind", w.level);
+                // A level is a checklist the binary met at `Hello`, not a
+                // guarantee about the machine (design doc §4).
+                let mut parts = vec![match w.level.as_str() {
+                    "airtight" => "checks passed: airtight (signed build)".to_owned(),
+                    "watertight" => "checks passed: watertight (package manifest)".to_owned(),
+                    other => format!("checks passed: {other}"),
+                }];
                 if let Some(t) = w.statement_expires {
-                    s.push_str(&format!(", statement until {}", format_date(t)));
+                    parts.push(format!("statement until {}", format_date(t)));
                 }
-                s
+                parts.push("the daemon sees only ciphertext".to_owned());
+                format!("vaultorno; {}", parts.join("; "))
             }
             Backend::Local(l) => format!("local {}, no per-app protection", l.sealer_name()),
         }

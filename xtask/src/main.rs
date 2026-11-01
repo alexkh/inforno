@@ -274,7 +274,6 @@ fn statement_text(
         sha256: sha256.into(),
         issued: format_rfc3339(issued),
         expires: format_rfc3339(issued + days * DAY),
-        level: None,
         reject_env: Vec::new(),
         lockers: lockers
             .iter()

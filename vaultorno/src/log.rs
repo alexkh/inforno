@@ -87,6 +87,7 @@ pub fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::NotSealed => "not_sealed",
         ErrorCode::Storage => "storage_error",
         ErrorCode::Busy => "busy",
+        ErrorCode::Unavailable => "unavailable",
     }
 }
 
