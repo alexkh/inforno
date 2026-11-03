@@ -183,14 +183,15 @@ fn print_identity(ident: &Identity) {
     if ident.vault.len() == 64 {
         println!("            vault {}", ident.vault);
     }
-    if let Some(t) = ident.statement_expires {
+    let t = ident.statement_expires;
+    if t != 0 {
         println!("            statement valid until {}", format_date(t));
     }
     for (name, grant) in &ident.lockers {
-        let access = if grant.write {
-            format!("write, filled for {} days", grant.lifetime_secs / DAY)
-        } else {
-            "read".to_owned()
+        let access = match (grant.write, grant.lifetime_secs) {
+            (false, _) => "read".to_owned(),
+            (true, 0) => "write, never expires once filled".to_owned(),
+            (true, secs) => format!("write, filled for {} days", secs / DAY),
         };
         println!("locker      {name}: {access}");
     }

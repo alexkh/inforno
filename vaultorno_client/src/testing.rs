@@ -20,11 +20,12 @@ pub const APP: &str = "suite";
 
 /// Three vaults on one fresh store, sharing a fake clock.
 pub struct Harness {
-    /// May write `api_keys` (30 days) and `short` (7 days).
+    /// May write `api_keys` (30 days), `short` (7 days) and `forever` (no
+    /// expiry).
     pub writer: Vault,
     /// Same statement as `writer`; a second process.
     pub writer2: Vault,
-    /// May only read both lockers.
+    /// May only read all three lockers.
     pub reader: Vault,
     pub clock: Arc<FakeClock>,
     /// Whatever must outlive the vaults: temp folders, servers.
@@ -65,7 +66,11 @@ pub fn writer_statement(now: u64) -> String {
         APP,
         "writer",
         now,
-        &[("api_keys", "write", Some(30)), ("short", "write", Some(7))],
+        &[
+            ("api_keys", "write", Some(30)),
+            ("short", "write", Some(7)),
+            ("forever", "write", Some(0)),
+        ],
     )
 }
 
@@ -75,7 +80,11 @@ pub fn reader_statement(now: u64) -> String {
         APP,
         "reader",
         now,
-        &[("api_keys", "read", None), ("short", "read", None)],
+        &[
+            ("api_keys", "read", None),
+            ("short", "read", None),
+            ("forever", "read", None),
+        ],
     )
 }
 
@@ -104,7 +113,7 @@ pub fn empty_locker_reads_empty(make: Make) {
     let got = h.reader.get("api_keys").unwrap();
     assert!(data(&got).is_empty());
     assert_eq!(got.revision, 0);
-    assert_eq!(got.expires, None);
+    assert_eq!(got.expires, 0);
 }
 
 pub fn every_write_changes_revision(make: Make) {
@@ -195,7 +204,7 @@ pub fn empty_put_deletes(make: Make) {
     let rev = h.writer.put("api_keys", b"x", 0).unwrap().revision;
     let stored = h.writer.put("api_keys", b"", rev).unwrap();
     assert_eq!(stored.revision, 0);
-    assert_eq!(stored.expires, None);
+    assert_eq!(stored.expires, 0);
     let got = h.reader.get("api_keys").unwrap();
     assert_eq!(got.revision, 0);
     assert!(data(&got).is_empty());
@@ -216,7 +225,7 @@ pub fn expiry_set_at_fill_and_not_extended(make: Make) {
     let h = make();
     let now = h.clock.now();
     let first = h.writer.put("api_keys", b"x", 0).unwrap();
-    assert_eq!(first.expires, Some(now + 30 * DAY));
+    assert_eq!(first.expires, now + 30 * DAY);
     h.clock.advance(10 * DAY);
     let second = h.writer.put("api_keys", b"y", first.revision).unwrap();
     assert_eq!(
@@ -247,7 +256,7 @@ pub fn expired_locker_reads_empty(make: Make) {
     );
     // Refilling starts a new period.
     let refilled = h.writer.put("api_keys", b"new", 0).unwrap();
-    assert_eq!(refilled.expires, Some(h.clock.now() + 30 * DAY));
+    assert_eq!(refilled.expires, h.clock.now() + 30 * DAY);
 }
 
 pub fn lifetimes_per_locker(make: Make) {
@@ -255,12 +264,30 @@ pub fn lifetimes_per_locker(make: Make) {
     let now = h.clock.now();
     assert_eq!(
         h.writer.put("short", b"x", 0).unwrap().expires,
-        Some(now + 7 * DAY)
+        now + 7 * DAY
     );
     assert_eq!(
         h.writer.put("api_keys", b"x", 0).unwrap().expires,
-        Some(now + 30 * DAY)
+        now + 30 * DAY
     );
+}
+
+pub fn a_locker_can_live_forever(make: Make) {
+    let h = make();
+    let stored = h.writer.put("forever", b"kept", 0).unwrap();
+    assert_ne!(stored.revision, 0);
+    assert_eq!(stored.expires, 0, "lifetime_days 0 sets no expiry");
+    h.clock.advance(100 * 365 * DAY);
+    let got = h.reader.get("forever").unwrap();
+    assert_eq!(data(&got), b"kept");
+    assert_eq!(got.revision, stored.revision);
+    assert_eq!(got.expires, 0);
+    let list = h.writer.list().unwrap();
+    let info = list.iter().find(|l| l.name == "forever").unwrap();
+    assert_eq!(info.revision, stored.revision);
+    assert_eq!(info.expires, 0);
+    let again = h.writer.put("forever", b"new", stored.revision).unwrap();
+    assert_eq!(again.expires, 0, "rewriting keeps it without expiry");
 }
 
 pub fn list_reports_lockers(make: Make) {
@@ -268,13 +295,15 @@ pub fn list_reports_lockers(make: Make) {
     let stored = h.writer.put("api_keys", b"x", 0).unwrap();
     let list = h.writer.list().unwrap();
     let names: Vec<&str> = list.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["api_keys", "short"]);
+    assert_eq!(names, ["api_keys", "forever", "short"]);
     let api = &list[0];
     assert_eq!(api.revision, stored.revision);
     assert_eq!(api.expires, stored.expires);
     assert!(api.read && api.write && api.size > 0);
-    assert_eq!(list[1].revision, 0);
-    assert_eq!(list[1].expires, None);
+    for empty in &list[1..] {
+        assert_eq!(empty.revision, 0);
+        assert_eq!(empty.expires, 0);
+    }
     assert!(h.reader.list().unwrap().iter().all(|l| l.read && !l.write));
 }
 
@@ -336,6 +365,10 @@ macro_rules! backend_suite {
             #[test]
             fn lifetimes_per_locker() {
                 $crate::testing::lifetimes_per_locker(&$make)
+            }
+            #[test]
+            fn a_locker_can_live_forever() {
+                $crate::testing::a_locker_can_live_forever(&$make)
             }
             #[test]
             fn list_reports_lockers() {

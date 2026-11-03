@@ -181,9 +181,10 @@ pub fn check_host(hosts: &[String], url: &str) -> Result<(), String> {
     }
 }
 
-/// Whether `expires` (Unix seconds) falls within `days` from now.
-pub fn expires_within(expires: Option<u64>, days: u64) -> bool {
-    expires.is_some_and(|t| t <= SystemClock.now().saturating_add(days * DAY))
+/// Whether `expires` (Unix seconds) falls within `days` from now. 0 is no
+/// expiry, which never does.
+pub fn expires_within(expires: u64, days: u64) -> bool {
+    expires != 0 && expires <= SystemClock.now().saturating_add(days * DAY)
 }
 
 /// What the vault said when it was opened, for the startup report (§15).
@@ -192,8 +193,8 @@ pub struct VaultStatus {
     pub description: String,
     /// Refused opens since the last successful one.
     pub refused: u32,
-    /// When this binary's statement expires, if the daemon checked one.
-    pub statement_expires: Option<u64>,
+    /// When this binary's statement expires (Unix seconds); 0 for none.
+    pub statement_expires: u64,
 }
 
 pub fn status(vault: &Vault) -> VaultStatus {
@@ -315,8 +316,8 @@ pub fn open_vault() -> Result<Vault, KeysError> {
     }
 }
 
-/// All saved keys, and when they expire (none if nothing is saved).
-pub fn read_keys(vault: &Vault) -> Result<(BTreeMap<String, SavedKey>, Option<u64>), KeysError> {
+/// All saved keys, and when they expire (0 if nothing is saved).
+pub fn read_keys(vault: &Vault) -> Result<(BTreeMap<String, SavedKey>, u64), KeysError> {
     let locker = vault.get(LOCKER)?;
     Ok((decode(locker.data.expose_secret())?, locker.expires))
 }
@@ -329,7 +330,7 @@ pub fn set_key(
     vault: &Vault,
     provider: &str,
     key: Option<&SavedKey>,
-) -> Result<Option<u64>, KeysError> {
+) -> Result<u64, KeysError> {
     for _ in 0..ATTEMPTS {
         let current = vault.get(LOCKER)?;
         let mut keys = decode(current.data.expose_secret()).unwrap_or_default();
@@ -354,7 +355,7 @@ pub fn set_key(
 /// Replaces every saved key with `key` alone, in a locker emptied and filled
 /// again, so it lives a full 90 days. Only for a key the user has just
 /// entered (design doc §13).
-pub fn renew_key(vault: &Vault, provider: &str, key: &SavedKey) -> Result<Option<u64>, KeysError> {
+pub fn renew_key(vault: &Vault, provider: &str, key: &SavedKey) -> Result<u64, KeysError> {
     let mut keys = BTreeMap::new();
     keys.insert(provider.to_owned(), key.clone());
     let bytes = encode(&keys);
@@ -570,7 +571,7 @@ mod tests {
 
         // The first key fills the locker: 90 days from now.
         let first = set_key(&vault, OPENROUTER, Some(&key("sk-1"))).unwrap();
-        assert_eq!(first, Some(NOW + 90 * DAY));
+        assert_eq!(first, NOW + 90 * DAY);
 
         // Changing it, or adding another, keeps that expiry.
         clock.advance(10 * DAY);
@@ -584,7 +585,7 @@ mod tests {
         // Renewing starts a new 30 days, with only the key just entered.
         clock.advance(18 * DAY);
         let renewed = renew_key(&vault, OPENROUTER, &key("sk-3")).unwrap();
-        assert_eq!(renewed, Some(NOW + 118 * DAY));
+        assert_eq!(renewed, NOW + 118 * DAY);
         let (keys, _) = read_keys(&vault).unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[OPENROUTER].key.expose_secret(), "sk-3");
@@ -597,11 +598,11 @@ mod tests {
         clock.set(NOW + 118 * DAY);
         let (keys, expires) = read_keys(&vault).unwrap();
         assert!(keys.is_empty());
-        assert_eq!(expires, None);
+        assert_eq!(expires, 0);
 
         // Removing the last key empties the locker.
         set_key(&vault, OPENROUTER, Some(&key("sk-4"))).unwrap();
-        assert_eq!(set_key(&vault, OPENROUTER, None).unwrap(), None);
+        assert_eq!(set_key(&vault, OPENROUTER, None).unwrap(), 0);
         assert!(read_keys(&vault).unwrap().0.is_empty());
     }
 }

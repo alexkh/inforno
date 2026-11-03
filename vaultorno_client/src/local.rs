@@ -415,7 +415,7 @@ impl LocalStore {
         Ok(Locker {
             data: SecretBox::new(plain[HEADER_LEN..].to_vec().into_boxed_slice()),
             revision: header.revision,
-            expires: Some(header.expires),
+            expires: header.expires,
         })
     }
 
@@ -444,12 +444,12 @@ impl LocalStore {
             }
             return Ok(Stored {
                 revision: 0,
-                expires: None,
+                expires: 0,
             });
         }
         let expires = match &current {
             Some((h, _)) => h.expires,
-            None => self.clock.now() + grant.lifetime_secs,
+            None => grant.expiry_from(self.clock.now()),
         };
         let header = Header {
             revision: new_revision(current_revision)?,
@@ -467,7 +467,7 @@ impl LocalStore {
         )?;
         Ok(Stored {
             revision: u64::from_be_bytes(header[5..13].try_into().expect("8 bytes")),
-            expires: Some(expires),
+            expires,
         })
     }
 
@@ -476,8 +476,8 @@ impl LocalStore {
         let mut out = Vec::new();
         for (name, grant) in &self.lockers {
             let (revision, size, expires) = match self.read(name)? {
-                Some((h, bytes)) => (h.revision, bytes.len() as u32, Some(h.expires)),
-                None => (0, 0, None),
+                Some((h, bytes)) => (h.revision, bytes.len() as u32, h.expires),
+                None => (0, 0, 0),
             };
             out.push(LockerInfo {
                 name: name.clone(),

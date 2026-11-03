@@ -31,8 +31,8 @@ pub struct Locker {
     pub data: SecretBox<[u8]>,
     /// 0 when empty.
     pub revision: u64,
-    /// Unix seconds; none when empty.
-    pub expires: Option<u64>,
+    /// Unix seconds; 0 for none: empty, or never expires.
+    pub expires: u64,
 }
 
 impl Locker {
@@ -40,7 +40,7 @@ impl Locker {
         Locker {
             data: SecretBox::new(Vec::new().into_boxed_slice()),
             revision: 0,
-            expires: None,
+            expires: 0,
         }
     }
 }
@@ -50,8 +50,8 @@ impl Locker {
 pub struct Stored {
     /// 0 after emptying the locker.
     pub revision: u64,
-    /// Unix seconds; none after emptying the locker.
-    pub expires: Option<u64>,
+    /// Unix seconds; 0 for none: emptied, or never expires.
+    pub expires: u64,
 }
 
 /// A statement file's text and, once signatures exist, its SSHSIG.
@@ -273,8 +273,8 @@ impl Vault {
                     "watertight" => "checks passed: watertight (package manifest)".to_owned(),
                     other => format!("checks passed: {other}"),
                 }];
-                if let Some(t) = w.statement_expires {
-                    parts.push(format!("statement until {}", format_date(t)));
+                if w.statement_expires != 0 {
+                    parts.push(format!("statement until {}", format_date(w.statement_expires)));
                 }
                 parts.push("the daemon sees only ciphertext".to_owned());
                 format!("vaultorno; {}", parts.join("; "))
@@ -291,11 +291,12 @@ impl Vault {
         }
     }
 
-    /// When this binary's statement expires, if the daemon checked one.
-    pub fn statement_expires(&self) -> Option<u64> {
+    /// When this binary's statement expires (Unix seconds); 0 if the daemon
+    /// checked none: a package manifest, or the `Local` backend.
+    pub fn statement_expires(&self) -> u64 {
         match &self.backend {
             Backend::Daemon(c) => c.welcome.statement_expires,
-            Backend::Local(_) => None,
+            Backend::Local(_) => 0,
         }
     }
 

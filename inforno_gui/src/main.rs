@@ -401,10 +401,8 @@ fn vault_notices(
             st.refused
         ));
     }
-    if let Some(until) = st
-        .statement_expires
-        .filter(|&t| expires_within(Some(t), STATEMENT_WARN_DAYS))
-    {
+    let until = st.statement_expires;
+    if expires_within(until, STATEMENT_WARN_DAYS) {
         notices.push(format!(
             "This copy of Inforno may open its saved keys only until {}. Update it before then.",
             format_date(until)

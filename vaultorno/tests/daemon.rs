@@ -777,7 +777,7 @@ fn locker_files_use_the_fixed_layout() {
         stored.revision
     );
     assert_eq!(
-        Some(u64::from_be_bytes(bytes[13..21].try_into().unwrap())),
+        u64::from_be_bytes(bytes[13..21].try_into().unwrap()),
         stored.expires
     );
     // A nonce, then the client's envelope sealed again under the master key.
@@ -827,6 +827,23 @@ fn the_sweep_deletes_expired_lockers_and_stale_vaults() {
     let r = sweep(env.store(), env.clock.now()).unwrap();
     assert_eq!(r.stale_vaults, 1);
     assert!(!env.store().vault_exists(UID, "test_suite"));
+}
+
+#[test]
+fn the_sweep_keeps_a_locker_that_never_expires() {
+    let env = env();
+    let vault = env.open(UID, writer_statement(START)).unwrap();
+    vault.put("forever", b"kept", 0).unwrap();
+    drop(vault);
+
+    env.clock.advance(1000 * DAY);
+    let r = sweep(env.store(), env.clock.now()).unwrap();
+    assert_eq!(r, SweepReport::default());
+    assert!(env.locker_file(UID, "forever").exists());
+    assert!(env.store().vault_exists(UID, "test_suite"), "a filled vault isn't stale");
+
+    let vault = env.open(UID, writer_statement(env.clock.now())).unwrap();
+    assert_eq!(vault.get("forever").unwrap().data.expose_secret(), b"kept");
 }
 
 /// Sets a file's or folder's modification time to `t`, Unix seconds on the
@@ -1003,7 +1020,7 @@ fn a_read_only_manifest_binary_cannot_put() {
         .unwrap();
     assert_eq!(writer.vault_name(), Some("pkg_inforno"));
     assert_eq!(writer.binary(), Some("inforno"));
-    assert_eq!(writer.statement_expires(), None);
+    assert_eq!(writer.statement_expires(), 0);
     assert!(writer.describe().contains("watertight"));
     writer.put("api_keys", b"secret-from-manifest", 0).unwrap();
 
@@ -1496,7 +1513,7 @@ fn a_signed_statement_opens_its_keys_vault() {
     let vault = fingerprint(&key).hex();
     assert_eq!(writer.vault_name(), Some(vault.as_str()));
     assert_eq!(writer.binary(), Some("inforno"));
-    assert_eq!(writer.statement_expires(), Some(START + 90 * DAY));
+    assert_eq!(writer.statement_expires(), START + 90 * DAY);
     assert!(
         writer
             .describe()

@@ -37,7 +37,8 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
         if state.key_saved {
             ui.add_space(20.0);
             ui.label(t!("openrouter_key_is_set"));
-            if let Some(expires) = state.key_storage.expires {
+            let expires = state.key_storage.expires;
+            if expires != 0 {
                 if renew_due {
                     ui.colored_label(ui.visuals().warn_fg_color, format!(
                         "Saved keys expire on {}. Enter your key again, ideally a freshly \
@@ -137,8 +138,9 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
 pub struct KeyStorage {
     /// Which backend holds them and how, from `Vault::describe()`.
     pub description: String,
-    /// When the saved keys expire (Unix seconds); none if nothing is saved.
-    pub expires: Option<u64>,
+    /// When the saved keys expire (Unix seconds); 0 for none: nothing saved,
+    /// or they never expire.
+    pub expires: u64,
 }
 
 /// The saved OpenRouter key, if any, and what holds it.

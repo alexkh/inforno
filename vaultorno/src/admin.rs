@@ -23,7 +23,7 @@ use rustix::io::Errno;
 use vaultorno_client::names::{is_valid_name, is_valid_vault_name};
 use vaultorno_client::protocol::{
     BUILTIN_REJECT_ENV, DEFAULT_LIFETIME_DAYS, DEFAULT_MANIFESTS_DIR, DEFAULT_SOCKET, MAX_DATA,
-    MAX_FRAME, MAX_LIFETIME_DAYS, MAX_LOCKERS_PER_APP, MAX_STATEMENT_DAYS, MAX_STORED, MIN_STORED,
+    MAX_FRAME, MAX_LOCKERS_PER_APP, MAX_STATEMENT_DAYS, MAX_STORED, MIN_STORED,
 };
 use vaultorno_client::time::{Clock, DAY, SystemClock, format_date};
 
@@ -232,7 +232,9 @@ pub fn status(args: &[String]) -> Result<(), String> {
     );
     row(
         "locker lifetime",
-        &format!("{DEFAULT_LIFETIME_DAYS} days by default, at most {MAX_LIFETIME_DAYS}"),
+        &format!(
+            "{DEFAULT_LIFETIME_DAYS} days by default; as the app declares, 0 meaning never"
+        ),
     );
     row("statement validity", &format!("at most {MAX_STATEMENT_DAYS} days"));
     row(

@@ -58,13 +58,15 @@ it.
 
 By design, therefore:
 
-- **Every locker expires,** after the lifetime its app declares, and at
-  most 3700 days after it was filled (§6). Rewriting it doesn't extend
-  that.
-  - Expiry here is hygiene, like washing hands: disposable data shouldn't
-    be kept forever.
-  - The cap of about ten years is a backstop for unattended devices, not a
-    recommendation. Apps should choose far shorter lifetimes.
+- **Lockers expire when their app says:** 30 days after being filled,
+  unless its statement or manifest declares another lifetime (§6).
+  Rewriting a locker doesn't extend that.
+  - `lifetime_days: 0` means never. A device or toy that must keep working
+    for years shouldn't stop because a date passed.
+  - "Disposable" means the data may be lost and re-issued (no backup,
+    bound to one machine), not that it must be short-lived.
+  - Expiry is still the norm, as hygiene: an app holding keys it could
+    re-issue should choose weeks or months.
 - **Lockers are bound to one machine** and have no backup, export, sync or
   recovery. Backups and snapshots should leave vaultorno's state out
   entirely (§14).
@@ -80,8 +82,8 @@ By design, therefore:
   The key is derived from two halves: the daemon holds one, the user's home
   folder the other (§6). The daemon stores and serves ciphertext and can't
   derive the key.
-- **Short-lived.** Lockers expire; so do the statements that grant access
-  (§5).
+- **Short-lived by default.** Lockers expire unless their app declares
+  otherwise; statements always do (§5).
 - **Declared by the app.** Each binary carries a statement, signed by the
   app's own key, listing the lockers it may read or write (§5).
 - **Without configuration.** There is no config file. Behaviour is built
@@ -127,7 +129,8 @@ By design, therefore:
   `vaultorno` system user, or a copy of its state together with its master
   key, has at most the daemon's half of each key and can't decrypt anything
   (§6).
-- **Data outliving its use.** Lockers expire and are deleted (§6).
+- **Data outliving its use.** Lockers expire and are deleted, unless their
+  app keeps them for good (§6).
 - Leaks of the stored files (backups, git, stolen disks): a copy of the home
   folder holds only the user's half; the daemon's half and the lockers are
   sealed to the machine, with TPM2 when available.
@@ -361,7 +364,7 @@ filesystem, case-sensitive or not, and need no quoting in a shell.
   means the locker is empty.
 - **Expiry**: when a locker is emptied automatically. It is set when the
   locker is filled, from the lifetime in the writer's statement or
-  manifest, at most 3700 days later (§6).
+  manifest; a lifetime of 0 means the locker never expires (§6).
 - **App key**: the key that encrypts a vault's lockers. It exists only
   inside app processes, derived from two halves (§6).
 - **Daemon's half**: 32 random bytes per vault, held by the daemon and
@@ -393,8 +396,8 @@ The two levels also suit different lives:
   statement lives at most 180 days, so a build that hasn't been updated in
   six months loses access. That's intended: it retires unpatched builds.
 - **`watertight` is for unattended devices.** Root decides what's installed
-  there, and a manifest doesn't expire; give it a long locker lifetime
-  (§10).
+  there, and a manifest doesn't expire. Give its lockers a long lifetime,
+  or `lifetime_days: 0` for none (§6).
 
 There is no level above `airtight`, because `ptrace_scope = 3` would add
 nothing:
@@ -472,7 +475,7 @@ Rules:
   releases, 7 days for development builds. To revoke a version, stop
   re-signing its statement.
 - **It lists the binary's lockers:** `read`, or `write` (which includes
-  read) with `lifetime_days` (default 30, at most 3700). A binary can touch
+  read) with `lifetime_days` (default 30; 0 for never). A binary can touch
   only the lockers its statement names, and must name at least one. An app
   may use at most 16 locker names; the daemon checks this when a locker is
   first filled.
@@ -667,16 +670,19 @@ vault a binary opens.
 
 ### Expiry
 
-- **Set when a locker is filled:** the first `Put` into an empty locker sets
-  `expires = now + lifetime`, from the writer's statement. Later writes keep
-  that expiry; they never extend it.
+- **Set when a locker is filled:** the first `Put` into an empty locker
+  sets `expires = now + lifetime`, from the writer's statement or manifest.
+  Later writes keep that expiry; they never extend it.
+- **A lifetime of 0 sets no expiry** (`0` in the file's header). The locker
+  lasts until it is emptied, forgotten, or its vault deleted. A vault
+  holding one is never stale.
 - **When it passes, the locker is emptied:** the daemon deletes the file and
   treats the locker as empty (revision 0). It checks on every access, and the
   daily `vaultorno sweep` (§14) deletes expired lockers even if no app asks.
   The sweep needs no key: it reads the expiry at a fixed offset in each
   file's header (below), which only the `vaultorno` user can change.
-- **Apps see it:** `List` and `Get` return `expires`, so an app can warn the
-  user before a key lapses.
+- **Apps see it:** `List` and `Get` return `expires` (0 for a locker that
+  never expires), so an app can warn the user before a key lapses.
 - **Refilling is the app's choice.** An app could copy contents into a new
   period by emptying and refilling a locker. Vaultorno doesn't prevent that;
   apps must not do it without the user (§13).
@@ -1009,16 +1015,16 @@ enum Response {
     Welcome { protocol: u32, app: String, vault: String, binary: String, level: String,
               sealer: String,
               half: Vec<u8>,                               // the daemon's half of the app key (§6)
-              statement_expires: Option<u64>,              // Unix seconds; none for manifests
+              statement_expires: u64,                      // Unix seconds; 0 for manifests
               refused: u32 },                              // refused opens since the last success
     Lockers { lockers: Vec<LockerInfo> },
-    Locker { data: Vec<u8>, revision: u64, expires: Option<u64> },  // empty locker: no data, revision 0
+    Locker { data: Vec<u8>, revision: u64, expires: u64 },  // empty locker: no data, revision 0
     Stored { revision: u64, expires: u64 },
     Error { code: ErrorCode, message: String },
 }
 
 struct LockerInfo { name: String, revision: u64, size: u32,       // size: stored size class
-                    expires: Option<u64>, read: bool, write: bool }
+                    expires: u64, read: bool, write: bool }
 
 enum ErrorCode {
     ProtocolMismatch, NotAllowed, UnknownLocker,
@@ -1030,6 +1036,12 @@ enum ErrorCode {
 - **`List`** returns the lockers the caller's statement names, with
   revisions, size classes and expiries. An app notices changes cheaply this
   way, e.g. autorno before starting a harness.
+- **An `expires` of 0 means none,** everywhere: in the files, on the wire
+  and in the client API.
+  - An empty locker has it, and so does one that never expires; the
+    revision tells them apart.
+  - `Welcome.statement_expires` follows the same rule: 0 for a package
+    manifest, which has no statement.
 - **`Put`** succeeds only if `expected` equals the current revision (`0` to
   create), and returns the new revision and the locker's expiry. Otherwise
   `Conflict`: re-read, merge, retry. Data that isn't shaped like a client
@@ -1096,7 +1108,7 @@ for locker in vault.list()? { /* name, revision, size, expires, read, write */ }
 | Lockers per app | 16 names across its statements (checked when a locker is first filled) |
 | Locker size | 256 KiB stored, i.e. 262,080 bytes of app data (§6) |
 | Stored sizes | powers of two from 1 KiB to 256 KiB |
-| Locker lifetime | default 30 days, at most 3700 days (a backstop for unattended devices) |
+| Locker lifetime | default 30 days; any number of days, or 0 for never |
 | Statement validity | at most 180 days |
 | Vaults per user | 64; a vault with no filled locker for 90 days is deleted |
 | Message size | 512 KiB |
@@ -1565,7 +1577,9 @@ Inforno's realm store (§15) is planned separately, once settled.
 - **Expiry:** a filled locker expires at fill time plus its lifetime; later
   writes don't extend it; an expired locker reads as empty and its file is
   gone; the sweep deletes expired lockers and stale vaults without any app
-  asking; an edited revision or expiry in a file's header fails to decrypt.
+  asking; an edited revision or expiry in a file's header fails to decrypt;
+  a locker with lifetime 0 never expires, and the sweep keeps it and its
+  vault.
 - **Blindness:**
   - a canary stored through every request type never appears in frames the
     daemon receives, its state directory, its log or a dump of its memory;
@@ -1628,8 +1642,8 @@ Inforno's realm store (§15) is planned separately, once settled.
   reads (§11), and the journal keeps only daemon-wide events, such as
   unreadable key lists.
 - **Lifetimes:** settled for lockers.
-  - **Locker default and cap:** 30 days by default, 3700 at most. Expiry is
-    hygiene, and the cap is a backstop for unattended devices, which should
+  - **Lockers:** 30 days by default. An app may declare any lifetime, or 0
+    for never, as an unattended device may need. Such a device should also
     use a manifest, since a statement can't outlive 180 days.
   - **App choices:** each app picks its own lifetime; Inforno uses 90 days.
   - **Statements:** still valid 180 days at most (90 recommended for

@@ -66,7 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "round trip ok: revision {:016x}, expires {}",
         stored.revision,
-        stored.expires.map(format_date).unwrap_or_default()
+        if stored.expires == 0 {
+            String::new()
+        } else {
+            format_date(stored.expires)
+        }
     );
     Ok(())
 }

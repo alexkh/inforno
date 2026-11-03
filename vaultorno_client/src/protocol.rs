@@ -38,9 +38,6 @@ pub const MAX_DATA: usize = MAX_STORED - ENVELOPE_OVERHEAD;
 pub const MAX_LOCKERS_PER_APP: usize = 16;
 /// Lifetime of a written locker when its statement doesn't say.
 pub const DEFAULT_LIFETIME_DAYS: u32 = 30;
-/// Longest lifetime any locker may have: about ten years, a backstop for
-/// unattended devices. Apps should choose far less (§1, §10).
-pub const MAX_LIFETIME_DAYS: u32 = 3700;
 /// Longest a statement may be valid.
 pub const MAX_STATEMENT_DAYS: u64 = 180;
 /// Length of each half of an app key.
@@ -112,22 +109,24 @@ pub enum Response {
         /// The daemon's half of this vault's app key (§6).
         #[serde(with = "b64")]
         half: Vec<u8>,
-        /// Unix seconds; none for package manifests.
-        statement_expires: Option<u64>,
+        /// Unix seconds; 0 for none: a package manifest has no statement.
+        statement_expires: u64,
         /// Refused opens of this vault since its last successful open.
         refused: u32,
     },
     Lockers {
         lockers: Vec<LockerInfo>,
     },
-    /// An empty locker has no data and revision 0.
+    /// An empty locker has no data, revision 0 and `expires` 0. A filled
+    /// one that never expires also has `expires` 0.
     Locker {
         #[serde(with = "b64")]
         data: Vec<u8>,
         revision: u64,
-        expires: Option<u64>,
+        expires: u64,
     },
-    /// `revision` 0 and `expires` 0 after emptying a locker.
+    /// `revision` 0 and `expires` 0 after emptying a locker; `expires` 0
+    /// also for a locker that never expires.
     Stored {
         revision: u64,
         expires: u64,
@@ -194,8 +193,8 @@ pub struct LockerInfo {
     pub revision: u64,
     /// Stored size class, in bytes; 0 when empty.
     pub size: u32,
-    /// Unix seconds; none when empty.
-    pub expires: Option<u64>,
+    /// Unix seconds; 0 for none: empty, or never expires.
+    pub expires: u64,
     pub read: bool,
     pub write: bool,
 }
@@ -361,8 +360,22 @@ pub struct CheckedStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grant {
     pub write: bool,
-    /// Seconds a filled locker lives; 0 for read-only grants.
+    /// Seconds a locker this binary fills lives. For a writer, 0 means it
+    /// never expires (`lifetime_days: 0`). A read-only grant has 0 as well,
+    /// and never fills a locker.
     pub lifetime_secs: u64,
+}
+
+impl Grant {
+    /// The expiry of a locker this grant fills at `now`, as stored: Unix
+    /// seconds, or 0 for never (§6).
+    pub fn expiry_from(&self, now: u64) -> u64 {
+        if self.lifetime_secs == 0 {
+            0
+        } else {
+            now.saturating_add(self.lifetime_secs)
+        }
+    }
 }
 
 /// A statement was refused; the message says why.
@@ -659,12 +672,8 @@ fn check_locker_grants(
                 ));
             }
             (Access::Write, days) => {
+                // Any number of days; 0 means the locker never expires (§6).
                 let days = days.unwrap_or(DEFAULT_LIFETIME_DAYS);
-                if days == 0 || days > MAX_LIFETIME_DAYS {
-                    return refuse(format!(
-                        "{name}: lifetime_days must be 1 to {MAX_LIFETIME_DAYS}"
-                    ));
-                }
                 Grant {
                     write: true,
                     lifetime_secs: u64::from(days) * DAY,
@@ -783,6 +792,23 @@ mod tests {
         );
         let c = check("", r#"{"api_keys":{"access":"write"}}"#).unwrap();
         assert_eq!(c.lockers["api_keys"].lifetime_secs, 30 * DAY);
+        assert_eq!(c.lockers["api_keys"].expiry_from(NOW), NOW + 30 * DAY);
+
+        // 0 means never, and there's no upper limit.
+        let c = check("", r#"{"a":{"access":"write","lifetime_days":0}}"#).unwrap();
+        assert_eq!(
+            c.lockers["a"],
+            Grant {
+                write: true,
+                lifetime_secs: 0
+            }
+        );
+        assert_eq!(c.lockers["a"].expiry_from(NOW), 0);
+        let c = check("", r#"{"a":{"access":"write","lifetime_days":4294967295}}"#).unwrap();
+        assert_eq!(
+            c.lockers["a"].expiry_from(NOW),
+            NOW + u64::from(u32::MAX) * DAY
+        );
     }
 
     #[test]
@@ -798,9 +824,7 @@ mod tests {
         assert!(check("", r#"{}"#).is_err());
         assert!(check("", r#"{"Api-Keys":{"access":"read"}}"#).is_err());
         assert!(check("", r#"{"a":{"access":"read","lifetime_days":3}}"#).is_err());
-        assert!(check("", r#"{"a":{"access":"write","lifetime_days":0}}"#).is_err());
-        assert!(check("", r#"{"a":{"access":"write","lifetime_days":3700}}"#).is_ok());
-        assert!(check("", r#"{"a":{"access":"write","lifetime_days":3701}}"#).is_err());
+        assert!(check("", r#"{"a":{"access":"write","lifetime_days":-1}}"#).is_err());
         assert!(check("", r#"{"a":{"access":"admin"}}"#).is_err());
         // The identity decides the level; a statement can't ask for one.
         assert!(check(r#","level":"airtight""#, r#"{"a":{"access":"read"}}"#).is_err());

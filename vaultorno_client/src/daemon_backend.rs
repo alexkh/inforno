@@ -60,7 +60,8 @@ pub(crate) struct Welcome {
     pub binary: String,
     pub level: String,
     pub sealer: String,
-    pub statement_expires: Option<u64>,
+    /// Unix seconds; 0 for none (a package manifest).
+    pub statement_expires: u64,
     pub refused: u32,
 }
 
@@ -206,10 +207,7 @@ impl DaemonConn {
                 expected,
             })
         })? {
-            Response::Stored { revision, expires } => Ok(Stored {
-                revision,
-                expires: (expires != 0).then_some(expires),
-            }),
+            Response::Stored { revision, expires } => Ok(Stored { revision, expires }),
             other => unexpected(other),
         }
     }

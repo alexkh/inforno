@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use vaultorno_client::protocol::{
     ErrorCode, Frame, FrameError, LockerInfo, MAX_ENVIRONMENT, MAX_LOCKERS_PER_APP, PROTOCOL,
-    Request, Response, ShapeError, check_envelope_shape, read_frame, write_frame,
+    Request, Response, ShapeError, check_envelope_shape, read_frame,
+    write_frame,
 };
 use vaultorno_client::time::{Clock, format_date};
 use zeroize::Zeroize;
@@ -399,9 +400,10 @@ impl Server {
             half.zeroize();
         }
         sent?;
-        let expires = ident
-            .statement_expires
-            .map_or_else(|| "-".to_owned(), format_date);
+        let expires = match ident.statement_expires {
+            0 => "-".to_owned(),
+            t => format_date(t),
+        };
         self.log_hello(
             &peer,
             &label,
@@ -517,10 +519,10 @@ impl Server {
                         self.store
                             .delete_locker(&lock, peer.uid, &ident.vault, name)?;
                         self.log_expired(peer.uid, ident, name);
-                        (0, 0, None)
+                        (0, 0, 0)
                     }
-                    Some((h, size)) => (h.revision, size as u32, Some(h.expires)),
-                    None => (0, 0, None),
+                    Some((h, size)) => (h.revision, size as u32, h.expires),
+                    None => (0, 0, 0),
                 };
             lockers.push(LockerInfo {
                 name: name.clone(),
@@ -544,12 +546,12 @@ impl Server {
                 None => Response::Locker {
                     data: Vec::new(),
                     revision: 0,
-                    expires: None,
+                    expires: 0,
                 },
                 Some((h, body)) => Response::Locker {
                     data: body,
                     revision: h.revision,
-                    expires: Some(h.expires),
+                    expires: h.expires,
                 },
             },
         )
@@ -632,7 +634,7 @@ impl Server {
                         format!("this app already uses {MAX_LOCKERS_PER_APP} lockers"),
                     ));
                 }
-                now + grant.lifetime_secs
+                grant.expiry_from(now)
             }
         };
         let revision = new_revision(current_revision)?;

@@ -78,7 +78,8 @@ pub struct Identity {
     pub binary: String,
     pub level: String,
     pub lockers: BTreeMap<String, Grant>,
-    pub statement_expires: Option<u64>,
+    /// Unix seconds; 0 for none: a package manifest has no statement.
+    pub statement_expires: u64,
 }
 
 /// Why an identity check failed. `vault` is set when the caller's vault is
@@ -373,7 +374,7 @@ impl ManifestIdentity {
                     binary: bin_name.clone(),
                     level: WATERTIGHT_LEVEL.into(),
                     lockers: bin.lockers.clone(),
-                    statement_expires: None,
+                    statement_expires: 0,
                 }));
             }
         }
@@ -632,7 +633,7 @@ impl SignedIdentity {
             binary: checked.binary,
             level: AIRTIGHT_LEVEL.into(),
             lockers: checked.lockers,
-            statement_expires: Some(checked.expires),
+            statement_expires: checked.expires,
         })
     }
 }
@@ -834,7 +835,7 @@ impl Identify for TestIdentity {
             binary: checked.binary,
             level: TEST_LEVEL.into(),
             lockers: checked.lockers,
-            statement_expires: Some(checked.expires),
+            statement_expires: checked.expires,
         })
     }
 }
