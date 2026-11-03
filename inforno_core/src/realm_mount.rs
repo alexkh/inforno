@@ -175,7 +175,7 @@ mod tests {
             expressions: IndexMap::new(),
             mounts,
             places: IndexMap::new(),
-            sandboxes: IndexMap::new(),
+            folios: IndexMap::new(),
             roles,
             tiers,
             bin: vec![],

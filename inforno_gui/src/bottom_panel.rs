@@ -4,7 +4,7 @@ use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use inforno_core::{common::{Agent, Attachment, PresetSelection, Presets}, db::mod_agent_preset};
+use inforno_core::{common::{Agent, Attachment, ModelPresetSelection, ModelPresets}, db::mod_agent_model_preset};
 use crate::{agent_config::AgentConfigState, state::{State, reload_db_chats, router_color, text_color}};
 
 use bulat::editor::{Token, Syntax, TokenType};
@@ -414,7 +414,7 @@ fn render_agent(
     ui: &mut egui::Ui,
     agent: &mut Agent,
     substate: &mut AgentConfigState,
-    presets: &Presets, // Assuming Presets type is defined
+    presets: &ModelPresets,
     id_source: &str,
     conn: &Connection,
 ) {
@@ -429,22 +429,22 @@ fn render_agent(
     // Sync the selection first (ensure title matches ID)
     agent.preset_selection.sync_with_presets(presets);
 
-    // Preset Combo Box
+    // Model Preset Combo Box
     // We pass the specific agent's preset_selection
-    if preset_combo_box(
+    if model_preset_combo_box(
         ui,
         id_source,
         &mut agent.preset_selection,
         presets
     ) {
         // value changed. Save it to the database
-        let _ = mod_agent_preset(conn, agent.id, agent.preset_selection.id,
+        let _ = mod_agent_model_preset(conn, agent.id, agent.preset_selection.id,
                 presets.get(agent.preset_selection.id));
         agent.preset = presets.get(agent.preset_selection.id).cloned();
     }
 
     // wrench menu here 🔧
-    if crate::emoji_render::emoji_button(ui, "🔧").on_hover_text("Modify this preset").clicked() {
+    if crate::emoji_render::emoji_button(ui, "🔧").on_hover_text("Modify this model preset").clicked() {
         // A. Get the current preset data
         if let Some(_current_preset) = presets.get(agent.preset_selection.id) {
             if let Some(agent_preset) = agent.preset.as_ref() {
@@ -545,11 +545,11 @@ fn render_agent(
 }
 
 // returns true if changed
-pub fn preset_combo_box(
+pub fn model_preset_combo_box(
     ui: &mut egui::Ui,
     salt: impl std::hash::Hash + std::fmt::Debug, // Unique ID for egui memory
-    selection: &mut PresetSelection,
-    presets: &Presets,
+    selection: &mut ModelPresetSelection,
+    presets: &ModelPresets,
 ) -> bool {
     // 1. Sync Logic: Ensure index points to the right ID before drawing
     selection.sync_with_presets(presets);
@@ -750,7 +750,7 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         if chat.agents[index].preset.is_none() {
             let preset_id = chat.agents[index].preset_selection.id;
             chat.agents[index].preset = state.presets.get(preset_id).cloned();
-            let _ = inforno_core::db::update_agent_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
+            let _ = inforno_core::db::update_agent_model_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
         }
 
         let Some(mut preset) = chat.agents[index].preset.clone() else {
@@ -772,7 +772,7 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
             let agent = &chat.agents[index];
             if let Some(override_p) = &agent.preset {
                 // Explicitly annotate Option<Preset> here to satisfy E0282
-                let override_preset: Option<inforno_core::common::Preset> = Some(override_p.clone());
+                let override_preset: Option<inforno_core::common::ModelPreset> = Some(override_p.clone());
                 (override_preset, agent.preset_selection.id)
             } else {
                 (state.presets.get(agent.preset_selection.id).cloned(), agent.preset_selection.id)

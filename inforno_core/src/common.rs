@@ -11,7 +11,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRe
 use secrecy::SecretString;
 use strum::{Display, EnumString};
 use thiserror::Error;
-use crate::db::{CURRENT_SANDBOX_VERSION, mk_agent};
+use crate::db::mk_agent;
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::images::Image;
 
@@ -122,12 +122,14 @@ impl ApiKey {
 pub enum MyError {
     #[error("Project Directory Error: could not get project directory")]
     ProjectDir, // project dir path error
-    #[error("Study Directory Error: could not create or access the Study directory")]
-    StudyDir,
+    #[error("Folio Directory Error: could not create the directory the Folio goes in")]
+    FolioDir,
+    #[error("Folio Name Error: a Folio name must be a plain file name, not a path")]
+    FolioName,
     #[error(transparent)]
     Database(#[from] rusqlite::Error),
-    #[error("Sandbox Version Mismatch: expected {0}, found: {1}")]
-    SandboxVersionMismatch(i32, i32),
+    #[error("Folio Version Mismatch: expected {0}, found: {1}")]
+    FolioVersionMismatch(i32, i32),
 }
 
 #[derive(Default, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -226,7 +228,7 @@ pub struct ChatMsg {
     pub msg_role: MsgRole,
     pub content: String,
     pub preset_id: i64,
-    pub preset: Option<Preset>,
+    pub preset: Option<ModelPreset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -308,8 +310,8 @@ pub struct Agent {
     pub name: String,
     pub agent_ind: usize,
     pub msg_ids: Vec<i64>,
-    pub preset_selection: PresetSelection,
-    pub preset: Option<Preset>,
+    pub preset_selection: ModelPresetSelection,
+    pub preset: Option<ModelPreset>,
     pub muted: bool,
     pub hidden: bool, // not showing in the bottom panel, Omnis has hidden=true
     pub deleted: bool,
@@ -474,11 +476,11 @@ pub fn get_custom_openr_configs() -> Vec<CustomOpenrConfig> {
     configs
 }
 
-// Preset is the essential data structure, because it will hide all
-// the llm options under a unique short title and an optional explanation
-// (tooltip), so that it can be stored in the database, in json format and so on
+// A ModelPreset is a named set of LLM parameters: router, model and options
+// under a unique short title and an optional explanation (tooltip), so that
+// it can be stored in the database, in json format and so on
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
-pub struct Preset {
+pub struct ModelPreset {
     pub id: i64,
     pub title: String,
     pub tooltip: String,
@@ -489,14 +491,13 @@ pub struct Preset {
     pub deleted: bool,
     #[serde(skip)]
     pub api_key: ApiKey,
-    pub inforno_preset: i32, // version info only used for exporting to json
 }
 
-impl Default for Preset {
+impl Default for ModelPreset {
     fn default() -> Self {
         Self {
             id: 0,
-            title: "Unnamed Preset".to_string(),
+            title: "Unnamed Model Preset".to_string(),
             tooltip: "".to_string(),
             chat_router: ChatRouter::Ollama,
             model: "".to_string(),
@@ -504,20 +505,15 @@ impl Default for Preset {
             hidden: false,
             deleted: false,
             api_key: ApiKey::default(),
-            inforno_preset: CURRENT_SANDBOX_VERSION,
         }
     }
 }
 
-impl Preset {
-    /// Serializes self to a JSON string.
-    /// automatically updates 'inforno_preset' to the current version before export.
+impl ModelPreset {
+    /// Serializes self to a JSON string. Snapshots live inside a Folio, so
+    /// the Folio's schema version is also theirs.
     pub fn to_json(&self) -> Option<String> {
-        // Clone to update version without mutating the live object
-        let mut export_copy = self.clone();
-        export_copy.inforno_preset = CURRENT_SANDBOX_VERSION;
-
-        match serde_json::to_string(&export_copy) {
+        match serde_json::to_string(self) {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("Error serializing preset '{}': {}", self.title, e);
@@ -526,18 +522,14 @@ impl Preset {
         }
     }
 
-    /// Deserializes from a JSON string (DB or File).
-    /// Handles legacy JSONs (missing 'inforno_preset') via serde defaults.
+    /// Deserializes a snapshot stored in the Folio. Snapshots written while
+    /// presets still carried an `inforno_preset` version stamp load as
+    /// well: serde skips keys it doesn't know.
     pub fn from_json(json_str: Option<&String>) -> Option<Self> {
         let s = json_str?;
 
-        match serde_json::from_str::<Preset>(s) {
-            Ok(p) => {
-                // (Optional) Migration Logic Placeholder
-                // if p.inforno_preset < CURRENT_SANDBOX_VERSION { ... }
-
-                Some(p)
-            },
+        match serde_json::from_str::<ModelPreset>(s) {
+            Ok(p) => Some(p),
             Err(e) => {
                 eprintln!("Error deserializing preset: {}", e);
                 None
@@ -546,19 +538,19 @@ impl Preset {
     }
 }
 
-// all presets from the database will be stored here:
+// all model presets from the database are kept here:
 #[derive(Default)]
-pub struct Presets {
-    pub hash: HashMap<i64, Preset>,
+pub struct ModelPresets {
+    pub hash: HashMap<i64, ModelPreset>,
     pub cache: Vec<(i64, String)>,
 
     // increment this whenever 'hash' or 'cache' is modified
     generation: usize,
 }
 
-impl Presets {
-    // get a preset by id
-    pub fn get(&self, id: i64) -> Option<&Preset> {
+impl ModelPresets {
+    // get a model preset by id
+    pub fn get(&self, id: i64) -> Option<&ModelPreset> {
         self.hash.get(&id)
     }
 
@@ -573,7 +565,7 @@ impl Presets {
     }
 
     /// Replaces all current presets with new ones loaded from DB
-    pub fn replace_all(&mut self, new_presets: Vec<Preset>) {
+    pub fn replace_all(&mut self, new_presets: Vec<ModelPreset>) {
         self.hash.clear();
         self.cache.clear();
 
@@ -590,8 +582,8 @@ impl Presets {
     }
 }
 
-pub fn load_presets(conn: &rusqlite::Connection, presets: &mut Presets) {
-    match crate::db::load_presets_vec(conn) {
+pub fn load_model_presets(conn: &rusqlite::Connection, presets: &mut ModelPresets) {
+    match crate::db::load_model_presets_vec(conn) {
         Ok(val) => {
             presets.replace_all(val);
         },
@@ -601,9 +593,10 @@ pub fn load_presets(conn: &rusqlite::Connection, presets: &mut Presets) {
     }
 }
 
-// selection stores both index in the Presets::cache array and Preset id in db
+// selection stores both index in the ModelPresets::cache array and the
+// ModelPreset id in db
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct PresetSelection {
+pub struct ModelPresetSelection {
     pub ind: usize,
     pub id: i64,
     pub title: String,
@@ -611,7 +604,7 @@ pub struct PresetSelection {
     last_sync_gen: usize,
 }
 
-impl Default for PresetSelection {
+impl Default for ModelPresetSelection {
     fn default() -> Self {
         Self {
             ind: usize::MAX,
@@ -622,8 +615,8 @@ impl Default for PresetSelection {
     }
 }
 
-impl PresetSelection {
-    pub fn from_id(id: i64, presets: &Presets) -> Self {
+impl ModelPresetSelection {
+    pub fn from_id(id: i64, presets: &ModelPresets) -> Self {
         // 1. Create a default instance
         // We need 'mut' because sync_with_presets requires a mutable reference
         let mut selection = Self::default();
@@ -638,7 +631,7 @@ impl PresetSelection {
         selection
     }
 
-    pub fn sync_with_presets(&mut self, presets: &Presets) {
+    pub fn sync_with_presets(&mut self, presets: &ModelPresets) {
         if self.ind == usize::MAX {
             if let Some(position) = presets.cache.iter()
                     .position(|(id, _)| *id == self.id) {
@@ -713,7 +706,7 @@ pub struct OllamaDownloading {
 #[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ChatQue {
     pub agent_ind: usize,
-    pub preset: Preset,
+    pub preset: ModelPreset,
     pub chat: Arc<Chat>,
 }
 

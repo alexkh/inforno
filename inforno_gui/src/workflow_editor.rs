@@ -6,7 +6,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_snarl::{ui::{PinInfo, SnarlPin, SnarlViewer}, InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
-use inforno_core::common::{Agent, Chat, ChatMsg, ChatQue, ChatRouter, MsgRole, Preset};
+use inforno_core::common::{Agent, Chat, ChatMsg, ChatQue, ChatRouter, MsgRole, ModelPreset};
 use rucomfyui::object_info::{Object, ObjectInfo, ObjectInputMetaTyped, ObjectType};
 
 use crate::state::State;
@@ -20,15 +20,15 @@ use crate::state::State;
 /// part of the graph.
 ///
 /// SECURITY INVARIANT: `OllamaPrompt`/`OpenRouterPrompt` store only a
-/// `preset_id` (an integer) and plain prompt text -- never a `Preset` or
-/// `ApiKey`. The OpenRouter key lives only in `State::openrouter_api_key`
-/// (loaded once from keyring/env/`.env`) and is resolved into a `Preset`
-/// fresh on every Play click, inside `ui_workflow_editor`, as a function-
-/// local value that is never written back into this enum, into
-/// `WorkflowEditorState`, or into the ComfyUI JSON payload. If this graph
-/// is ever made `Serialize` (e.g. for a "save workflow" feature), that
-/// stays safe only as long as no variant here grows a `Preset`/`ApiKey`
-/// field -- don't add one.
+/// `preset_id` (an integer) and plain prompt text -- never a `ModelPreset`
+/// or `ApiKey`. The OpenRouter key lives only in `State::openrouter_api_key`
+/// (loaded from the vault, or entered for this session) and is resolved
+/// into a `ModelPreset` fresh on every Play click, inside
+/// `ui_workflow_editor`, as a function-local value that is never written
+/// back into this enum, into `WorkflowEditorState`, or into the ComfyUI JSON
+/// payload. If this graph is ever made `Serialize` (e.g. for a "save
+/// workflow" feature), that stays safe only as long as no variant here grows
+/// a `ModelPreset`/`ApiKey` field -- don't add one.
 #[derive(Clone)]
 pub enum InfornoNode {
     /// A real ComfyUI node. `class_type` is the key into `/object_info`.
@@ -314,7 +314,7 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
         // Comfy nodes are completely skipped here since has_body returns false for them.
         if let InfornoNode::OllamaPrompt { preset_id, system_prompt, user_prompt }
             | InfornoNode::OpenRouterPrompt { preset_id, system_prompt, user_prompt } = &mut snarl[node_id] {
-            ui.horizontal(|ui| { ui.label("preset id:"); ui.add(egui::DragValue::new(preset_id)); });
+            ui.horizontal(|ui| { ui.label("model preset id:"); ui.add(egui::DragValue::new(preset_id)); });
             ui.label("system:");
             ui.add_sized(
                 egui::vec2(FIELD_WIDTH, ui.spacing().interact_size.y * 2.0),
@@ -993,7 +993,7 @@ fn build_pre_prompt(snarl: &Snarl<InfornoNode>, object_info: &ObjectInfo)
 /// `api_key` set -- see the resolution step in `ui_workflow_editor`'s Play
 /// button, which builds one of these per LLM node before this ever runs on
 /// the background thread.
-async fn run_llm_node(node: &InfornoNode, preset: &Preset) -> Result<String, String> {
+async fn run_llm_node(node: &InfornoNode, preset: &ModelPreset) -> Result<String, String> {
     let (router_hint, system_prompt, user_prompt) = match node {
         InfornoNode::OllamaPrompt { system_prompt, user_prompt, .. } => (ChatRouter::Ollama, system_prompt, user_prompt),
         InfornoNode::OpenRouterPrompt { system_prompt, user_prompt, .. } => (ChatRouter::Openrouter, system_prompt, user_prompt),
@@ -1027,7 +1027,7 @@ async fn run_llm_node(node: &InfornoNode, preset: &Preset) -> Result<String, Str
 /// Phase 2 + submission: runs every referenced LLM node, fills in the
 /// `PendingText` markers, serializes the final ComfyUI `/prompt` payload,
 /// and posts it -- all on a background thread so the UI never blocks.
-fn resolve_and_queue(comfy_url: String, snarl: &Snarl<InfornoNode>, object_info: &ObjectInfo, resolved_presets: HashMap<NodeId, Preset>,
+fn resolve_and_queue(comfy_url: String, snarl: &Snarl<InfornoNode>, object_info: &ObjectInfo, resolved_presets: HashMap<NodeId, ModelPreset>,
         last_result: Arc<Mutex<Option<Result<String, String>>>>, in_flight: Arc<Mutex<bool>>) {
     let (pre_prompt, used_llm_nodes) = build_pre_prompt(snarl, object_info);
     let llm_nodes: Vec<(NodeId, InfornoNode)> = used_llm_nodes.into_iter()

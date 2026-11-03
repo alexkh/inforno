@@ -1,11 +1,11 @@
 use egui::{Vec2b, Window};
 use rust_i18n::t;
 use inforno_core::common::ModelOptions;
-use inforno_core::db::update_agent_preset_snapshot;
+use inforno_core::db::update_agent_model_preset_snapshot;
 use crate::state::State;
 // Import the reusable components
-use crate::preset_editor::{
-    PresetEditorState, render_common_options,
+use crate::model_preset_editor::{
+    ModelPresetEditorState, render_common_options,
 };
 
 /// The state specific to the Agent Config Window
@@ -14,7 +14,7 @@ pub struct AgentConfigState {
     pub is_open: bool,
     pub target_agent_id: Option<i64>, // the db id of the agent we are modifying
     pub target_agent_ind: Option<usize>, // index inside Chat
-    pub editor_state: PresetEditorState, // reusing the editor state struct
+    pub editor_state: ModelPresetEditorState, // reusing the editor state struct
 }
 
 pub fn ui_agent_config(ctx: &egui::Context, state: &mut State) {
@@ -89,11 +89,11 @@ fn save_agent_preset(state: &mut State) {
         if let Some(agent_ind) = state.agent_config_state.target_agent_ind {
             let agent = &mut chat.agents[agent_ind];
             agent.preset = Some(edited.clone());
-            let result = update_agent_preset_snapshot(&state.db_conn, agent.id, agent.preset.as_ref());
+            let result = update_agent_model_preset_snapshot(&state.db_conn, agent.id, agent.preset.as_ref());
 
             if result.is_err() {
                 state.error_msg =
-                    Some(t!("error_saving_agent_config_to_sandbox").to_string());
+                    Some(t!("error_saving_agent_config_to_folio").to_string());
                 state.is_modal_open = true;
             }
         }

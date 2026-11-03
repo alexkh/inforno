@@ -2,30 +2,30 @@ menu_api_keys_btn: "API Keys"
 menu_api_keys_btn_tooltip: >
   Set your Openrouter API Key if you intend to use Openrouter.
   If you only plan to use Ollama, you don't need an API key.
-menu_presets_btn: "Presets"
+menu_presets_btn: "Model Presets"
 menu_presets_btn_tooltip: >
-  Presets allow selecting the Model in the chat pane with all their
+  Model Presets let you pick a Model in the chat pane together with all its
   pre-configured options.
 menu_dark_theme_btn: "🌙"
 menu_dark_theme_btn_tooltip: "Switch to the Dark Theme"
 menu_light_theme_btn: "🔆"
 menu_light_theme_btn_tooltip: "Switch to the Light Theme"
-menu_sandbox: "Sandbox"
-menu_sandbox_tooltip: >
-  A Default Sandbox is used on startup, but it can be moved to an external file,
-  copied (staying in the Default one), or cleared using this menu.
-menu_sandbox_save_as_btn: "➡💾 Save As ..."
-menu_sandbox_save_as_btn_tooltip: "Move the Current Sandbox to a New Location and Switch to It"
-menu_sandbox_save_copy_btn: "🔁💾 Save a Copy..."
-menu_sandbox_save_copy_btn_tooltip: "Duplicate, but Stay in the Current Sandbox"
-menu_sandbox_open_btn: "🗁 Open"
-menu_sandbox_open_btn_tooltip: "Open a previously saved Sandbox file"
-menu_sandbox_home_btn: "🏠"
-menu_sandbox_home_btn_tooltip: "Close this Sandbox and go back to Home Sandbox"
-menu_sandbox_clear: "✖ Clear the Current Sandbox. No Undo!"
-preset_editor: "Preset Editor"
-preset_editor_invitation: "Here you can create a new preset or Edit/Clone existing one:"
-preset_new_btn: "New Preset"
+menu_folio: "Folio"
+menu_folio_tooltip: >
+  The Home Folio is used on startup, but it can be moved to an external file,
+  copied (staying in the Home one), or cleared using this menu.
+menu_folio_save_as_btn: "➡💾 Save As ..."
+menu_folio_save_as_btn_tooltip: "Move the Current Folio to a New Location and Switch to It"
+menu_folio_save_copy_btn: "🔁💾 Save a Copy..."
+menu_folio_save_copy_btn_tooltip: "Duplicate, but Stay in the Current Folio"
+menu_folio_open_btn: "🗁 Open"
+menu_folio_open_btn_tooltip: "Open a previously saved Folio file"
+menu_folio_home_btn: "🏠"
+menu_folio_home_btn_tooltip: "Close this Folio and go back to the Home Folio"
+menu_folio_clear: "✖ Clear the Current Folio. No Undo!"
+preset_editor: "Model Preset Editor"
+preset_editor_invitation: "Here you can create a new model preset or edit/clone an existing one:"
+preset_new_btn: "New Model Preset"
 preset_or_select_existing_one: "| or select existing one:"
 preset_edit_btn: "Edit"
 preset_duplicate_btn: "Duplicate"
@@ -37,7 +37,7 @@ preset_save_a_copy_btn: "Save a Copy"
 preset_delete_menu: "Delete..."
 preset_delete_cancel: "Cancel"
 preset_delete_btn: "Delete"
-preset_delete_btn_tooltip: "Delete this Preset. Warning: No Undo!"
+preset_delete_btn_tooltip: "Delete this Model Preset. Warning: No Undo!"
 preset_select_a_model: "Select a Model:"
 delete_chat_tooltip: "Delete Chat. No Undo!"
 api_key_manager: "API Key Manager"
@@ -67,7 +67,7 @@ error_deleting_key_from_keyring: "Error deleting the key from the system keyring
 key_active: >
   Right now, an Openrouter API Key is active.
   You don't need to enter anything here.
-select_a_preset: "Select a Preset..."
+select_a_preset: "Select a Model Preset..."
 toggle_system_prompt: "Enable/Disable System Prompt"
 system_prompt_optional: "System Prompt (Optional)"
 enter_prompt_here: "Enter Your Prompt Here"
@@ -111,7 +111,7 @@ welcome_tour: |
   Ollama for such requests. And remember in any case: LLM's are not the source
   of truth. Check responses and always use your own judgement!
 
-  If you open the Presets window and click the New Preset button, you will see
+  If you open the Model Presets window and click the New Model Preset button, you will see
   the Select a Router radio buttons: Ollama or Openrouter. If you select Ollama,
   make sure that Ollama is running on your computer. You can then
   start typing ino the Select a Model tab and the autocomplete will suggest the
@@ -128,7 +128,7 @@ welcome_tour: |
   that are needed to use OpenRouter service from a third-party application. You
   can also go into Chat pane and try their online interface, which has similar
   functionality to what Inforno does. One advantage of Inforno, is that it
-  stores the chat history in a local Sandbox file that can be saved as a copy,
+  stores the chat history in a local Folio file that can be saved as a copy,
   opened later and shared wih other Inforno users.
 
   Once API Key is created you can press API Keys button and copy/paste the key
@@ -136,15 +136,15 @@ welcome_tour: |
   System Keyring or just use it until you exit the application (if this is not
   your computer, for example).
 
-  You can now enter your prompts in the Chat pane, select presets to send the
+  You can now enter your prompts in the Chat pane, select model presets to send the
   prompts to and press the Send Prommpt button. All the replies are
-  automatically saved in a local file. The Sandbox menu allows you to save The
+  automatically saved in a local file. The Folio menu allows you to save The
   chat history file. Save As... means it will be moved from the default app data
   directory which is ~./local/shared/inforno/info.rno in Linux or
   C:/users/user/appdata/roaming/inforno/info.rno in Windows to a specified
   location. It can then be opened next time you use Inforno by using the Open
-  button. The Save A Copy... button allows you to save the Sandbox ot a specified
-  file, but stay in the default sandbox. You can also clear the Sandbox if
+  button. The Save A Copy... button allows you to save the Folio to a specified
+  file, but stay in the default Folio. You can also clear the Folio if
   you want.
 
   The Prompt editor in the bottom allows you to add a System prompt. There is a
@@ -163,13 +163,13 @@ welcome_tour: |
 
   To start a new notebook, create a Note by entering text in the text input
   just below this message and press Ctrl+Enter. To start a new chat instead,
-  write the Prompt into the textbox in the bottom panel, sleect a Preset and
+  write the Prompt into the textbox in the bottom panel, select a Model Preset and
   click "Send Prompt" button or press Ctrl+Enter.
 
-error_no_agent_preset_selected: "Error: no agent has a valid preset selected!"
+error_no_agent_preset_selected: "Error: no agent has a valid model preset selected!"
 error_empty_prompt: "Error: no prompt text entered!"
 agent_config_window_title: "Agent Config"
-config_editor_invitation: "Here you can override preset settings for an agent without modifying the preset itslef:"
+config_editor_invitation: "Here you can override model preset settings for an agent without modifying the model preset itself:"
 include_reasoning: "Include reasoning?"
 currently: "Initially"
 unset: "Unset"
@@ -179,7 +179,7 @@ seed: "Seed"
 generate_random_seed_btn: "Generate Random Seed"
 temperature_range: "Temperature (0.0-2.0)"
 agent_config_save_changes_btn: "Save Agent Config Changes"
-error_saving_agent_config_to_sandbox: "Error saving agent config to Sandbox"
+error_saving_agent_config_to_folio: "Error saving agent config to Folio"
 revert_to_initial_tooltip: "Revert to initial value"
 cancel_btn: "Cancel"
 router_label: "Router:"

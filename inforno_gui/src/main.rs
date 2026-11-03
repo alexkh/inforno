@@ -1,14 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 use clap::Parser;
 
 use crate::state::MyAppPermanent;
 
-// TEMP: heap profiling (remove after debugging).
+// Heap profiling, only with `--features dhat-heap` (run with DHAT=1).
+// dhat's allocator wraps every allocation, so normal builds don't get it.
+#[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
@@ -22,7 +22,7 @@ mod chat;
 mod emoji_render;
 mod key_manager;
 mod panes;
-mod preset_editor;
+mod model_preset_editor;
 mod search_highlight;
 mod side_panel;
 mod split_button;
@@ -38,10 +38,10 @@ struct Args {
     // Set the application theme (e.g., "light", "dark")
     theme: Option<String>,
     #[arg(long)]
-    sandbox: Option<String>,
+    folio: Option<String>,
     #[arg(long)]
     la: Option<String>,
-    // Optional project directory to load a local Sandbox from
+    // Optional name of a Realm to open (same as --realm)
     #[arg(required = false)]
     project_dir: Option<String>,
     #[arg(long)]
@@ -68,35 +68,46 @@ fn main() -> eframe::Result {
         .expect("can't start the Tokio runtime");
     let _enter = rt.enter();
     // Tracy queues every span in RAM until a viewer attaches, and the chat
-    // view emits many spans per frame, so only enable it on demand.
-    if std::env::var_os("INFORNO_TRACY").is_some() {
-        tracing_subscriber::registry()
-            .with(tracing_tracy::TracyLayer::default())
-            .init();
+    // view emits many spans per frame, so only enable it on demand: build
+    // with `--features tracy`, run with INFORNO_TRACY=1. Without a
+    // subscriber, `#[tracing::instrument]` spans cost next to nothing.
+    #[cfg(feature = "tracy")]
+    {
+        if std::env::var_os("INFORNO_TRACY").is_some() {
+            use tracing_subscriber::prelude::*;
+            tracing_subscriber::registry()
+                .with(tracing_tracy::TracyLayer::default())
+                .init();
+        }
     }
 
-    // TEMP: run with DHAT=1. Close the window normally (no Ctrl+C) so
-    // dhat-heap.json gets written.
+    // Heap profiling (`--features dhat-heap`): run with DHAT=1 and close the
+    // window normally (no Ctrl+C) so dhat-heap.json gets written. `_dhat`
+    // must live until main returns, so it stays outside the block.
+    #[cfg(feature = "dhat-heap")]
     let _dhat = std::env::var_os("DHAT").map(|_| dhat::Profiler::new_heap());
-    if std::env::var_os("DHAT").is_some() {
-        std::thread::spawn(|| loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let heap = dhat::HeapStats::get();
-            let rss_mb = std::fs::read_to_string("/proc/self/statm")
-                .ok()
-                .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
-                .map_or(0, |pages| pages * 4096 / 1_048_576);
-            eprintln!(
-                "DHAT rust_heap={} MB blocks={} rss={} MB",
-                heap.curr_bytes / 1_048_576, heap.curr_blocks, rss_mb
-            );
-        });
+    #[cfg(feature = "dhat-heap")]
+    {
+        if std::env::var_os("DHAT").is_some() {
+            std::thread::spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let heap = dhat::HeapStats::get();
+                let rss_mb = std::fs::read_to_string("/proc/self/statm")
+                    .ok()
+                    .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
+                    .map_or(0, |pages| pages * 4096 / 1_048_576);
+                eprintln!(
+                    "DHAT rust_heap={} MB blocks={} rss={} MB",
+                    heap.curr_bytes / 1_048_576, heap.curr_blocks, rss_mb
+                );
+            });
+        }
     }
 
     let args = Args::parse();
 
     // Inforno's vault: opened once, before eframe starts wgpu, and kept
-    // across sandbox reloads (vaultorno design doc §15).
+    // across Folio reloads (vaultorno design doc §15).
     let (keys, opened) = inforno_core::api_keys::KeyStore::open();
     let vault_notices = vault_notices(&keys, opened);
 
@@ -176,9 +187,7 @@ fn main() -> eframe::Result {
                 style.url_in_tooltip = true;
             });
 
-            let sandbox_string = args.sandbox;
-            let mut sandbox: Option<PathBuf> = sandbox_string.map(PathBuf::from);
-            let pending_project_init: Option<PathBuf> = None;
+            let mut folio: Option<PathBuf> = args.folio.map(PathBuf::from);
             let mut active_realm_name: Option<String> = None;
 
             // Determine target realm (CLI arg or positional argument takes top priority over global config)
@@ -211,13 +220,12 @@ fn main() -> eframe::Result {
                 }
             }
 
-            let mut realm_awaiting_sandbox: Option<String> = None;
+            let mut realm_awaiting_folio: Option<String> = None;
 
             if let Some(realm_name) = target_realm {
-                // Booting into a Realm Environment. Realms and Sandboxes are fully
-                // decoupled: the Sandbox is whatever this Realm's config resolves
-                // it to (a Study-backed file, or an explicit path), never
-                // something implied by realm_dir.
+                // Booting into a Realm Environment. Realms and Folios are fully
+                // decoupled: the Folio is whatever path this Realm's config
+                // links to, never something implied by realm_dir.
                 if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
                     let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
                     let yaml_path = realm_dir.join("realm2.yml");
@@ -225,16 +233,16 @@ fn main() -> eframe::Result {
                     match std::fs::read_to_string(&yaml_path) {
                         Ok(config_str) => match serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
                             Ok(realm_config) => {
-                                match inforno_core::realm::resolve_default_sandbox_path(&realm_config) {
+                                match inforno_core::realm::resolve_default_folio_path(&realm_config) {
                                     Ok(resolved) => {
-                                        sandbox = Some(resolved);
+                                        folio = Some(resolved);
                                         active_realm_name = Some(realm_name.clone());
                                     }
                                     Err(reason) => {
-                                        let err_msg = format!("Realm '{}' has no default sandbox yet ({}); will prompt to create one.", realm_name, reason);
+                                        let err_msg = format!("Realm '{}' has no default Folio yet ({}); will prompt to create one.", realm_name, reason);
                                         eprintln!("{}", err_msg);
                                         cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
-                                        realm_awaiting_sandbox = Some(realm_name.clone());
+                                        realm_awaiting_folio = Some(realm_name.clone());
                                     }
                                 }
                             }
@@ -256,12 +264,10 @@ fn main() -> eframe::Result {
                     }
                 }
             }
-            // NOTE: `inforno <directory>` no longer auto-opens or offers to
-            // create a bare `.inforno/info.rno` Project sandbox. A
-            // directory-rooted sandbox is still supported, but only by
-            // pointing a Realm's `sandboxes:` entry at it, or by opening it
-            // explicitly via the in-app "Open Sandbox" dialog. `_positional_path`
-            // is intentionally unused for this purpose now.
+            // NOTE: nothing is created inside projects any more. `inforno
+            // <name>` opens the Realm `<name>`; a Folio is opened through a
+            // Realm's `folios:` entry, `--folio`, or the in-app "Open"
+            // dialog. `positional_path` is intentionally unused now.
             let _ = positional_path;
 
             configure_fonts(&cc.egui_ctx);
@@ -270,10 +276,9 @@ fn main() -> eframe::Result {
                 rt: rt_handle,
                 keys,
                 vault_notices: std::sync::Mutex::new(Some(vault_notices)),
-                sandbox,
-                pending_project_init: std::sync::Mutex::new(pending_project_init),
+                folio,
                 active_realm_name: std::sync::Mutex::new(active_realm_name),
-                realm_awaiting_sandbox: std::sync::Mutex::new(realm_awaiting_sandbox),
+                realm_awaiting_folio: std::sync::Mutex::new(realm_awaiting_folio),
                 app_language: std::sync::Mutex::new(app_language),
             })))
         }),

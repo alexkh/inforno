@@ -219,7 +219,7 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                                             state.file_dialog = egui_file_dialog::FileDialog::new()
                                                 .default_file_name(&default_name) // <--- Pass it as a reference (&str)
                                                 .add_file_filter(
-                                                    "Inforno Sandbox",
+                                                    "Markdown",
                                                     egui_file_dialog::Filter::new(|p: &std::path::Path| {
                                                         p.extension().is_some_and(|ext| ext == "md")
                                                     })
@@ -240,9 +240,9 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                                             state.file_dialog = egui_file_dialog::FileDialog::new()
                                                 .default_file_name(&default_name)
                                                 .add_file_filter(
-                                                    "Inforno Sandbox",
+                                                    "Inforno Notebook",
                                                     egui_file_dialog::Filter::new(|p: &std::path::Path| {
-                                                        p.extension().is_some_and(|ext| ext == "rno")
+                                                        p.extension().is_some_and(|ext| ext == "ron")
                                                     })
                                                 );
                                             state.file_dialog.save_file();
@@ -427,7 +427,7 @@ fn save_rename(state: &mut State, chat_id: i64) {
         // Update DB
         if let Err(error) = inforno_core::db::mod_chat_title(&state.db_conn,
                 chat_id, &clean_title) {
-            println!("Error: could not rename chat in the Sandbox: {}", error);
+            println!("Error: could not rename chat in the Folio: {}", error);
             return;
         }
 

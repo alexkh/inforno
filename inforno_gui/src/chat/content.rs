@@ -12,7 +12,7 @@ use egui_commonmark::CommonMarkViewer;
 use regex::Regex;
 use rust_i18n::t;
 
-use inforno_core::common::{ChatMsg, FileOp, FileOpMsg};
+use inforno_core::common::{ChatMsg, FileOp, FileOpMsg, MsgRole};
 use inforno_core::parsing::{ContentChunk, parse_chunks};
 use inforno_core::realm::ActiveRealm;
 
@@ -60,7 +60,10 @@ pub(super) fn render_msg_content(
             }
             ContentChunk::Code { lang, code, filepath } => {
                 let mime_type = resolve_mime(lang, filepath.as_deref());
-                if mime_type == "application/x-rhai" {
+                // Only note cells may run scripts. Rhai anywhere else, model
+                // replies above all, renders as plain code: one click must
+                // never execute what a model wrote (Rhai can reach autorno_run).
+                if mime_type == "application/x-rhai" && msg.msg_role == MsgRole::Developer {
                     render_rhai_block(
                         ui, msg, i, code,
                         &mut actions.rhai_updates, &mut actions.llm_prompt_request,

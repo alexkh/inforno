@@ -55,13 +55,13 @@ pub struct RealmConfigState {
     pub role_edit_env: Vec<String>,
     pub role_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
 
-    // --- Visual Builder: Sandbox Edit State ---
-    pub is_editing_sandbox: bool,
-    pub sandbox_edit_original_key: Option<String>, // None means "Adding new"
-    pub sandbox_edit_key: String,
-    pub sandbox_edit_comment: String,
-    pub sandbox_edit_path: String,
-    pub sandbox_edit_roles: Vec<String>,
+    // --- Visual Builder: Folio Edit State ---
+    pub is_editing_folio: bool,
+    pub folio_edit_original_key: Option<String>, // None means "Adding new"
+    pub folio_edit_key: String,
+    pub folio_edit_comment: String,
+    pub folio_edit_path: String,
+    pub folio_edit_roles: Vec<String>,
 
     pub cached_config: Option<inforno_core::realm::RealmConfig>,
     pub show_save_confirmation: bool,
@@ -81,7 +81,7 @@ pub struct RealmConfigState {
     pub wizard_step: usize,
     pub wizard_project_type: usize,
     pub wizard_realm_name: String,
-    pub wizard_sandbox_option: usize,
+    pub wizard_folio_option: usize,
     pub wizard_mic_device: String,
     pub wizard_speaker_device: String,
     /// Lazily populated (mic devices, speaker devices) from the host,
@@ -171,20 +171,20 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                                                 *lock = Some(realm_name.clone());
                                             }
 
-                                            let target_sandbox = match inforno_core::realm::resolve_default_sandbox_path(&new_config) {
+                                            let target_folio = match inforno_core::realm::resolve_default_folio_path(&new_config) {
                                                 Ok(resolved) => resolved,
                                                 Err(_) => {
-                                                    if let Ok(mut lock) = state.perma.realm_awaiting_sandbox.lock() {
+                                                    if let Ok(mut lock) = state.perma.realm_awaiting_folio.lock() {
                                                         *lock = Some(realm_name.clone());
                                                     }
-                                                    state.sandbox.clone()
+                                                    state.folio.clone()
                                                 }
                                             };
 
                                             // Cache the text so we can reinject it into the fresh state
                                             let cached_yaml = state.realm_config_state.yaml_buffer.clone();
 
-                                            state.reload(Some(target_sandbox));
+                                            state.reload(Some(target_folio));
 
                                             // Repopulate the fresh state so the window doesn't go blank!
                                             state.realm_config_state.yaml_buffer = cached_yaml.clone();
@@ -298,17 +298,17 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
             if state.realm_config_state.needs_reload {
                 state.realm_config_state.needs_reload = false;
 
-                let mut target_sandbox = state.sandbox.clone();
+                let mut target_folio = state.folio.clone();
                 if state.realm_config_state.is_fixing_broken_realm {
                     if let Some(r_name) = &state.realm_config_state.realm_name {
                         if let Ok(mut lock) = state.perma.active_realm_name.lock() {
                             *lock = Some(r_name.clone());
                         }
                         if let Ok(new_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&state.realm_config_state.yaml_buffer) {
-                            match inforno_core::realm::resolve_default_sandbox_path(&new_config) {
-                                Ok(resolved) => target_sandbox = resolved,
+                            match inforno_core::realm::resolve_default_folio_path(&new_config) {
+                                Ok(resolved) => target_folio = resolved,
                                 Err(_) => {
-                                    if let Ok(mut lock) = state.perma.realm_awaiting_sandbox.lock() {
+                                    if let Ok(mut lock) = state.perma.realm_awaiting_folio.lock() {
                                         *lock = Some(r_name.clone());
                                     }
                                 }
@@ -317,7 +317,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                     }
                 }
                 state.realm_config_state.is_fixing_broken_realm = false;
-                state.reload(Some(target_sandbox));
+                state.reload(Some(target_folio));
             } else if state.realm_config_state.is_fixing_broken_realm {
                 state.realm_config_state.is_fixing_broken_realm = false;
             }
@@ -354,17 +354,17 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                         state.realm_config_state.show_save_confirmation = false;
                         is_open = false;
 
-                        let mut target_sandbox = state.sandbox.clone();
+                        let mut target_folio = state.folio.clone();
                         if state.realm_config_state.is_fixing_broken_realm {
                             if let Some(r_name) = &state.realm_config_state.realm_name {
                                 if let Ok(mut lock) = state.perma.active_realm_name.lock() {
                                     *lock = Some(r_name.clone());
                                 }
                                 if let Ok(new_config) = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&state.realm_config_state.yaml_buffer) {
-                                    match inforno_core::realm::resolve_default_sandbox_path(&new_config) {
-                                        Ok(resolved) => target_sandbox = resolved,
+                                    match inforno_core::realm::resolve_default_folio_path(&new_config) {
+                                        Ok(resolved) => target_folio = resolved,
                                         Err(_) => {
-                                            if let Ok(mut lock) = state.perma.realm_awaiting_sandbox.lock() {
+                                            if let Ok(mut lock) = state.perma.realm_awaiting_folio.lock() {
                                                 *lock = Some(r_name.clone());
                                             }
                                         }
@@ -374,7 +374,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                         }
                         state.realm_config_state.is_fixing_broken_realm = false;
                         state.realm_config_state.needs_reload = false;
-                        state.reload(Some(target_sandbox));
+                        state.reload(Some(target_folio));
                     }
                     if ui.button("🗑 Discard & Close").clicked() {
                         state.realm_config_state.yaml_buffer = state.realm_config_state.original_yaml.clone();
@@ -384,7 +384,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
                         if state.realm_config_state.needs_reload {
                             state.realm_config_state.needs_reload = false;
-                            state.reload(Some(state.sandbox.clone()));
+                            state.reload(Some(state.folio.clone()));
                         }
                         state.realm_config_state.is_fixing_broken_realm = false;
                     }
@@ -1156,45 +1156,45 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
         });
     ui.add_space(10.0);
 
-    egui::CollapsingHeader::new(format!("📦 Sandboxes ({})", parsed_config.sandboxes.len()))
+    egui::CollapsingHeader::new(format!("📦 Folios ({})", parsed_config.folios.len()))
         .show(ui, |ui| {
-            if substate.is_editing_sandbox {
+            if substate.is_editing_folio {
                 ui.group(|ui| {
-                    ui.heading(if substate.sandbox_edit_original_key.is_some() { "Edit Sandbox" } else { "Add Sandbox" });
+                    ui.heading(if substate.folio_edit_original_key.is_some() { "Edit Folio" } else { "Add Folio" });
 
                     ui.horizontal(|ui| {
                         ui.label("Name:");
-                        ui.text_edit_singleline(&mut substate.sandbox_edit_key);
+                        ui.text_edit_singleline(&mut substate.folio_edit_key);
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Comment:");
-                        ui.text_edit_singleline(&mut substate.sandbox_edit_comment);
+                        ui.text_edit_singleline(&mut substate.folio_edit_comment);
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Path:");
-                        ui.text_edit_singleline(&mut substate.sandbox_edit_path);
+                        ui.text_edit_singleline(&mut substate.folio_edit_path);
                     });
                     ui.label(egui::RichText::new("Must be an absolute path ending in .rno").weak().small());
 
                     ui.add_space(5.0);
                     ui.label(egui::RichText::new("Authorized Roles:").strong());
-                    ui.indent("sandbox_roles_indent", |ui| {
+                    ui.indent("folio_roles_indent", |ui| {
                         for role_name in parsed_config.roles.keys() {
-                            let mut is_authorized = substate.sandbox_edit_roles.contains(role_name);
+                            let mut is_authorized = substate.folio_edit_roles.contains(role_name);
                             if ui.checkbox(&mut is_authorized, role_name).changed() {
                                 if is_authorized {
-                                    substate.sandbox_edit_roles.push(role_name.clone());
+                                    substate.folio_edit_roles.push(role_name.clone());
                                 } else {
-                                    substate.sandbox_edit_roles.retain(|r| r != role_name);
+                                    substate.folio_edit_roles.retain(|r| r != role_name);
                                 }
                             }
                         }
 
                         // Display a warning if a role is authorized but missing from the Realm configuration
                         let mut to_remove_role = None;
-                        for (i, role_name) in substate.sandbox_edit_roles.iter().enumerate() {
+                        for (i, role_name) in substate.folio_edit_roles.iter().enumerate() {
                             if !parsed_config.roles.contains_key(role_name) {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(format!("{} (Unknown Role)", role_name)).color(ui.visuals().error_fg_color));
@@ -1205,16 +1205,16 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             }
                         }
                         if let Some(i) = to_remove_role {
-                            substate.sandbox_edit_roles.remove(i);
+                            substate.folio_edit_roles.remove(i);
                         }
                     });
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let path_valid = std::path::Path::new(&substate.sandbox_edit_path).is_absolute() 
-                                      && substate.sandbox_edit_path.ends_with(".rno");
-                        let roles_valid = !substate.sandbox_edit_roles.is_empty();
-                        let key_valid = !substate.sandbox_edit_key.trim().is_empty();
+                        let path_valid = std::path::Path::new(&substate.folio_edit_path).is_absolute()
+                                      && substate.folio_edit_path.ends_with(".rno");
+                        let roles_valid = !substate.folio_edit_roles.is_empty();
+                        let key_valid = !substate.folio_edit_key.trim().is_empty();
                         
                         let can_apply = key_valid && path_valid && roles_valid;
 
@@ -1222,82 +1222,82 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                             .on_disabled_hover_text("Name required. Path must be absolute .rno. At least 1 role must be authorized.")
                             .clicked() {
                                 
-                            let new_key = substate.sandbox_edit_key.trim().to_string();
-                            let new_sandbox = serde_saphyr::Commented(
-                                inforno_core::realm::SandboxRef {
-                                    path: std::path::PathBuf::from(substate.sandbox_edit_path.trim()),
-                                    roles: substate.sandbox_edit_roles.clone(),
+                            let new_key = substate.folio_edit_key.trim().to_string();
+                            let new_folio = serde_saphyr::Commented(
+                                inforno_core::realm::FolioRef {
+                                    path: std::path::PathBuf::from(substate.folio_edit_path.trim()),
+                                    roles: substate.folio_edit_roles.clone(),
                                 },
-                                substate.sandbox_edit_comment.clone()
+                                substate.folio_edit_comment.clone()
                             );
 
-                            if let Some(ref orig_key) = substate.sandbox_edit_original_key {
-                                let mut new_sandboxes = indexmap::IndexMap::new();
-                                for (k, v) in parsed_config.sandboxes.iter() {
+                            if let Some(ref orig_key) = substate.folio_edit_original_key {
+                                let mut new_folios = indexmap::IndexMap::new();
+                                for (k, v) in parsed_config.folios.iter() {
                                     if k == orig_key {
-                                        new_sandboxes.insert(new_key.clone(), new_sandbox.clone());
+                                        new_folios.insert(new_key.clone(), new_folio.clone());
                                     } else {
-                                        new_sandboxes.insert(k.clone(), v.clone());
+                                        new_folios.insert(k.clone(), v.clone());
                                     }
                                 }
-                                new_config.sandboxes = new_sandboxes;
+                                new_config.folios = new_folios;
                             } else {
-                                new_config.sandboxes.insert(new_key, new_sandbox);
+                                new_config.folios.insert(new_key, new_folio);
                             }
 
                             config_changed = true;
-                            substate.is_editing_sandbox = false;
+                            substate.is_editing_folio = false;
                         }
 
                         if ui.button("✖ Cancel").clicked() {
-                            substate.is_editing_sandbox = false;
+                            substate.is_editing_folio = false;
                         }
                     });
                 });
             } else {
-                for (name, sandbox_cfg) in &parsed_config.sandboxes {
-                    let sandbox = &sandbox_cfg.0;
+                for (name, folio_cfg) in &parsed_config.folios {
+                    let folio = &folio_cfg.0;
                     ui.group(|ui| {
-                        if !sandbox_cfg.1.trim().is_empty() {
-                            ui.label(egui::RichText::new(format!("# {}", sandbox_cfg.1.trim())).weak());
+                        if !folio_cfg.1.trim().is_empty() {
+                            ui.label(egui::RichText::new(format!("# {}", folio_cfg.1.trim())).weak());
                         }
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(name).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("🗑").on_hover_text("Delete Sandbox").clicked() {
-                                    new_config.sandboxes.shift_remove(name);
+                                if ui.button("🗑").on_hover_text("Delete Folio").clicked() {
+                                    new_config.folios.shift_remove(name);
                                     config_changed = true;
                                 }
-                                if ui.button("✏").on_hover_text("Edit Sandbox").clicked() {
-                                    substate.is_editing_sandbox = true;
-                                    substate.sandbox_edit_original_key = Some(name.clone());
-                                    substate.sandbox_edit_key = name.clone();
-                                    substate.sandbox_edit_comment = sandbox_cfg.1.trim().to_string();
-                                    substate.sandbox_edit_path = sandbox.path.display().to_string();
-                                    substate.sandbox_edit_roles = sandbox.roles.clone();
+                                if ui.button("✏").on_hover_text("Edit Folio").clicked() {
+                                    substate.is_editing_folio = true;
+                                    substate.folio_edit_original_key = Some(name.clone());
+                                    substate.folio_edit_key = name.clone();
+                                    substate.folio_edit_comment = folio_cfg.1.trim().to_string();
+                                    substate.folio_edit_path = folio.path.display().to_string();
+                                    substate.folio_edit_roles = folio.roles.clone();
                                 }
                             });
                         });
-                        ui.label(format!("Path: {}", sandbox.path.display()));
-                        if !sandbox.roles.is_empty() {
-                            ui.label(format!("Roles: {}", sandbox.roles.join(", ")));
+                        ui.label(format!("Path: {}", folio.path.display()));
+                        if !folio.roles.is_empty() {
+                            ui.label(format!("Roles: {}", folio.roles.join(", ")));
                         }
                     });
                 }
-                if ui.button("+ Add Sandbox").clicked() {
-                    substate.is_editing_sandbox = true;
-                    substate.sandbox_edit_original_key = None;
-                    substate.sandbox_edit_key = "new_sandbox".to_string();
-                    substate.sandbox_edit_comment = "".to_string();
-                    substate.sandbox_edit_path = "/path/to/sandbox.rno".to_string();
-                    substate.sandbox_edit_roles = vec![];
+                if ui.button("+ Add Folio").clicked() {
+                    substate.is_editing_folio = true;
+                    substate.folio_edit_original_key = None;
+                    substate.folio_edit_key = "new_folio".to_string();
+                    substate.folio_edit_comment = "".to_string();
+                    substate.folio_edit_path = "/path/to/folio.rno".to_string();
+                    substate.folio_edit_roles = vec![];
                 }
             }
         });
 
     // If the visual builder produced changes, serialize them automatically back to the right-side text editor.
     // CommentPosition::Above (rather than the default Inline) is required here: Inline silently
-    // drops comments attached to non-scalar values (mounts/roles/tiers/sandboxes are all
+    // drops comments attached to non-scalar values (mounts/roles/tiers/folios are all
     // structs), so without this every comment on those would vanish the moment the Visual
     // Builder touches anything. This also changes how `places` comments render -- as a line
     // above the key instead of trailing on the same line -- rather than reflowing per field.
@@ -1416,7 +1416,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     i += 1;
                 }
 
-                // Pass 4: Collapse short arrays (like caps: and sandbox roles:) into inline flow style
+                // Pass 4: Collapse short arrays (like caps: and folio roles:) into inline flow style
                 let mut i = 0;
                 while i < lines.len() {
                     let trimmed = lines[i].trim();
@@ -1450,7 +1450,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                 }
 
                 // Pass 5: Insert empty lines between major top-level sections
-                let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "roles:", "sandboxes:", "bin:", "env:"];
+                let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "roles:", "folios:", "bin:", "env:"];
                 let mut i = 0;
                 while i < lines.len() {
                     if top_level_keys.contains(&lines[i].as_str()) {
@@ -1564,16 +1564,16 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                 });
 
                 ui.add_space(10.0);
-                ui.label("How would you like to initialize the sandbox?");
-                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 0, "Copy current sandbox into the new realm");
-                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 1, "Create a new empty sandbox (keep presets)");
-                ui.radio_value(&mut state.realm_config_state.wizard_sandbox_option, 2, "Create a totally empty sandbox");
+                ui.label("How would you like to initialize the Folio?");
+                ui.radio_value(&mut state.realm_config_state.wizard_folio_option, 0, "Copy current Folio into the new realm");
+                ui.radio_value(&mut state.realm_config_state.wizard_folio_option, 1, "Create a new empty Folio (keep presets)");
+                ui.radio_value(&mut state.realm_config_state.wizard_folio_option, 2, "Create a totally empty Folio");
 
                 if state.realm_config_state.wizard_project_type == 5 {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Audio Capabilities").strong());
-                    ui.label(egui::RichText::new("No disk mounts — this Realm only hears and speaks. The conversation itself still lives in the sandbox, as text.").weak());
+                    ui.label(egui::RichText::new("No disk mounts — this Realm only hears and speaks. The conversation itself still lives in the Folio, as text.").weak());
 
                     let (mic_options, speaker_options) = state.realm_config_state.wizard_audio_devices
                         .get_or_insert_with(enumerate_audio_devices)
@@ -1620,13 +1620,13 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                             let realm_dir = proj_dirs.config_dir().join("realms").join(&realm_name);
                             let _ = std::fs::create_dir_all(&realm_dir);
 
-                            let sandbox_dir = proj_dirs.data_dir().join("sandboxes");
-                            let _ = std::fs::create_dir_all(&sandbox_dir);
-                            let default_sandbox_path = sandbox_dir.join(format!("{}.rno", realm_name));
-                            let path_str = default_sandbox_path.to_string_lossy().replace('\\', "/");
+                            let folio_dir = proj_dirs.data_dir().join("folios");
+                            let _ = std::fs::create_dir_all(&folio_dir);
+                            let default_folio_path = folio_dir.join(format!("{}.rno", realm_name));
+                            let path_str = default_folio_path.to_string_lossy().replace('\\', "/");
                             
-                            // TODO: Handle actual SQLite sandbox file copying/creation logic here 
-                            // based on state.realm_config_state.wizard_sandbox_option
+                            // TODO: Handle actual SQLite Folio file copying/creation logic here
+                            // based on state.realm_config_state.wizard_folio_option
 
                             let audio_powers_yaml = if state.realm_config_state.wizard_project_type == 5 {
                                 format!(
@@ -1647,7 +1647,7 @@ tiers: {{}}
 roles:
   gui:
     tier: 1
-{}sandboxes:
+{}folios:
   default:
     path: {}
     roles:
@@ -1662,7 +1662,7 @@ roles:
                                 *lock = Some(realm_name.clone());
                             }
 
-                            state.reload(Some(default_sandbox_path.clone()));
+                            state.reload(Some(default_folio_path.clone()));
 
                             state.realm_config_state.yaml_buffer = minimal_yaml.clone();
                             state.realm_config_state.original_yaml = minimal_yaml.clone();

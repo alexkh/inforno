@@ -8,14 +8,14 @@ use egui_commonmark::CommonMarkCache;
 use rusqlite::Connection;
 use tokio::runtime::Handle;
 use egui::Color32;
-use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, OllamaDownloading, Presets, load_presets};
-use inforno_core::db::{fetch_chat, fetch_chat_titles, get_sandbox_db_conn, mod_msg_content_reasoning};
+use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, ModelPresets, OllamaDownloading, load_model_presets};
+use inforno_core::db::{fetch_chat, fetch_chat_titles, get_folio_db_conn, mod_msg_content_reasoning};
 use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_names, get_openr_model_names};
 use crate::agent_config::{AgentConfigState, ui_agent_config};
 use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
 use crate::chat::ui_chat;
 use crate::key_manager::ui_key_manager;
-use crate::preset_editor::{PresetEditorState, ui_preset_editor};
+use crate::model_preset_editor::{ModelPresetEditorState, ui_model_preset_editor};
 use crate::realm_config::{RealmConfigState, ui_realm_config};
 use crate::side_panel::ui_side_panel;
 use crate::top_panel::ui_top_panel;
@@ -92,13 +92,12 @@ pub struct MyAppPermanent {
     pub keys: inforno_core::api_keys::KeyStore,
     /// What startup found out about the vault; taken by the first `State::new`.
     pub vault_notices: Mutex<Option<Vec<String>>>,
-    pub sandbox: Option<PathBuf>,
-    pub pending_project_init: Mutex<Option<PathBuf>>,
+    pub folio: Option<PathBuf>,
     pub active_realm_name: Mutex<Option<String>>,
     /// Set at boot when `--realm <name>` was given but the Realm has no
-    /// resolvable default sandbox yet. Consumed once by `State::new`, which
-    /// turns it into a modal prompt rather than creating a sandbox unasked.
-    pub realm_awaiting_sandbox: Mutex<Option<String>>,
+    /// resolvable default Folio yet. Consumed once by `State::new`, which
+    /// turns it into a modal prompt rather than creating a Folio unasked.
+    pub realm_awaiting_folio: Mutex<Option<String>>,
     pub app_language: Mutex<String>,
 }
 
@@ -127,7 +126,7 @@ pub struct State {
     pub chat_to_rename: Option<i64>,
     pub chat_rename_buffer: String,
     pub common_mark_cache: CommonMarkCache,
-    pub presets: Presets,
+    pub presets: ModelPresets,
     pub cache_conn: Option<rusqlite::Connection>, // connection to cache db
     pub db_conn: rusqlite::Connection, // connection to main db
     pub db_chats: Vec<DbChat>, // chat titles fetched from the main db
@@ -147,15 +146,15 @@ pub struct State {
     pub key_storage: crate::key_manager::KeyStorage,
     /// Startup warnings about the vault, shown in the key manager.
     pub vault_notices: Vec<String>,
-    pub preset_editor_state: PresetEditorState,
+    pub preset_editor_state: ModelPresetEditorState,
     pub openr_model_names: Vec<String>,
     pub ollama_model_names: Vec<String>,
     pub ollama_model_names_installed: Vec<String>,
     pub op_tx: Sender<FileOpMsg>,
     pub pending_file_dialog_op: Option<FileOp>,
     pub pending_export_content: Option<String>,
-    pub is_in_home_sandbox: bool,
-    pub sandbox: PathBuf,
+    pub is_in_home_folio: bool,
+    pub folio: PathBuf,
     // when receiving reply from the LLM's we need to store them during
     // streaming. Each buffer is indexed by the Agent index.
     pub chat_streaming_state: ChatStreamingState,
@@ -165,13 +164,10 @@ pub struct State {
     pub bottom_panel_state: BottomPanelState,
     pub agent_config_state: AgentConfigState,
     pub math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
-    pub show_project_init_modal: bool,
-    pub project_dir_to_init: Option<PathBuf>,
     pub copy_presets_checked: bool,
-    pub show_realm_sandbox_init_modal: bool,
-    pub realm_awaiting_sandbox: Option<String>,
-    pub study_name_buffer: String,
-    pub sandbox_file_buffer: String,
+    pub show_realm_folio_init_modal: bool,
+    pub realm_awaiting_folio: Option<String>,
+    pub folio_name_buffer: String,
     pub project_root: Option<PathBuf>,
     pub active_realm: Option<inforno_core::realm::ActiveRealm>,
     pub active_workspace_name: Option<String>,
@@ -190,14 +186,10 @@ impl State {
     /// It can be called by `Default` or manually to reload the state.
     pub fn new(
         permanent: Arc<MyAppPermanent>,
-        new_sandbox: Option<PathBuf>,
+        new_folio: Option<PathBuf>,
         op_tx: Sender<FileOpMsg>
     ) -> Self {
-        let updated_sandbox = new_sandbox;
-        let mut is_home = true;
-        if let Some(_) = updated_sandbox {
-            is_home = false;
-        }
+        let is_home = new_folio.is_none();
         let mut openr_model_names: Vec<String> = vec![];
         let mut ollama_model_names: Vec<String> = vec![];
         let ollama_model_names_installed: Vec<String> = vec![];
@@ -205,13 +197,13 @@ impl State {
         // --- 1. Main Database Connection ---
 
         let mut chats: Vec<DbChat> = vec![];
-        let mut presets = Presets::default();
+        let mut presets = ModelPresets::default();
 
         // 1. Establish Connection or Die
-        let (conn, sandbox) = match get_sandbox_db_conn(&updated_sandbox) {
+        let (conn, folio) = match get_folio_db_conn(&new_folio) {
             Ok(tuple) => tuple,
             Err(error) => {
-                eprintln!("Error opening the default Sandbox: {}", error);
+                eprintln!("Error opening the Folio: {}", error);
                 std::process::exit(1); // Quit immediately
             }
         };
@@ -223,11 +215,11 @@ impl State {
         let realm_name_lock = permanent.active_realm_name.lock().unwrap().clone();
 
         if let Some(realms_dir) = directories::ProjectDirs::from("", "", "inforno").map(|d| d.config_dir().join("realms")) {
-            if !inforno_core::realm::sandbox_path_is_valid(&sandbox, &realms_dir) {
+            if !inforno_core::realm::folio_path_is_valid(&folio, &realms_dir) {
                 eprintln!(
-                    "Warning: Sandbox at {:?} lives inside the Realms directory ({:?}). \
-                     Sandboxes must stay outside .config/inforno/realms.",
-                    sandbox, realms_dir
+                    "Warning: Folio at {:?} lives inside the Realms directory ({:?}). \
+                     Folios must stay outside .config/inforno/realms.",
+                    folio, realms_dir
                 );
             }
         }
@@ -239,8 +231,8 @@ impl State {
 
         if let Some(realm_name) = realm_name_lock {
             // We are in a Realm! Realms always live under the fixed realms
-            // directory now — never derived from the Sandbox's location,
-            // since a Sandbox can live anywhere.
+            // directory now — never derived from the Folio's location,
+            // since a Folio can live anywhere.
             let realm_dir = directories::ProjectDirs::from("", "", "inforno")
                 .map(|d| d.config_dir().join("realms").join(&realm_name));
 
@@ -310,8 +302,8 @@ impl State {
                     }
                 }
             }
-        } else if let Some(parent) = sandbox.parent() {
-            // Traditional Single-Project Sandbox
+        } else if let Some(parent) = folio.parent() {
+            // Legacy: a Folio inside a project's `.inforno` directory
             if parent.file_name().and_then(|n| n.to_str()) == Some(".inforno") {
                 if let Some(root) = parent.parent() {
                     project_root = Some(root.to_path_buf());
@@ -319,15 +311,15 @@ impl State {
             }
         }
 
-        // Did main.rs ask for a Realm whose default sandbox doesn't resolve
-        // to anything yet? If so, we're sitting in the home sandbox for now
+        // Did main.rs ask for a Realm whose default Folio doesn't resolve
+        // to anything yet? If so, we're sitting in the home Folio for now
         // and need to prompt rather than silently create one.
-        let realm_awaiting_sandbox = permanent.realm_awaiting_sandbox.lock().unwrap().take();
-        let show_realm_sandbox_init = realm_awaiting_sandbox.is_some();
-        let study_name_default = realm_awaiting_sandbox.clone().unwrap_or_default();
+        let realm_awaiting_folio = permanent.realm_awaiting_folio.lock().unwrap().take();
+        let show_realm_folio_init = realm_awaiting_folio.is_some();
+        let folio_name_default = realm_awaiting_folio.clone().unwrap_or_default();
 
         // 2. Load Initial Data (using the valid 'conn')
-        load_presets(&conn, &mut presets);
+        load_model_presets(&conn, &mut presets);
 
         chats = fetch_chat_titles(&conn).unwrap_or_else(|e| {
             eprintln!("CRITICAL: Could not fetch chat titles: {}", e);
@@ -371,7 +363,7 @@ impl State {
             }
         }
 
-        // Once per run, not on every sandbox reload: what startup found out
+        // Once per run, not on every Folio reload: what startup found out
         // about the vault, and whether to ask for keys (vaultorno design doc
         // §15): none saved, or about to expire.
         let mut vault_notices = Vec::new();
@@ -450,10 +442,6 @@ impl State {
         // create the communication channel for streaming chat messages
         let (chat_tx, chat_rx) = channel();
 
-        // Grab the init request from permanent state
-        let pending_init = permanent.pending_project_init.lock().unwrap().take();
-        let show_project_init = pending_init.is_some();
-
         // attempt to load the layout from the .ron file
         let mut pane_tree = load_layout_from_ron(&project_root);
 
@@ -519,7 +507,7 @@ impl State {
             vault_error,
             key_storage,
             vault_notices,
-            preset_editor_state: PresetEditorState {
+            preset_editor_state: ModelPresetEditorState {
                 ollama_downloading: Arc::new(
                 Mutex::new(OllamaDownloading::default())),
                 ..Default::default()
@@ -530,8 +518,8 @@ impl State {
             op_tx,
             pending_file_dialog_op: None,
             pending_export_content: None,
-            is_in_home_sandbox: is_home,
-            sandbox,
+            is_in_home_folio: is_home,
+            folio,
             chat_streaming_state: ChatStreamingState {
                 streaming: false,
                 bitmask: 0,
@@ -543,17 +531,14 @@ impl State {
                 tx: chat_tx,
             },
             error_msg: initial_error_msg.clone(), // if there is an error, modal will auto open
-            is_modal_open: initial_error_msg.is_some() || show_project_init || show_realm_sandbox_init,
+            is_modal_open: initial_error_msg.is_some() || show_realm_folio_init,
             bottom_panel_state: BottomPanelState::default(),
             agent_config_state: AgentConfigState::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
-            show_project_init_modal: show_project_init,
-            project_dir_to_init: pending_init,
             copy_presets_checked: true,
-            show_realm_sandbox_init_modal: show_realm_sandbox_init,
-            realm_awaiting_sandbox,
-            study_name_buffer: study_name_default,
-            sandbox_file_buffer: "info.rno".to_string(),
+            show_realm_folio_init_modal: show_realm_folio_init,
+            realm_awaiting_folio,
+            folio_name_buffer: folio_name_default,
             project_root,
             active_realm,
             active_workspace_name,
@@ -570,8 +555,8 @@ impl State {
     /// Re-initializes the state in place.
     /// Useful if you want to refresh DB connections or reload API keys
     /// without restarting the application.
-    pub fn reload(&mut self, sandbox: Option<PathBuf>) {
-        *self = Self::new(self.perma.clone(), sandbox, self.op_tx.clone());
+    pub fn reload(&mut self, folio: Option<PathBuf>) {
+        *self = Self::new(self.perma.clone(), folio, self.op_tx.clone());
     }
 }
 
@@ -587,14 +572,14 @@ impl MyApp {
             permanent: MyAppPermanent) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let (tx, rx) = channel();
-        let sandbox = permanent.sandbox.clone();
+        let folio = permanent.folio.clone();
         let perma_arc = Arc::new(permanent);
         let state_perma = perma_arc.clone();
 
         Self {
             ctx: cc.egui_ctx.clone(),
             perma: perma_arc,
-            state: State::new(state_perma, sandbox, tx),
+            state: State::new(state_perma, folio, tx),
             op_rx: rx,
         }
     }
@@ -733,14 +718,14 @@ impl eframe::App for MyApp {
             state.is_modal_open = true;
         }
 
-        // when user selects a file in Open Sandbox dialog, we reload State
+        // when user selects a file in the Open Folio dialog, we reload State
         if let Ok(file_op_msg) = self.op_rx.try_recv() {
             match file_op_msg.op {
                 FileOp::Open => {
                     // "open window dialog" closed
                     // if user didn't cancel, we should get path of file to open
                     if !file_op_msg.cancelled {
-                        // let self.initializer.sandbox keep the initial value
+                        // perma.folio keeps the Folio the app started with
                         state.reload(file_op_msg.path);
                     }
                 },
@@ -756,10 +741,10 @@ impl eframe::App for MyApp {
                         // 2. Explicitly close it
                         match old_conn.close() {
                             Ok(_) => {
-                                println!("Sandbox closed. Proceeding to move file...");
+                                println!("Folio closed. Proceeding to move file...");
 
                                 // 3. Now it is safe to move the file
-                                let old_path = &state.sandbox;
+                                let old_path = &state.folio;
                                 if let Some(new_path) = &file_op_msg.path {
                                     match std::fs::rename(old_path, new_path) {
                                         Ok(_) => {
@@ -773,7 +758,7 @@ impl eframe::App for MyApp {
                                 }
                             },
                             Err((restored_conn, err)) => {
-                                eprintln!("Could not close Sandbox: {}. Aborting move.", err);
+                                eprintln!("Could not close Folio: {}. Aborting move.", err);
                                 // Put the connection back into state so the app doesn't crash if used again
                                 state.db_conn = restored_conn;
                             }
@@ -782,9 +767,9 @@ impl eframe::App for MyApp {
                 },
                 FileOp::SaveCopy => {
                     // "Save Copy window dialog" closed. Same as SaveAs, but we
-                    // stay in the same old sandbox
+                    // stay in the same old Folio
                     if !file_op_msg.cancelled {
-                        let old_path = &state.sandbox;
+                        let old_path = &state.folio;
                         if let Some(new_path) = &file_op_msg.path {
                             match std::fs::copy(old_path, new_path) {
                                 Ok(_) => {
@@ -800,7 +785,7 @@ impl eframe::App for MyApp {
                 },
                 FileOp::Clear => {
                     if !file_op_msg.cancelled {
-                        state.reload(Some(state.sandbox.clone()));
+                        state.reload(Some(state.folio.clone()));
                     }
                 }
                 FileOp::Attach => {
@@ -939,7 +924,7 @@ impl eframe::App for MyApp {
 
         ui_key_manager(ui, state);
 
-        ui_preset_editor(ui, state);
+        ui_model_preset_editor(ui, state);
 
         ui_agent_config(ui, state);
 
@@ -1110,124 +1095,90 @@ impl eframe::App for MyApp {
             }
         }
 
-        // Project Initialization Modal
-        if state.show_project_init_modal {
+        // Realm Folio Initialization Modal. Only ever shown, never triggered
+        // automatically: a Realm with no resolvable `folios:` entry is
+        // *asked* about, not repaired for you. Creating the Folio doesn't
+        // edit the Realm either: the entry that links it is shown here, to
+        // be added to realm2.yml by hand.
+        if state.show_realm_folio_init_modal {
             let mut open = true;
 
-            egui::Window::new("Initialize Project Sandbox")
+            egui::Window::new("Create Folio for Realm")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
                 .show(ui, |ui| {
-                    ui.label("A project directory was provided, but no Sandbox was found.");
-                    ui.label("Would you like to initialize an '.inforno' directory here?");
+                    let realm_label = state.realm_awaiting_folio.clone().unwrap_or_default();
+                    ui.label(format!("Realm '{}' links to no Folio yet.", realm_label));
+                    let folios_dir = inforno_core::db::folios_dir().unwrap_or_default();
+                    ui.label(format!("Create one in {}:", folios_dir.display()));
 
                     ui.add_space(10.0);
-                    ui.checkbox(&mut state.copy_presets_checked, "Copy Presets from Home Sandbox");
-                    ui.add_space(10.0);
-
                     ui.horizontal(|ui| {
-                        if ui.button("Create Sandbox").clicked() {
-                            if let Some(proj_dir) = &state.project_dir_to_init {
-                                if let Err(e) = inforno_core::db::init_project_sandbox(proj_dir, state.copy_presets_checked) {
-                                    state.error_msg = Some(format!("Failed to create project sandbox: {}", e));
-                                    state.is_modal_open = true;
-                                } else {
-                                    // Success! Reload the state targeting the newly created database.
-                                    let db_path = proj_dir.join(".inforno").join("info.rno");
+                        ui.label("Folio name:");
+                        ui.text_edit_singleline(&mut state.folio_name_buffer);
+                    });
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut state.copy_presets_checked, "Copy Presets from Home Folio");
+                    ui.add_space(10.0);
 
-                                    // Make sure we update permanent so it doesn't try to prompt again on next reload
-                                    // (Though State::new grabs it, so you can also just clear the project_dir_to_init)
-                                    state.reload(Some(db_path));
+                    let folio_path = inforno_core::db::folio_path_for(&state.folio_name_buffer);
+                    match &folio_path {
+                        Ok(path) => {
+                            let entry = format!(
+                                "folios:\n  default:\n    path: {}\n    roles: [{}]",
+                                path.display(),
+                                crate::chat::GUI_ROLE
+                            );
+                            ui.label("To make it this Realm's default Folio, add this to realm2.yml by hand:");
+                            ui.horizontal(|ui| {
+                                ui.code(entry.as_str());
+                                if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
+                                    ui.ctx().copy_text(entry.clone());
                                 }
-                            }
-                            state.show_project_init_modal = false;
+                            });
                         }
-
-                        if ui.button("Cancel").clicked() {
-                            // Proceed using the default sandbox without creating the project one
-                            state.show_project_init_modal = false;
+                        Err(e) => {
+                            ui.colored_label(ui.visuals().error_fg_color, e.to_string());
                         }
-                    });
-                });
-
-            // If the user closes the window via the 'X'
-            if !open {
-                state.show_project_init_modal = false;
-            }
-        }
-
-        // Realm Sandbox Initialization Modal — Study-backed by default.
-        // Only ever shown, never triggered automatically: a Realm with no
-        // resolvable `sandboxes:` entry is *asked* about, not repaired for you.
-        if state.show_realm_sandbox_init_modal {
-            let mut open = true;
-
-            egui::Window::new("Create Sandbox for Realm")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .open(&mut open)
-                .show(ui, |ui| {
-                    let realm_label = state.realm_awaiting_sandbox.clone().unwrap_or_default();
-                    ui.label(format!("Realm '{}' has no default sandbox to open yet.", realm_label));
-                    ui.label("Create one inside a Study (~/.local/share/inforno/studies/<study>/):");
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Study:");
-                        ui.text_edit_singleline(&mut state.study_name_buffer);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Sandbox file:");
-                        ui.text_edit_singleline(&mut state.sandbox_file_buffer);
-                    });
-                    ui.add_space(10.0);
-                    ui.checkbox(&mut state.copy_presets_checked, "Copy Presets from Home Sandbox");
+                    }
                     ui.add_space(10.0);
 
                     ui.horizontal(|ui| {
-                        if ui.button("Create Sandbox").clicked() {
-                            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
-                                let studies_dir = proj_dirs.data_dir().join("studies");
-                                match inforno_core::db::init_study_sandbox(
-                                    &studies_dir,
-                                    &state.study_name_buffer,
-                                    &state.sandbox_file_buffer,
-                                    state.copy_presets_checked,
-                                ) {
-                                    Ok(db_path) => {
-                                        // We're in the GUI and the user just built this
-                                        // sandbox specifically to open the Realm they
-                                        // asked for — re-enter it on reload instead of
-                                        // landing back in a bare, realm-less sandbox.
-                                        // `perma` is the same Arc `reload` hands to the
-                                        // fresh `State::new`, so this write is visible
-                                        // to it.
-                                        if let Some(realm_name) = state.realm_awaiting_sandbox.clone() {
+                        if ui.add_enabled(folio_path.is_ok(), egui::Button::new("Create Folio")).clicked() {
+                            if let Ok(path) = &folio_path {
+                                match inforno_core::db::init_folio(path, state.copy_presets_checked) {
+                                    Ok(()) => {
+                                        // The user just made this Folio to open the
+                                        // Realm they asked for — re-enter it on reload
+                                        // instead of landing back in a bare, realm-less
+                                        // Folio. `perma` is the same Arc `reload` hands
+                                        // to the fresh `State::new`, so this write is
+                                        // visible to it.
+                                        if let Some(realm_name) = state.realm_awaiting_folio.clone() {
                                             *state.perma.active_realm_name.lock().unwrap() = Some(realm_name);
                                         }
-                                        state.reload(Some(db_path));
+                                        state.reload(Some(path.clone()));
                                     }
                                     Err(e) => {
-                                        state.error_msg = Some(format!("Failed to create sandbox: {}", e));
+                                        state.error_msg = Some(format!("Failed to create Folio: {}", e));
                                         state.is_modal_open = true;
                                     }
                                 }
                             }
-                            state.show_realm_sandbox_init_modal = false;
+                            state.show_realm_folio_init_modal = false;
                         }
 
                         if ui.button("Cancel").clicked() {
-                            // Stay in the home sandbox; don't enter the Realm.
-                            state.show_realm_sandbox_init_modal = false;
+                            // Stay in the home Folio; don't enter the Realm.
+                            state.show_realm_folio_init_modal = false;
                         }
                     });
                 });
 
             if !open {
-                state.show_realm_sandbox_init_modal = false;
+                state.show_realm_folio_init_modal = false;
             }
         }
     }

@@ -195,7 +195,7 @@ pub struct RoleConfig {
 
 /// Declares that a mount contains more than one selectable root — e.g. a
 /// Cargo workspace with several member crates, or a handful of sibling
-/// checkouts a Sandbox might focus on one at a time. Each resolved root is
+/// checkouts a Folio might focus on one at a time. Each resolved root is
 /// called a "Bucket". A mount with no `BucketConfig` has exactly one
 /// implicit bucket: its own root, and the GUI shows no sub-selector.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -220,41 +220,28 @@ pub struct RealmMountConfig {
     // dedicated field -- same pattern `places` already used.
 }
 
-/// One Sandbox a Realm is willing to open. Exactly one of `study` or `path`
-/// should be set:
-/// - `study` names a directory under the managed studies root
-///   (`~/.local/share/inforno/studies/<study>/`). A Study can hold more than
-///   one sandbox file side by side (e.g. `info.rno` and `another.rno`),
-///   plus whatever sidecar files a sandbox later accumulates (layout,
-///   cache) — all sharing that one directory instead of inventing
-///   parallel-named sidecar files per sandbox. `file` picks which sandbox
-///   inside the Study; defaults to `info.rno` if omitted.
-/// - `path` is an explicit host path to a sandbox file anywhere on the
-///   filesystem — the escape hatch for sandboxes that predate Studies, or
-///   are deliberately kept outside the managed studies root.
+/// One Folio a Realm is willing to open: a self-contained `.rno` file at an
+/// absolute host path. Folios can live anywhere; a Realm groups the ones it
+/// works with by linking to them here.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SandboxRef {
-    /// Absolute host path to the self-contained `.rno` sandbox file.
-    /// Required on purpose: a Realm must name the exact sandbox file it
+pub struct FolioRef {
+    /// Absolute host path to the self-contained `.rno` Folio file.
+    /// Required on purpose: a Realm must name the exact Folio file it
     /// authorizes, and must not rely on a resolver reconstructing a path
     /// from a short name.
     pub path: PathBuf,
-    /// Realm roles this sandbox is allowed to use.
-    /// Empty means the sandbox is known but not authorized to open
+    /// Realm roles this Folio is allowed to use.
+    /// Empty means the Folio is known but not authorized to open
     /// this Realm under any role.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
-    // `description` was removed: sandboxes are entries in
-    // `RealmConfig::sandboxes`, already wrapped in `Commented<SandboxRef>`,
-    // so a description now lives as a YAML comment on/above the sandbox's
-    // key instead of a dedicated field.
+    // A description lives as a YAML comment on/above the Folio's key in
+    // `RealmConfig::folios` (`Commented<FolioRef>`), not in a field.
 }
 
-/// A single filesystem-path component: no separators, no `.`/`..`. Used to
-/// keep `study`/`file` from ever being joined into a traversal outside
-/// `studies_dir` (`study: "../../etc"` or `file: "../secrets"`). `pub(crate)`
-/// so `db::init_study_sandbox` can apply the exact same rule when it creates
-/// the directory/file this module later resolves.
+/// A single filesystem-path component: no separators, no `.`/`..`.
+/// `db::folio_path_for` uses it so a Folio name can never be joined into a
+/// path outside the folios directory (`../secrets.rno`).
 pub(crate) fn is_safe_path_component(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.contains('\\')
 }
@@ -321,13 +308,15 @@ pub struct RealmConfig {
     /// same comment-preservation mechanism as `mounts` above.
     #[serde(default)]
     pub roles: IndexMap<String, serde_saphyr::Commented<RoleConfig>>,
-    /// Sandboxes permitted to open this Realm, keyed by local name. The key
-    /// `"default"` is reserved and names the sandbox opened when the Realm
-    /// itself is opened directly. Each sandbox must provide an absolute
-    /// `path` to a self-contained `.rno` file. `Commented` wrapping is the
-    /// same comment-preservation mechanism as `mounts` above.
-    #[serde(default)]
-    pub sandboxes: IndexMap<String, serde_saphyr::Commented<SandboxRef>>,
+    /// Folios permitted to open this Realm, keyed by local name. The first
+    /// entry is the default Folio, opened when the Realm itself is opened
+    /// directly. Each Folio must provide an absolute `path` to a
+    /// self-contained `.rno` file. `Commented` wrapping is the same
+    /// comment-preservation mechanism as `mounts` above. `sandboxes` is the
+    /// key's former name: still read, so existing Realm files load until
+    /// they're updated by hand, and never written.
+    #[serde(default, alias = "sandboxes")]
+    pub folios: IndexMap<String, serde_saphyr::Commented<FolioRef>>,
     /// Glob expression selecting which host binaries (matched by bare
     /// basename, e.g. `cc`, `git`) are exposed in a spawned process's
     /// chroot `/bin`, on top of the fixed coreutils list (`bash`, `ls`,
@@ -344,49 +333,47 @@ pub struct RealmConfig {
     pub env: Vec<String>,
 }
 
-/// Resolves the on-disk path for `key` in `config.sandboxes`. `studies_dir`
-/// is the managed studies root (e.g. `~/.local/share/inforno/studies`),
-/// supplied by the caller since this crate doesn't own XDG path resolution.
-pub fn resolve_sandbox_path(
+/// Resolves the on-disk path for `key` in `config.folios`.
+pub fn resolve_folio_path(
     key: &str,
     config: &RealmConfig,
 ) -> Result<PathBuf, String> {
-    let sref = &config.sandboxes.get(key)
-        .ok_or_else(|| format!("No sandbox named '{}' declared in this Realm", key))?
+    let fref = &config.folios.get(key)
+        .ok_or_else(|| format!("No Folio named '{}' declared in this Realm", key))?
         .0;
 
-    if !sref.path.is_absolute() {
+    if !fref.path.is_absolute() {
         return Err(format!(
-            "Sandbox '{}' path must be an absolute host path, got '{}'",
-            key, sref.path.display()
+            "Folio '{}' path must be an absolute host path, got '{}'",
+            key, fref.path.display()
         ));
     }
 
-    if sref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
+    if fref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
         return Err(format!(
-            "Sandbox '{}' path must point to a `.rno` file, got '{}'",
-            key, sref.path.display()
+            "Folio '{}' path must point to a `.rno` file, got '{}'",
+            key, fref.path.display()
         ));
     }
 
-    Ok(sref.path.clone())
+    Ok(fref.path.clone())
 }
 
-/// Resolves the default sandbox, which is the first declared entry.
-/// Returns `Err` if `sandboxes` is empty or resolution fails — the
-/// caller treats that as "this Realm has no sandbox yet" and should prompt
+/// Resolves the default Folio, which is the first declared entry.
+/// Returns `Err` if `folios` is empty or resolution fails — the
+/// caller treats that as "this Realm has no Folio yet" and should prompt
 /// the user to create one rather than silently materializing one.
-pub fn resolve_default_sandbox_path(
+pub fn resolve_default_folio_path(
     config: &RealmConfig,
 ) -> Result<PathBuf, String> {
-    let (key, _) = config.sandboxes.first()
-        .ok_or_else(|| "This Realm declares no sandboxes".to_string())?;
-    resolve_sandbox_path(key, config)
+    let (key, _) = config.folios.first()
+        .ok_or_else(|| "This Realm declares no Folios".to_string())?;
+    resolve_folio_path(key, config)
 }
 
-/// Guards the Realm/Sandbox split: a sandbox must never live inside the
+/// Guards the Realm/Folio split: a Folio must never live inside the
 /// realms directory. `realms_dir` is `~/.config/inforno/realms`.
-pub fn sandbox_path_is_valid(path: &Path, realms_dir: &Path) -> bool {
+pub fn folio_path_is_valid(path: &Path, realms_dir: &Path) -> bool {
     let canon_realms = std::fs::canonicalize(realms_dir).unwrap_or_else(|_| realms_dir.to_path_buf());
     let parent = path.parent().unwrap_or(path);
     let canon_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
@@ -661,38 +648,38 @@ impl ActiveRealm {
             );
         }
 
-        // --- Sandboxes: validate required absolute .rno paths and allowed role names. ---
-        if let Some((sname, sref)) = raw_config.sandboxes.first() {
-            let sref = &sref.0;
-            if !sref.path.exists() {
-                return Err(format!("Default sandbox '{}' points to a non-existent path: {}", sname, sref.path.display()));
+        // --- Folios: validate required absolute .rno paths and allowed role names. ---
+        if let Some((fname, fref)) = raw_config.folios.first() {
+            let fref = &fref.0;
+            if !fref.path.exists() {
+                return Err(format!("Default Folio '{}' points to a non-existent path: {}", fname, fref.path.display()));
             }
-            if sref.roles.is_empty() {
-                return Err(format!("The default sandbox '{}' must authorize at least one Realm role; otherwise the Realm cannot be opened through it.", sname));
+            if fref.roles.is_empty() {
+                return Err(format!("The default Folio '{}' must authorize at least one Realm role; otherwise the Realm cannot be opened through it.", fname));
             }
         }
 
-        for (sname, sref) in &raw_config.sandboxes {
-            let sref = &sref.0;
-            if !sref.path.is_absolute() {
+        for (fname, fref) in &raw_config.folios {
+            let fref = &fref.0;
+            if !fref.path.is_absolute() {
                 return Err(format!(
-                    "Sandbox '{}' path must be absolute, got '{}'",
-                    sname, sref.path.display()
+                    "Folio '{}' path must be absolute, got '{}'",
+                    fname, fref.path.display()
                 ));
             }
 
-            if sref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
+            if fref.path.extension().and_then(|e| e.to_str()) != Some("rno") {
                 return Err(format!(
-                    "Sandbox '{}' path must point to a `.rno` file, got '{}'",
-                    sname, sref.path.display()
+                    "Folio '{}' path must point to a `.rno` file, got '{}'",
+                    fname, fref.path.display()
                 ));
             }
 
-            for role_name in &sref.roles {
+            for role_name in &fref.roles {
                 if !roles.contains_key(role_name) {
                     return Err(format!(
-                        "Sandbox '{}' lists role '{}', but that role is not defined in this Realm",
-                        sname, role_name
+                        "Folio '{}' lists role '{}', but that role is not defined in this Realm",
+                        fname, role_name
                     ));
                 }
             }

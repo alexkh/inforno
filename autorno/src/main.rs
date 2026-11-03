@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 
                 // CommentPosition::Above (not the default Inline) is required so that
-                // comments on mounts/roles/tiers/sandboxes -- all non-scalar values --
+                // comments on mounts/roles/tiers/folios -- all non-scalar values --
                 // survive this rewrite; Inline silently drops comments on those.
                 let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
                 std::fs::write(&yaml_path, serde_saphyr::to_string_with_options(&config, opts)?)?;

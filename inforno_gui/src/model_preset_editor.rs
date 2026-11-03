@@ -10,13 +10,13 @@ use tokio_stream::StreamExt;
 
 use inforno_core::{
     common::{
-        ChatRouter, DbOllamaModel, DbOpenrModel, ModelOptions, OllamaDownloading, Preset, PresetSelection, Presets, format_bytes, load_presets,
+        ChatRouter, DbOllamaModel, DbOpenrModel, ModelOptions, ModelPreset, ModelPresetSelection, ModelPresets, OllamaDownloading, format_bytes, load_model_presets,
     },
     db::{
         cache::{
             get_ollama_model_info, get_openr_model_info,
         },
-        delete_preset, save_preset,
+        delete_model_preset, save_model_preset,
     },
 };
 
@@ -24,9 +24,9 @@ use crate::state::{State, strong_color, router_color, cloud_color, local_color, 
 
 // --- Data Structures ---
 #[derive(Default)]
-pub struct PresetEditorState {
-    pub selected_preset: PresetSelection,
-    pub edited_preset: Preset,
+pub struct ModelPresetEditorState {
+    pub selected_preset: ModelPresetSelection,
+    pub edited_preset: ModelPreset,
     pub editing: bool,
     pub openr_model_info: Option<DbOpenrModel>,
     pub seed_entered: String,
@@ -120,7 +120,7 @@ macro_rules! validated_edit {
 
 // --- Main Entry Point ---
 
-pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
+pub fn ui_model_preset_editor(ctx: &egui::Context, state: &mut State) {
     if !state.show_preset_editor {
         return;
     }
@@ -158,7 +158,7 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
         // so background downloads remain attached to the UI if reopened!
         let preserved_downloading = state.preset_editor_state.ollama_downloading.clone();
 
-        state.preset_editor_state = PresetEditorState {
+        state.preset_editor_state = ModelPresetEditorState {
             ollama_downloading: preserved_downloading,
             ..Default::default()
         };
@@ -168,25 +168,25 @@ pub fn ui_preset_editor(ctx: &egui::Context, state: &mut State) {
 // --- Logic Helpers ---
 fn save_active_preset(
     conn: &Connection,
-    edited_preset: &mut Preset,
-    presets: &mut Presets,
+    edited_preset: &mut ModelPreset,
+    presets: &mut ModelPresets,
     error_msg: &mut Option<String>,
 ) {
     // We now use the passed variables directly
-    match save_preset(conn, edited_preset) {
+    match save_model_preset(conn, edited_preset) {
         Ok(val) => {
             if val == 0 {
-                eprintln!("Error updating Preset. No rows changed");
+                eprintln!("Error updating Model Preset. No rows changed");
             } else {
-                println!("Preset saved successfully! id = {}", val);
+                println!("Model Preset saved successfully! id = {}", val);
                 edited_preset.id = val;
-                // Reload the presets list
-                load_presets(conn, presets);
+                // Reload the model presets list
+                load_model_presets(conn, presets);
             }
         }
         Err(error) => {
-            *error_msg = Some(format!("Error updating Preset: {}", error));
-            eprintln!("Error updating Preset: {}", error);
+            *error_msg = Some(format!("Error updating Model Preset: {}", error));
+            eprintln!("Error updating Model Preset: {}", error);
         }
     }
 }
@@ -206,7 +206,7 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
     ui.horizontal(|ui| {
         // New Preset Button
         if ui.button(t!("preset_new_btn")).clicked() {
-            substate.edited_preset = Preset::default();
+            substate.edited_preset = ModelPreset::default();
             substate.editing = true;
             substate.router_changed = true;
         }
@@ -215,11 +215,11 @@ fn render_view_mode(ui: &mut egui::Ui, state: &mut State) {
         if num_presets > 0 {
             ui.label(t!("preset_or_select_existing_one"));
 
-            crate::bottom_panel::preset_combo_box(ui, "pe_preset_select",
+            crate::bottom_panel::model_preset_combo_box(ui, "pe_preset_select",
                 &mut substate.selected_preset,
                 &state.presets);
 
-            let mut start_editing = |preset: Preset| {
+            let mut start_editing = |preset: ModelPreset| {
                 substate.edited_preset = preset;
                 substate.seed_entered = substate
                     .edited_preset
@@ -396,7 +396,7 @@ fn render_edit_mode(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut State) {
 
     // Title Edit
     ui.horizontal(|ui| {
-        ui.label("Title of Preset:");
+        ui.label("Title of Model Preset:");
         ui.add(egui::TextEdit::singleline(&mut substate.edited_preset.title)
                 .text_color(current_title_color));
     });
@@ -483,11 +483,11 @@ fn render_edit_action_buttons(ui: &mut egui::Ui, state: &mut State) {
             if ui.button(egui::RichText::new(t!("preset_delete_btn"))
                 .color(err_color())).clicked()
             {
-                match delete_preset(conn, substate.edited_preset.id) {
+                match delete_model_preset(conn, substate.edited_preset.id) {
                     Ok(_) => {
-                        println!("preset {} deleted successfully",
+                        println!("model preset {} deleted successfully",
                             substate.edited_preset.id);
-                        substate.selected_preset = PresetSelection::default();
+                        substate.selected_preset = ModelPresetSelection::default();
                     },
                     Err(error) => {
                         println!("error deleting preset {}: {}",
@@ -495,7 +495,7 @@ fn render_edit_action_buttons(ui: &mut egui::Ui, state: &mut State) {
                     },
                 };
                 // Refresh list and exit editing
-                let _ = load_presets(conn, presets);
+                let _ = load_model_presets(conn, presets);
                 substate.editing = false;
                 ui.close();
             }
@@ -638,7 +638,7 @@ pub fn render_ollama_editor(
 fn render_ollama_download_button(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
-    substate: &mut PresetEditorState,
+    substate: &mut ModelPresetEditorState,
 ) {
     let is_dl = substate.ollama_downloading.lock().unwrap().is_downloading;
 
@@ -875,7 +875,7 @@ fn show_original_value(ui: &mut Ui, text: String) {
 
 pub fn render_common_options(
     ui: &mut egui::Ui,
-    substate: &mut PresetEditorState,
+    substate: &mut ModelPresetEditorState,
     original_options: &ModelOptions,
 ) {
     // --- Custom URL for OpenRouter ---

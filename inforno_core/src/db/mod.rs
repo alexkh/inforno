@@ -1,15 +1,34 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::OnceLock};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::OnceLock};
 use regex::Regex;
 use rusqlite::{Connection, params, Result};
 use directories::ProjectDirs;
-use crate::common::{Agent, Chat, ChatMsg, DbChat, MyError, Preset, PresetSelection, Presets};
+use crate::common::{Agent, Chat, ChatMsg, DbChat, ModelPreset, ModelPresetSelection, ModelPresets, MyError};
 
 pub mod cache;
 
-pub const CURRENT_SANDBOX_VERSION: i32 = 2;
+pub const CURRENT_FOLIO_VERSION: i32 = 2;
 
-// Helper to securely find the user's home sandbox file
-pub fn get_home_sandbox_path() -> Option<PathBuf> {
+/// Where Inforno creates new Folios unless told otherwise:
+/// `<data_dir>/folios`. A Folio can live anywhere; a Realm links to each
+/// one by absolute path.
+pub fn folios_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "inforno").map(|d| d.data_dir().join("folios"))
+}
+
+/// The path of a Folio called `name` in `folios_dir()`, adding `.rno` when
+/// it's missing. `name` must be a plain file name: a separator, `.` or
+/// `..` could take the path outside the folios directory.
+pub fn folio_path_for(name: &str) -> Result<PathBuf, MyError> {
+    let name = name.trim();
+    let file = if name.ends_with(".rno") { name.to_string() } else { format!("{}.rno", name) };
+    if file == ".rno" || !crate::realm::is_safe_path_component(&file) {
+        return Err(MyError::FolioName);
+    }
+    folios_dir().map(|dir| dir.join(file)).ok_or(MyError::ProjectDir)
+}
+
+// Helper to securely find the user's home folio file
+pub fn get_home_folio_path() -> Option<PathBuf> {
     if let Some(proj_dirs) = ProjectDirs::from("", "", "inforno") {
         let file_path = PathBuf::from(proj_dirs.data_dir()).join("info.rno");
         if file_path.exists() {
@@ -19,28 +38,27 @@ pub fn get_home_sandbox_path() -> Option<PathBuf> {
     None
 }
 
-// Creates the .inforno directory and database, optionally copying presets
-pub fn init_project_sandbox(proj_dir: &PathBuf, copy_presets: bool) -> Result<(), MyError> {
-    let inforno_dir = proj_dir.join(".inforno");
+/// Opens the Folio at `path`, creating it, and its directory, if needed.
+/// A newly created Folio can start with a copy of the home Folio's presets;
+/// an existing one is left as it is.
+pub fn init_folio(path: &Path, copy_presets: bool) -> Result<(), MyError> {
+    let is_new = !path.exists();
 
-    // Create the directory if it doesn't exist
-    if let Err(_) = fs::create_dir_all(&inforno_dir) {
-        return Err(MyError::ProjectDir);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|_| MyError::FolioDir)?;
     }
 
-    let db_path = inforno_dir.join("info.rno");
-
-    // Open/create the new sandbox database
-    let new_conn = connect_sandbox_db(&db_path)?;
+    // Open/create the Folio database
+    let new_conn = connect_folio_db(path)?;
 
     // If the user wants presets, fetch them from the home DB
-    if copy_presets {
-        if let Some(home_path) = get_home_sandbox_path() {
-            if let Ok(home_conn) = connect_sandbox_db(&home_path) {
-                if let Ok(presets) = load_presets_vec(&home_conn) {
+    if is_new && copy_presets {
+        if let Some(home_path) = get_home_folio_path().filter(|home| home.as_path() != path) {
+            if let Ok(home_conn) = connect_folio_db(&home_path) {
+                if let Ok(presets) = load_model_presets_vec(&home_conn) {
                     for mut preset in presets {
-                        preset.id = 0; // Set to 0 so `save_preset` treats it as a brand new insert!
-                        let _ = save_preset(&new_conn, &mut preset);
+                        preset.id = 0; // Set to 0 so `save_model_preset` treats it as a brand new insert!
+                        let _ = save_model_preset(&new_conn, &mut preset);
                     }
                 }
             }
@@ -49,63 +67,11 @@ pub fn init_project_sandbox(proj_dir: &PathBuf, copy_presets: bool) -> Result<()
     Ok(())
 }
 
-/// Creates (if needed) a Study directory under `studies_dir` and a sandbox
-/// database file inside it, optionally copying presets from the home
-/// sandbox. Mirrors `init_project_sandbox` above, except:
-/// - the sandbox lives under the managed Studies root, not a `.inforno`
-///   directory next to project files;
-/// - a Study directory can hold more than one sandbox file side by side, so
-///   the caller names which one via `file` (pass `"info.rno"`, or
-///   `realm::DEFAULT_SANDBOX_FILE`, for the conventional default).
-/// Returns the full path to the created/opened sandbox file, since (unlike
-/// `init_project_sandbox`) the caller doesn't already know the fixed
-/// `.inforno/info.rno` suffix to reconstruct it themselves.
-pub fn init_study_sandbox(
-    studies_dir: &PathBuf,
-    study: &str,
-    file: &str,
-    copy_presets: bool,
-) -> Result<PathBuf, MyError> {
-    let file = if file.trim().is_empty() { "info.rno" } else { file };
-
-    if !crate::realm::is_safe_path_component(study) || !crate::realm::is_safe_path_component(file) {
-        return Err(MyError::StudyDir);
-    }
-
-    let study_dir = studies_dir.join(study);
-
-    // Create the directory if it doesn't exist
-    if let Err(_) = fs::create_dir_all(&study_dir) {
-        return Err(MyError::StudyDir);
-    }
-
-    let db_path = study_dir.join(file);
-
-    // Open/create the new sandbox database
-    let new_conn = connect_sandbox_db(&db_path)?;
-
-    // If the user wants presets, fetch them from the home DB
-    if copy_presets {
-        if let Some(home_path) = get_home_sandbox_path() {
-            if let Ok(home_conn) = connect_sandbox_db(&home_path) {
-                if let Ok(presets) = load_presets_vec(&home_conn) {
-                    for mut preset in presets {
-                        preset.id = 0; // Set to 0 so `save_preset` treats it as a brand new insert!
-                        let _ = save_preset(&new_conn, &mut preset);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(db_path)
-}
-
-pub fn get_sandbox_db_conn(sandbox: &Option<PathBuf>) ->
+pub fn get_folio_db_conn(folio: &Option<PathBuf>) ->
             Result<(Connection, PathBuf), MyError> {
-    if let Some(sandbox) = sandbox {
-        let conn = connect_sandbox_db(sandbox)?;
-        return Ok((conn, sandbox.clone()));
+    if let Some(folio) = folio {
+        let conn = connect_folio_db(folio)?;
+        return Ok((conn, folio.clone()));
     }
 
     if let Some(proj_dirs) = ProjectDirs::from(
@@ -118,14 +84,14 @@ pub fn get_sandbox_db_conn(sandbox: &Option<PathBuf>) ->
         }
         file_path_buf.push("info.rno");
 
-        let conn = connect_sandbox_db(&file_path_buf)?;
+        let conn = connect_folio_db(&file_path_buf)?;
         return Ok((conn, file_path_buf));
     }
     Err(MyError::ProjectDir)
 }
 
-fn connect_sandbox_db(sandbox: &PathBuf) -> Result<Connection, MyError> {
-    let conn = Connection::open(sandbox)?;
+fn connect_folio_db(folio: &Path) -> Result<Connection, MyError> {
+    let conn = Connection::open(folio)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
     if table_exists(&conn, "schema_version")? {
@@ -136,14 +102,14 @@ fn connect_sandbox_db(sandbox: &PathBuf) -> Result<Connection, MyError> {
             |row| row.get(0)
         )?;
 
-        if current_version != CURRENT_SANDBOX_VERSION {
+        if current_version != CURRENT_FOLIO_VERSION {
             // Version mismatch
-            return Err(MyError::SandboxVersionMismatch(
-                CURRENT_SANDBOX_VERSION,
+            return Err(MyError::FolioVersionMismatch(
+                CURRENT_FOLIO_VERSION,
                 current_version));
         }
 
-        println!("Main Database schema exists and is version 2.");
+        println!("Folio schema exists and is version {}.", current_version);
         return Ok(conn);
     } else {
         // Schema does not exist. Create new database schema.
@@ -154,7 +120,7 @@ fn connect_sandbox_db(sandbox: &PathBuf) -> Result<Connection, MyError> {
     }
 }
 
-pub fn reset_sandbox_db(conn: &Connection) -> rusqlite::Result<()> {
+pub fn reset_folio_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("PRAGMA foreign_keys = OFF", [])?;
 
     let tx = conn.unchecked_transaction()?;
@@ -319,12 +285,12 @@ pub fn mod_agent_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
     Ok(())
 }
 
-/// Updates an agent's base preset selection and preset_snapshot, of course
-pub fn mod_agent_preset(
+/// Updates an agent's base model preset selection and its snapshot
+pub fn mod_agent_model_preset(
     conn: &Connection,
     id: i64,
     preset_id: i64,
-    preset_snapshot: Option<&Preset>
+    preset_snapshot: Option<&ModelPreset>
 ) -> Result<()> {
 
     // Serialize (or get None)
@@ -340,10 +306,10 @@ pub fn mod_agent_preset(
 }
 
 // only update snapshot - when tweaking parameters in the bottom_panel
-pub fn update_agent_preset_snapshot(
+pub fn update_agent_model_preset_snapshot(
     conn: &Connection,
     agent_id: i64,
-    preset: Option<&Preset>
+    preset: Option<&ModelPreset>
 ) -> rusqlite::Result<()> {
 
     let json = preset.and_then(|p| p.to_json());
@@ -612,7 +578,7 @@ pub fn fetch_chat_titles(conn: &Connection) -> rusqlite::Result<Vec<DbChat>> {
     chat_iter.collect()
 }
 
-pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
+pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         -> rusqlite::Result<Chat> {
     // ---------------------------------------------------------
     // 0. Fetch Chat Metadata (Title)
@@ -643,7 +609,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
         let id: i64 = row.get(2)?;
         let preset_id: i64 = row.get(3)?;
         let preset_json_raw: Option<String> = row.get(4)?;
-        let preset_snapshot = Preset::from_json(preset_json_raw.as_ref());
+        let preset_snapshot = ModelPreset::from_json(preset_json_raw.as_ref());
         let name: String = row.get(5)?;
         let muted: bool = row.get(6)?;
         let hidden: bool = row.get(7)?;
@@ -653,7 +619,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
             id,
             agent_ind,
             msg_ids,
-            preset_selection: PresetSelection::from_id(preset_id, presets),
+            preset_selection: ModelPresetSelection::from_id(preset_id, presets),
             preset: preset_snapshot, // <--- Populated from DB
             name,
             muted,
@@ -702,7 +668,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &Presets)
         let msgs_iter = stmt_msgs.query_map(&*params, |row| {
             // Load the Preset Snapshot for the message
             let p_json: Option<String> = row.get(6)?;
-            let msg_preset = Preset::from_json(p_json.as_ref());
+            let msg_preset = ModelPreset::from_json(p_json.as_ref());
 
             Ok(ChatMsg {
                 id: row.get(0)?,
@@ -749,14 +715,14 @@ pub fn delete_chat(conn: &Connection, chat_id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub fn delete_preset(conn: &Connection, id: i64) ->
+pub fn delete_model_preset(conn: &Connection, id: i64) ->
         rusqlite::Result<()> {
     conn.execute("delete from preset where id = ?1", params![id])?;
     Ok(())
 }
 
-// upsert the preset
-pub fn save_preset(conn: &Connection, entry: &mut Preset) ->
+// upsert the model preset
+pub fn save_model_preset(conn: &Connection, entry: &mut ModelPreset) ->
             rusqlite::Result<i64> {
     let options_json = serde_json::to_string(&entry.options)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -802,15 +768,15 @@ pub fn save_preset(conn: &Connection, entry: &mut Preset) ->
     }
 }
 
-pub fn load_presets_vec(conn: &Connection)
-        -> rusqlite::Result<Vec<Preset>> {
+pub fn load_model_presets_vec(conn: &Connection)
+        -> rusqlite::Result<Vec<ModelPreset>> {
     let mut stmt = conn.prepare(
         "select id, title, tooltip, chat_router, model, options, deleted
         from preset order by title"
     )?;
 
     let rows = stmt.query_map([], |row| {
-        Ok(Preset {
+        Ok(ModelPreset {
             id: row.get(0)?,
             title: row.get(1)?,
             tooltip: row.get(2)?,
@@ -1006,7 +972,7 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
 
     conn.execute("insert into schema_version (id, name, version)
         values (0, 'inforno_main_db', ?1);",
-        (CURRENT_SANDBOX_VERSION,))?;
+        (CURRENT_FOLIO_VERSION,))?;
 /*
     mk_chat(conn, "Welcome to Inforno!")?;
 
@@ -1027,7 +993,7 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Exports a chat as an executable Notebook in .ron format
-pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &Presets) -> rusqlite::Result<String> {
+pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &ModelPresets) -> rusqlite::Result<String> {
     let chat = fetch_chat(conn, chat_id, presets)?;
     let mut cells = Vec::new();
 
@@ -1053,7 +1019,7 @@ pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &Presets
 }
 
 /// Exports a chat to a Markdown-formatted string.
-pub fn export_chat_to_markdown(conn: &Connection, chat_id: i64, presets: &Presets) -> rusqlite::Result<String> {
+pub fn export_chat_to_markdown(conn: &Connection, chat_id: i64, presets: &ModelPresets) -> rusqlite::Result<String> {
     let chat = fetch_chat(conn, chat_id, presets)?;
     let mut md = String::new();
     md.push_str(&format!("# {}\n\n", chat.title));
