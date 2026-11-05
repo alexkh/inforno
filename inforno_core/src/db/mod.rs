@@ -5,8 +5,9 @@ use directories::ProjectDirs;
 use crate::common::{Chat, ChatMsg, DbChat, ModelPreset, ModelPresetSelection, ModelPresets, MyError, Talker};
 
 pub mod cache;
+pub mod migrate;
 
-pub const CURRENT_FOLIO_VERSION: i32 = 2;
+pub const CURRENT_FOLIO_VERSION: i32 = 3;
 
 /// Where Inforno creates new Folios unless told otherwise:
 /// `<data_dir>/folios`. A Folio can live anywhere; a Realm links to each
@@ -67,57 +68,61 @@ pub fn init_folio(path: &Path, copy_presets: bool) -> Result<(), MyError> {
     Ok(())
 }
 
-pub fn get_folio_db_conn(folio: &Option<PathBuf>) ->
-            Result<(Connection, PathBuf), MyError> {
-    if let Some(folio) = folio {
-        let conn = connect_folio_db(folio)?;
-        return Ok((conn, folio.clone()));
-    }
-
-    if let Some(proj_dirs) = ProjectDirs::from(
-            "", "", "inforno") {
-        let mut file_path_buf = PathBuf::from(proj_dirs.data_dir());
-        if !file_path_buf.is_dir() {
-            println!("Directory {} does not exist. Trying to create it...",
-                file_path_buf.display());
-            fs::create_dir_all(&file_path_buf).map_err(|_| MyError::ProjectDir)?;
-        }
-        file_path_buf.push("info.rno");
-
-        let conn = connect_folio_db(&file_path_buf)?;
-        return Ok((conn, file_path_buf));
-    }
-    Err(MyError::ProjectDir)
+/// Where the Home Folio lives, `<data_dir>/info.rno`, whether or not it
+/// exists yet.
+pub fn home_folio_file() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "inforno").map(|d| d.data_dir().join("info.rno"))
 }
 
-fn connect_folio_db(folio: &Path) -> Result<Connection, MyError> {
+/// `folio` if one is given, otherwise the Home Folio's path, creating the
+/// directory it goes in.
+pub fn folio_or_home_path(folio: &Option<PathBuf>) -> Result<PathBuf, MyError> {
+    if let Some(folio) = folio {
+        return Ok(folio.clone());
+    }
+    let path = home_folio_file().ok_or(MyError::ProjectDir)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|_| MyError::ProjectDir)?;
+    }
+    Ok(path)
+}
+
+/// The Folio's schema version, or None if it has no schema yet.
+pub(crate) fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i32>> {
+    if !table_exists(conn, "schema_version")? {
+        return Ok(None);
+    }
+    conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+        .map(Some)
+}
+
+/// Opens the Folio at `folio`, creating it with the current schema if it's
+/// new. A Folio in another format is refused before anything is written to
+/// it: version 2 with `LegacyFolio`, which `migrate::convert_legacy_folio`
+/// converts.
+pub fn connect_folio_db(folio: &Path) -> Result<Connection, MyError> {
     let conn = Connection::open(folio)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
-    if table_exists(&conn, "schema_version")? {
-        // Table exists, check the version
-        let current_version: i32 = conn.query_row(
-            "SELECT version FROM schema_version",
-            [],
-            |row| row.get(0)
-        )?;
-
-        if current_version != CURRENT_FOLIO_VERSION {
-            // Version mismatch
-            return Err(MyError::FolioVersionMismatch(
-                CURRENT_FOLIO_VERSION,
-                current_version));
+    match schema_version(&conn)? {
+        Some(CURRENT_FOLIO_VERSION) => Ok(conn),
+        Some(2) => Err(MyError::LegacyFolio(2)),
+        Some(other) => Err(MyError::FolioVersionMismatch(CURRENT_FOLIO_VERSION, other)),
+        None => {
+            println!("Folio has no schema yet. Creating it...");
+            create_database_schema(&conn)?;
+            Ok(conn)
         }
-
-        println!("Folio schema exists and is version {}.", current_version);
-        return Ok(conn);
-    } else {
-        // Schema does not exist. Create new database schema.
-        println!("Main Database schema does not exist. Creating new one...");
-        create_database_schema(&conn)?;
-
-        return Ok(conn);
     }
+}
+
+/// An empty Folio in memory. It stands in when no Folio could be opened, so
+/// the app still runs; nothing in it is saved.
+pub fn open_scratch_folio() -> rusqlite::Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    create_database_schema(&conn)?;
+    Ok(conn)
 }
 
 pub fn reset_folio_db(conn: &Connection) -> rusqlite::Result<()> {
@@ -206,7 +211,7 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
         // This is perfect for "cloning" a chat or creating a new default one.
         for talker in &mut chat.talkers {
             // We delegate to the mutating mk_talker function.
-            // This handles serializing msg_ids, preset_json, and updating talker.id.
+            // This handles serializing msg_ids, model_preset_json, and updating talker.id.
             mk_talker(conn, chat.id, talker)?;
         }
 
@@ -220,7 +225,7 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
             Ok(())
         }
         Err(e) => {
-            // If anything fails (e.g., unique constraint on agent_ind), roll back everything.
+            // If anything fails (e.g., unique constraint on talker_ind), roll back everything.
             let _ = conn.execute("ROLLBACK", []);
             Err(e)
         }
@@ -239,13 +244,13 @@ pub fn mk_talker(
 
     // 2. Insert
     conn.execute(
-        "INSERT INTO agent (
+        "INSERT INTO talker (
             chat_id,
-            agent_ind,
+            talker_ind,
             name,
             msg_ids,
-            preset_id,
-            preset_json,
+            model_preset_id,
+            model_preset_json,
             muted,
             hidden,
             deleted
@@ -277,7 +282,7 @@ pub fn mod_talker_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
             .unwrap_or_else(|_| "[]".to_string());
 
     conn.execute(
-        "UPDATE agent
+        "UPDATE talker
          SET msg_ids = ?1
          WHERE id = ?2",
         (json_ids, id),
@@ -297,8 +302,8 @@ pub fn mod_talker_model_preset(
     let json = preset_snapshot.and_then(|p| p.to_json());
 
     conn.execute(
-        "UPDATE agent
-         SET preset_id = ?1, preset_json = ?2
+        "UPDATE talker
+         SET model_preset_id = ?1, model_preset_json = ?2
          WHERE id = ?3",
         params![preset_id, json, id],
     )?;
@@ -315,7 +320,7 @@ pub fn update_talker_model_preset_snapshot(
     let json = preset.and_then(|p| p.to_json());
 
     conn.execute(
-        "UPDATE agent SET preset_json = ?1 WHERE id = ?2",
+        "UPDATE talker SET model_preset_json = ?1 WHERE id = ?2",
         rusqlite::params![json, talker_id]
     )?;
 
@@ -483,10 +488,10 @@ pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
     // 2. Insert
     conn.execute(
         "INSERT INTO msg (
-            role, content, reasoning, name, details, preset_json, preset_id
+            role, content, reasoning, name, details, model_preset_json, model_preset_id
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
-            msg.msg_role.to_string(),
+            msg.msg_role,
             msg.content,
             msg.reasoning,
             msg.name,
@@ -506,11 +511,7 @@ pub fn mod_msg(conn: &Connection, msg: &ChatMsg) -> Result<()> {
     // 1. Serialize the embedded preset
     let preset_json = msg.preset.as_ref().and_then(|p| p.to_json());
 
-    // 2. Convert role to string (assuming MsgRole implements ToString or into)
-    // If MsgRole is an enum, ensure you convert it to "user"/"assistant"/etc.
-    let role_str = msg.msg_role.to_string();
-
-    // 3. Update the row
+    // 2. Update the row (the role is stored by its code, via ToSql)
     conn.execute(
         "UPDATE msg
          SET content = ?1,
@@ -518,13 +519,13 @@ pub fn mod_msg(conn: &Connection, msg: &ChatMsg) -> Result<()> {
              role = ?3,
              name = ?4,
              details = ?5,
-             preset_json = ?6,
-             preset_id = ?7
+             model_preset_json = ?6,
+             model_preset_id = ?7
          WHERE id = ?8",
         params![
             msg.content,
             msg.reasoning,
-            role_str,
+            msg.msg_role,
             msg.name,
             msg.details,
             preset_json,
@@ -594,11 +595,11 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
     // 1. Fetch Chat Histories (aka Talkers)
     // We expect 'msg_ids' column to store JSON: "[1, 2, 3]"
     let mut stmt_talker = conn.prepare(
-        "SELECT agent_ind, msg_ids, id, preset_id, preset_json,
+        "SELECT talker_ind, msg_ids, id, model_preset_id, model_preset_json,
                 name, muted, hidden, deleted
-         FROM agent
+         FROM talker
          WHERE chat_id = ?1
-         ORDER BY agent_ind ASC"
+         ORDER BY talker_ind ASC"
     )?;
 
     let talker_iter = stmt_talker.query_map([chat_id], |row| {
@@ -650,8 +651,8 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         let placeholders = vec!["?"; all_msg_ids.len()].join(",");
 
         let sql = format!(
-            "SELECT id, role, content, name, reasoning, details, preset_json,
-                    preset_id
+            "SELECT id, role, content, name, reasoning, details, model_preset_json,
+                    model_preset_id
              FROM msg
              WHERE id IN ({})",
             placeholders
@@ -672,7 +673,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
 
             Ok(ChatMsg {
                 id: row.get(0)?,
-                msg_role: row.get::<_, String>(1)?.as_str().into(),
+                msg_role: row.get(1)?,
                 content: row.get(2)?,
                 name: row.get(3)?,
                 reasoning: row.get(4)?,
@@ -717,7 +718,7 @@ pub fn delete_chat(conn: &Connection, chat_id: i64) -> rusqlite::Result<()> {
 
 pub fn delete_model_preset(conn: &Connection, id: i64) ->
         rusqlite::Result<()> {
-    conn.execute("delete from preset where id = ?1", params![id])?;
+    conn.execute("delete from model_preset where id = ?1", params![id])?;
     Ok(())
 }
 
@@ -729,7 +730,7 @@ pub fn save_model_preset(conn: &Connection, entry: &mut ModelPreset) ->
     if entry.id == 0 {
         // 0 means that the preset is brand new, we need to insert it
         conn.execute(
-            "INSERT INTO preset (title, tooltip, chat_router, model, options)
+            "INSERT INTO model_preset (title, tooltip, chat_router, model, options)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 entry.title,
@@ -743,7 +744,7 @@ pub fn save_model_preset(conn: &Connection, entry: &mut ModelPreset) ->
     } else {
         // the preset is already in the database, we just need to update it
         let changes = conn.execute(
-            "UPDATE preset
+            "UPDATE model_preset
              SET title = ?2,
                  tooltip = ?3,
                  chat_router = ?4,
@@ -772,7 +773,7 @@ pub fn load_model_presets_vec(conn: &Connection)
         -> rusqlite::Result<Vec<ModelPreset>> {
     let mut stmt = conn.prepare(
         "select id, title, tooltip, chat_router, model, options, deleted
-        from preset order by title"
+        from model_preset order by title"
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -846,8 +847,8 @@ pub fn search_chats(conn: &Connection, keyword: &str) -> rusqlite::Result<Vec<cr
     let mut stmt = conn.prepare(
         "SELECT DISTINCT c.id, c.title, m.content, c.ts_created
          FROM msg m
-         JOIN agent a ON EXISTS (SELECT 1 FROM json_each(a.msg_ids) WHERE value = m.id)
-         JOIN chat c ON c.id = a.chat_id
+         JOIN talker t ON EXISTS (SELECT 1 FROM json_each(t.msg_ids) WHERE value = m.id)
+         JOIN chat c ON c.id = t.chat_id
          WHERE m.content LIKE ?1
          ORDER BY c.ts_created DESC"
     )?;
@@ -882,23 +883,42 @@ pub fn search_chats(conn: &Connection, keyword: &str) -> rusqlite::Result<Vec<cr
     Ok(unique_results)
 }
 
-fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
-    // we keep a history of all the messages in this database for easy access
-    conn.execute("create table msg (
+/// The `msg` table. `name` lets the v2 migration build it under a temporary
+/// name. Roles are stored by their codes (`MsgRole::db_code`).
+pub(crate) fn msg_table_sql(name: &str) -> String {
+    format!("create table {name} (
         id integer primary key autoincrement,
         content text not null,
         reasoning text,
-        role text not null check(role in ('user', 'assistant', 'system',
-            'developer', 'tool')),
+        role text not null check(role in ('usr', 'asst', 'sys', 'dev',
+            'tool', 'cell')),
         name text,
         details text,
-        preset_id integer not null default 0,
-        preset_json text,
+        model_preset_id integer not null default 0,
+        model_preset_json text,
         prompt_tokens integer,
         completion_tokens integer,
         cost real,
         ts_created datetime default current_timestamp
-    );", ())?;
+    );")
+}
+
+/// Puts a default model preset back whenever the last one is deleted.
+pub(crate) const MODEL_PRESET_NOT_EMPTY_TRIGGER: &str =
+    "create trigger ensure_model_preset_not_empty_trigger
+        after delete on model_preset
+        when not exists (select 1 from model_preset)
+        begin
+            insert into model_preset (title, tooltip, chat_router, model, options)
+            values ('DeepSeek: R1 0528 (free)', '',
+                'Openrouter',
+                'deepseek/deepseek-r1-0528:free',
+                '');
+        end;";
+
+fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // we keep a history of all the messages in this database for easy access
+    conn.execute_batch(&msg_table_sql("msg"))?;
     // chats contain messages
     conn.execute("create table chat (
         id integer primary key autoincrement,
@@ -918,20 +938,20 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
          END;",
         (),
     )?;
-    // a chat message can be shared between different chats
-    conn.execute("create table agent (
+    // a talker's view of a chat: which messages it sees, and its model preset
+    conn.execute("create table talker (
         id integer primary key autoincrement,
         name text not null default '',
         chat_id integer not null,
-        agent_ind integer not null,
+        talker_ind integer not null,
         msg_ids text default '[]',
-        preset_id integer not null default 0,
-        preset_json text,
+        model_preset_id integer not null default 0,
+        model_preset_json text,
         muted integer not null default 0,
         hidden integer not null default 0,
         deleted integer not null default 0,
         ts_created datetime default current_timestamp,
-        unique(chat_id, agent_ind),
+        unique(chat_id, talker_ind),
         foreign key (chat_id) references chat(id) on delete cascade
     );", ())?;
     // this version is needed to update older tables to newer versions
@@ -941,8 +961,8 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
         version int,
         applied_on datetime default current_timestamp
     );", ())?;
-    // presets are for ease of use, to fine-tune settings ane keep them handy
-    conn.execute("create table preset (
+    // model presets are for ease of use, to fine-tune settings and keep them handy
+    conn.execute("create table model_preset (
         id integer primary key autoincrement,
         title text not null unique,
         tooltip text,
@@ -954,21 +974,10 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
         ts_created datetime default current_timestamp,
         ts_modified datetime default current_timestamp
     )", ())?;
-    // create a trigger that will add a "default" preset if all were deleted
-    conn.execute("create trigger ensure_preset_not_empty_trigger
-        after delete on preset
-        when not exists (select 1 from preset)
-        begin
-            insert into preset (title, tooltip, chat_router, model, options)
-            values ('DeepSeek: R1 0528 (free)', '',
-                'Openrouter',
-                'deepseek/deepseek-r1-0528:free',
-                '');
-        end;
-    ", ())?;
-    // trigger that event so that the defualt preset is added:
-    conn.execute("insert into preset (id, title) values (0, 'temporary')", ())?;
-    conn.execute("delete from preset", ())?;
+    conn.execute_batch(MODEL_PRESET_NOT_EMPTY_TRIGGER)?;
+    // fire the trigger once so that the default model preset is added:
+    conn.execute("insert into model_preset (id, title) values (0, 'temporary')", ())?;
+    conn.execute("delete from model_preset", ())?;
 
     conn.execute("insert into schema_version (id, name, version)
         values (0, 'inforno_main_db', ?1);",
@@ -1009,8 +1018,8 @@ pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &ModelPr
         }
     }
 
-    let export = crate::common::NotebookExportV1 {
-        version: "1.0".to_string(),
+    let export = crate::common::NotebookExportV2 {
+        version: "2.0".to_string(),
         title: chat.title,
         cells,
     };
@@ -1035,6 +1044,7 @@ pub fn export_chat_to_markdown(conn: &Connection, chat_id: i64, presets: &ModelP
                     crate::common::MsgRole::System => "System",
                     crate::common::MsgRole::Developer => "Developer",
                     crate::common::MsgRole::Tool => "Tool",
+                    crate::common::MsgRole::Cell => "Note",
                 };
 
                 md.push_str(&format!("## {}\n\n", role_label));
@@ -1070,55 +1080,49 @@ mod tests {
         conn
     }
 
-    // Helper to print table content
-    fn print_agent_table(conn: &Connection, buffer: &mut impl Write) {
-        // Adjusted widths to fit msg_ids
+    // Prints the talker table, one row per talker
+    fn print_talker_table(conn: &Connection, buffer: &mut impl Write) {
         let _ = writeln!(buffer,
-            "id   | chat_id  | agent_ind| name            | msg_ids");
+            "id   | chat_id  | talker_ind | name            | msg_ids");
 
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, agent_ind, name, msg_ids FROM agent")
+            "SELECT id, chat_id, talker_ind, name, msg_ids FROM talker")
             .unwrap();
 
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,    // id
                 row.get::<_, i64>(1)?,    // chat_id
-                row.get::<_, i64>(2)?,    // agent_ind
+                row.get::<_, i64>(2)?,    // talker_ind
                 row.get::<_, String>(3)?, // name
-                row.get::<_, String>(4)?, // msg_ids (New Column)
+                row.get::<_, String>(4)?, // msg_ids
             ))
         }).unwrap();
 
         for row in rows {
-            let (id, chat_id, agent_ind, name, msg_ids) = row.unwrap();
-            let _ = writeln!(buffer, "{:<4} | {:<8} | {:<8} | {:<15} | {}",
-                    id, chat_id, agent_ind, name, msg_ids);
+            let (id, chat_id, talker_ind, name, msg_ids) = row.unwrap();
+            let _ = writeln!(buffer, "{:<4} | {:<8} | {:<10} | {:<15} | {}",
+                    id, chat_id, talker_ind, name, msg_ids);
         }
     }
 
     #[test]
-    fn test_agents() {
-/*        let conn = setup_db();
+    fn test_talkers() {
+        let conn = setup_db();
 
-        // create chats
-        mk_chat(&conn, "What is the ultimate answer?").expect("failed to create chat");
+        // A new chat gets Omnis (hidden, holds every message) and Talker1
+        let mut chat = crate::common::Chat::default();
+        mk_chat(&conn, &mut chat).expect("failed to create chat");
 
         let mut output = String::new();
-        print_agent_table(&conn, &mut output);
-        print!("{}", output);
+        print_talker_table(&conn, &mut output);
 
         let expected = "\
-id   | chat_id  | agent_ind| name            | msg_ids
-1    | 1        | 0        | Omnis           | []
+id   | chat_id  | talker_ind | name            | msg_ids
+1    | 1        | 0          | Omnis           | []
+2    | 1        | 1          | Talker1         | []
 ";
         assert_eq!(output, expected);
-
-        let _ = mk_agent(&conn, 1, "", &[], 0);
-        output = String::new();
-        print_agent_table(&conn, &mut output);
-        print!("{}", output);
-*/
     }
 
 }

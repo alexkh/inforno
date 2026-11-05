@@ -1,5 +1,5 @@
 //! Cells inside a chat (notebook-style): the welcome note shown in an empty
-//! chat, Developer note cells (Markdown or Rhai, view/edit), and the
+//! chat, note cells (`MsgRole::Cell`; Markdown or Rhai, view/edit), and the
 //! appender at the bottom, which commits into a new note cell and promotes
 //! a temporary chat to a saved one if needed.
 
@@ -134,7 +134,7 @@ pub(super) fn render_welcome(
     });
 }
 
-/// A Developer message: rendered like any message in View mode, editable
+/// A note cell (`MsgRole::Cell`): rendered like any message in View mode, editable
 /// as Markdown/Rhai in Edit mode. Saved on switching back to View, on focus
 /// loss, or on Ctrl+S; Esc returns to View, discarding the edit.
 pub(super) fn render_note_cell(
@@ -375,7 +375,7 @@ pub(super) fn commit_draft(ui: &mut egui::Ui, state: &mut State, chat_id: i64, d
 
     let mut new_msg = ChatMsg {
         id: 0,
-        msg_role: MsgRole::Developer,
+        msg_role: MsgRole::Cell,
         content: draft_content,
         ..Default::default()
     };

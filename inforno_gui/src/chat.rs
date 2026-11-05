@@ -281,17 +281,17 @@ fn render_chat_body(
 
     for &msg_id in &omnis.msg_ids {
         let Some(msg) = msg_pool.get(&msg_id) else { continue };
-        let _msg_span = tracing::info_span!("process_message", msg_id = msg_id, role = %msg.msg_role).entered();
+        let _msg_span = tracing::info_span!("process_message", msg_id = msg_id, role = msg.msg_role.db_code()).entered();
 
         match msg.msg_role {
-            MsgRole::User | MsgRole::System | MsgRole::Developer => {
+            MsgRole::User | MsgRole::System | MsgRole::Developer | MsgRole::Cell => {
                 if !assistant_batch.is_empty() {
                     message::render_assistant_grid(ui, ctx, actions, msg_pool, msg_ui_map, &assistant_batch);
                     assistant_batch.clear();
                 }
 
                 let msg_ui = msg_ui_map.entry(msg_id).or_default();
-                if msg.msg_role == MsgRole::Developer {
+                if msg.msg_role == MsgRole::Cell {
                     cell::render_note_cell(ui, ctx, actions, msg, msg_ui);
                 } else {
                     message::render_user_msg(ui, ctx, actions, msg, msg_ui);

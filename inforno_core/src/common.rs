@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::path::{PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -79,9 +78,11 @@ pub enum FileOp {
     ExportNotebook,
 }
 
-// Notebook Export Schema
+/// Notebook export (`.ron`), version "2.0". A note or script cell is
+/// `Cell`, and `Developer` is a developer message; in version "1.0",
+/// `Developer` meant a cell.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct NotebookExportV1 {
+pub struct NotebookExportV2 {
     pub version: String,
     pub title: String,
     pub cells: Vec<NotebookCellExport>,
@@ -130,14 +131,20 @@ pub enum MyError {
     Database(#[from] rusqlite::Error),
     #[error("Folio Version Mismatch: expected {0}, found: {1}")]
     FolioVersionMismatch(i32, i32),
+    #[error("Older Folio Format: this Folio is version {0} and needs converting")]
+    LegacyFolio(i32),
+    #[error("Folio Conversion Error: {0}")]
+    FolioConvert(String),
 }
 
+/// Who a message is from. The Folio stores it by its short code
+/// (`db_code`); the UI names it by `label`.
 #[derive(Default, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[repr(usize)]
 pub enum MsgRole {
     // System instructions that guide the AI's behavior
     System,
-    // Developer/admin context (provider-specific)
+    // Developer instructions, for providers that have them
     Developer,
     // User input or questions
     #[default]
@@ -146,29 +153,62 @@ pub enum MsgRole {
     Assistant,
     // Results from tool/function calls
     Tool,
+    /// A notebook cell: a note or a Rhai script. Never sent to a model.
+    Cell,
 }
 
-impl fmt::Display for MsgRole {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl MsgRole {
+    /// The code stored in the Folio's `msg.role` column.
+    pub fn db_code(&self) -> &'static str {
         match self {
-            MsgRole::System => write!(f, "system"),
-            MsgRole::Developer => write!(f, "developer"),
-            MsgRole::User => write!(f, "user"),
-            MsgRole::Assistant => write!(f, "assistant"),
-            MsgRole::Tool => write!(f, "tool"),
+            MsgRole::System => "sys",
+            MsgRole::Developer => "dev",
+            MsgRole::User => "usr",
+            MsgRole::Assistant => "asst",
+            MsgRole::Tool => "tool",
+            MsgRole::Cell => "cell",
+        }
+    }
+
+    /// The role stored as `code`, if it's one this version knows.
+    pub fn from_db_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "sys" => MsgRole::System,
+            "dev" => MsgRole::Developer,
+            "usr" => MsgRole::User,
+            "asst" => MsgRole::Assistant,
+            "tool" => MsgRole::Tool,
+            "cell" => MsgRole::Cell,
+            _ => return None,
+        })
+    }
+
+    /// How the UI names it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MsgRole::System => "system",
+            MsgRole::Developer => "developer",
+            MsgRole::User => "user",
+            MsgRole::Assistant => "assistant",
+            MsgRole::Tool => "tool",
+            MsgRole::Cell => "note",
         }
     }
 }
 
-impl From<&str> for MsgRole {
-    fn from(input: &str) -> Self {
-        match input {
-            "assistant" => MsgRole::Assistant,
-            "system" => MsgRole::System,
-            "developer" => MsgRole::Developer,
-            "tool" => MsgRole::Tool,
-            _ => MsgRole::User,
-        }
+impl ToSql for MsgRole {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.db_code()))
+    }
+}
+
+/// Reading a role this version doesn't know is an error, never a guess.
+impl FromSql for MsgRole {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let code = value.as_str()?;
+        MsgRole::from_db_code(code).ok_or_else(|| {
+            FromSqlError::Other(format!("unknown message role {:?}", code).into())
+        })
     }
 }
 
@@ -180,6 +220,8 @@ impl From<MsgRole> for Role {
             MsgRole::User => Role::User,
             MsgRole::Assistant => Role::Assistant,
             MsgRole::Tool => Role::Tool,
+            // Never reached: to_openrouter_messages drops cells first.
+            MsgRole::Cell => Role::Developer,
         }
     }
 }
@@ -192,6 +234,8 @@ impl From<MsgRole> for MessageRole {
             MsgRole::User => MessageRole::User,
             MsgRole::Assistant => MessageRole::Assistant,
             MsgRole::Tool => MessageRole::Tool,
+            // Never reached: to_ollama_messages drops cells first.
+            MsgRole::Cell => MessageRole::System,
         }
     }
 }
@@ -368,8 +412,8 @@ impl Chat {
                 .iter()
                 .filter_map(|msg_id| {
                     let msg = self.msg_pool.get(msg_id)?;
-                    // Skip Developer (Note) messages
-                    if msg.msg_role == MsgRole::Developer {
+                    // Notebook cells are never sent
+                    if msg.msg_role == MsgRole::Cell {
                         return None;
                     }
                     Some(msg.clone().into()) // Clone ChatMsg, Convert to openrouter
@@ -387,8 +431,8 @@ impl Chat {
                 .iter()
                 .filter_map(|msg_id| {
                     let msg = self.msg_pool.get(msg_id)?;
-                    // NEW: Skip Developer (Note) messages
-                    if msg.msg_role == MsgRole::Developer {
+                    // Notebook cells are never sent
+                    if msg.msg_role == MsgRole::Cell {
                         return None;
                     }
                     Some(msg.clone().into()) // Clone ChatMsg, Convert to ollama_rs

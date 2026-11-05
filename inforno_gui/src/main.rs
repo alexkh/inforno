@@ -20,6 +20,7 @@ mod autocomplete;
 mod bottom_panel;
 mod chat;
 mod emoji_render;
+mod folio_convert;
 mod key_manager;
 mod panes;
 mod model_preset_editor;

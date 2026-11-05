@@ -229,7 +229,7 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                                         ui.close();
                                     }
 
-                                    if ui.add(egui::Button::new(egui::RichText::new("Export Notebook")).frame(false)).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v1").heading()).clicked() {
+                                    if ui.add(egui::Button::new(egui::RichText::new("Export Notebook")).frame(false)).on_hover_text(egui::RichText::new("Export as a raw Rhai Notebook v2").heading()).clicked() {
                                         if let Ok(ron_data) = inforno_core::db::export_notebook_to_ron(&state.db_conn, db_chat.id, &state.presets) {
                                             state.pending_file_dialog_op = Some(inforno_core::common::FileOp::ExportNotebook);
                                             state.pending_export_content = Some(ron_data);

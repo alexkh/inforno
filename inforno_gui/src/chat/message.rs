@@ -98,7 +98,7 @@ pub(super) fn render_user_msg(
                     .corner_radius(5.0)
                     .fill(ui.visuals().extreme_bg_color)
                     .show(ui, |ui| {
-                        render_msg_header(ui, msg_ui, &msg.msg_role.to_string(), msg, &mut actions.delete_requests);
+                        render_msg_header(ui, msg_ui, msg.msg_role.label(), msg, &mut actions.delete_requests);
                         render_msg_content(ui, ctx, actions, msg, msg_ui, (max_w - 20.0) as usize);
                         render_attachments(ui, msg, &ctx.math_cache);
                     });

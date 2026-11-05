@@ -8,8 +8,8 @@ use egui_commonmark::CommonMarkCache;
 use rusqlite::Connection;
 use tokio::runtime::Handle;
 use egui::Color32;
-use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, ModelPresets, OllamaDownloading, load_model_presets};
-use inforno_core::db::{fetch_chat, fetch_chat_titles, get_folio_db_conn, mod_msg_content_reasoning};
+use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, ModelPresets, MyError, OllamaDownloading, load_model_presets};
+use inforno_core::db::{connect_folio_db, fetch_chat, fetch_chat_titles, folio_or_home_path, mod_msg_content_reasoning, open_scratch_folio};
 use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_names, get_openr_model_names};
 use crate::talker_config::{TalkerConfigState, ui_talker_config};
 use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
@@ -182,6 +182,14 @@ pub struct State {
     /// Old key names the open Realm's realm2.yml still uses, for the banner
     /// (`inforno_core::realm::legacy_realm_keys`). Empty outside a Realm.
     pub realm_legacy_keys: Vec<String>,
+    /// A Folio in the older format that was asked for: the offer to convert it.
+    pub legacy_folio: Option<crate::folio_convert::LegacyFolioPrompt>,
+    /// Why no Folio is open (a scratch Folio in memory stands in, nothing
+    /// is saved), for the banner.
+    pub folio_unavailable: Option<String>,
+    /// Shown after a conversion: the new path, the backup, and the Realms
+    /// that still link the old path.
+    pub converted_folio_notice: Option<crate::folio_convert::ConvertedFolioNotice>,
 }
 
 impl State {
@@ -202,12 +210,36 @@ impl State {
         let mut chats: Vec<DbChat> = vec![];
         let mut presets = ModelPresets::default();
 
-        // 1. Establish Connection or Die
-        let (conn, folio) = match get_folio_db_conn(&new_folio) {
-            Ok(tuple) => tuple,
-            Err(error) => {
-                eprintln!("Error opening the Folio: {}", error);
-                std::process::exit(1); // Quit immediately
+        // 1. Open the Folio. If it can't be opened, an empty Folio in memory
+        // stands in (nothing is saved) and a banner says why. A Folio in the
+        // older format also gets the offer to convert it.
+        let mut legacy_folio = None;
+        let mut folio_unavailable = None;
+        let scratch = || open_scratch_folio().expect("an empty Folio in memory always opens");
+        let (conn, folio) = match folio_or_home_path(&new_folio) {
+            Ok(path) => match connect_folio_db(&path) {
+                Ok(conn) => (conn, path),
+                Err(MyError::LegacyFolio(version)) => {
+                    folio_unavailable = Some(format!(
+                        "{} is in the older Folio format and isn't open.", path.display()
+                    ));
+                    legacy_folio = Some(crate::folio_convert::LegacyFolioPrompt::new(
+                        path.clone(), version, is_home,
+                    ));
+                    (scratch(), path)
+                }
+                Err(e) => {
+                    eprintln!("Error opening the Folio {}: {}", path.display(), e);
+                    folio_unavailable = Some(format!(
+                        "Couldn't open the Folio {}: {}.", path.display(), e
+                    ));
+                    (scratch(), path)
+                }
+            },
+            Err(e) => {
+                eprintln!("Error finding the Home Folio: {}", e);
+                folio_unavailable = Some(format!("Couldn't find where the Home Folio goes: {}.", e));
+                (scratch(), PathBuf::new())
             }
         };
 
@@ -326,21 +358,28 @@ impl State {
         // 2. Load Initial Data (using the valid 'conn')
         load_model_presets(&conn, &mut presets);
 
-        chats = fetch_chat_titles(&conn).unwrap_or_else(|e| {
-            eprintln!("CRITICAL: Could not fetch chat titles: {}", e);
-            std::process::exit(1);
-        });
+        chats = match fetch_chat_titles(&conn) {
+            Ok(titles) => titles,
+            Err(e) => {
+                eprintln!("Could not fetch chat titles: {}", e);
+                initial_error_msg.get_or_insert(format!("Couldn't read the chats in this Folio: {}", e));
+                Vec::new()
+            }
+        };
 
         let mut open_chats: HashMap<i64, common::Chat> = HashMap::new();
         let active_chat_id: Option<i64>;
-        if let Some(first_chat_info) = chats.first() {
-            let chat = fetch_chat(&conn, first_chat_info.id, &presets)
-                .unwrap_or_else(|e| {
-                    eprintln!("CRITICAL: Could not fetch initial chat: {}", e);
-                    std::process::exit(1);
-                });
-            open_chats.insert(first_chat_info.id, chat);
-            active_chat_id = Some(first_chat_info.id);
+        let first_chat = chats.first().and_then(|info| match fetch_chat(&conn, info.id, &presets) {
+            Ok(chat) => Some((info.id, chat)),
+            Err(e) => {
+                eprintln!("Could not fetch initial chat: {}", e);
+                initial_error_msg.get_or_insert(format!("Couldn't open the chat '{}': {}", info.title, e));
+                None
+            }
+        });
+        if let Some((chat_id, chat)) = first_chat {
+            open_chats.insert(chat_id, chat);
+            active_chat_id = Some(chat_id);
         } else {
             // FIX: Ensure a blank slate properly initializes the chat state
             // so the bottom panel doesn't start locked out.
@@ -536,7 +575,7 @@ impl State {
                 tx: chat_tx,
             },
             error_msg: initial_error_msg.clone(), // if there is an error, modal will auto open
-            is_modal_open: initial_error_msg.is_some() || show_realm_folio_init,
+            is_modal_open: initial_error_msg.is_some() || show_realm_folio_init || legacy_folio.is_some(),
             bottom_panel_state: BottomPanelState::default(),
             talker_config_state: TalkerConfigState::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
@@ -555,6 +594,9 @@ impl State {
             chat_widths: std::collections::HashMap::new(),
             chat_highlights: std::collections::HashMap::new(),
             realm_legacy_keys,
+            legacy_folio,
+            folio_unavailable,
+            converted_folio_notice: None,
         }
     }
 
@@ -928,6 +970,8 @@ impl eframe::App for MyApp {
 
         crate::top_panel::ui_realm_legacy_banner(ui, state);
 
+        crate::folio_convert::ui_folio_banner(ui, state);
+
         ui_side_panel(ui, state);
 
         ui_key_manager(ui, state);
@@ -1102,6 +1146,9 @@ impl eframe::App for MyApp {
                 state.is_modal_open = false;
             }
         }
+
+        crate::folio_convert::ui_legacy_folio_prompt(&ctx, state);
+        crate::folio_convert::ui_converted_folio_notice(&ctx, state);
 
         // Realm Folio Initialization Modal. Only ever shown, never triggered
         // automatically: a Realm with no resolvable `folios:` entry is

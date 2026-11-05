@@ -459,6 +459,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                     state.realm_config_state.yaml_buffer = config_str.clone();
                                                     state.realm_config_state.original_yaml = config_str;
                                                     state.realm_config_state.cached_config = None;
+                                                    state.realm_config_state.realm_name = Some(active_realm.name.clone());
                                                 }
                                             }
                                         }
