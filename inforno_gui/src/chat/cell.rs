@@ -357,7 +357,7 @@ pub(super) fn commit_draft(ui: &mut egui::Ui, state: &mut State, chat_id: i64, d
             title.to_string()
         };
 
-        // Chat::default() + mk_chat() already create the Omnis agent
+        // Chat::default() + mk_chat() already create Omnis (talker 0)
         if let Ok(()) = inforno_core::db::mk_chat(&state.db_conn, &mut new_chat) {
             actual_chat_id = new_chat.id;
             state.open_chats.insert(actual_chat_id, new_chat);
@@ -384,9 +384,9 @@ pub(super) fn commit_draft(ui: &mut egui::Ui, state: &mut State, chat_id: i64, d
         let new_id = new_msg.id;
         if let Some(target_chat) = state.open_chats.get_mut(&actual_chat_id) {
             target_chat.msg_pool.insert(new_id, new_msg);
-            for agent in target_chat.agents.iter_mut() {
-                agent.msg_ids.push(new_id);
-                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+            for talker in target_chat.talkers.iter_mut() {
+                talker.msg_ids.push(new_id);
+                let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
             }
         }
     }

@@ -22,6 +22,30 @@ fn switch_to_realm_folio(state: &mut State, realm_name: &str, folio_key: &str) {
     state.is_modal_open = true;
 }
 
+/// Persistent strip under the menu bar while the open Realm's realm2.yml
+/// still uses key names that are only read for compatibility. Nothing
+/// rewrites the file for you; this says what to change by hand. It goes
+/// away on the next reload after the file is fixed (saving in the Realm
+/// editor reloads).
+pub fn ui_realm_legacy_banner(ui: &mut egui::Ui, state: &State) {
+    if state.realm_legacy_keys.is_empty() {
+        return;
+    }
+    let realm_name = state.active_realm.as_ref().map(|r| r.name.clone())
+        .or_else(|| state.perma.active_realm_name.lock().unwrap().clone())
+        .unwrap_or_default();
+
+    egui::Panel::top("realm_legacy_banner").show(ui, |ui| {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("Realm '{}': realm2.yml still uses old key names. They still work, but please change them by hand:", realm_name),
+        );
+        for key in &state.realm_legacy_keys {
+            ui.label(format!("  • {}", key));
+        }
+    });
+}
+
 pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
 
@@ -444,10 +468,10 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
 
                             #[cfg(target_os = "linux")]
                             {
-                                if ui.button("👥").on_hover_text("Open interactive terminal as role...").clicked() {
+                                if ui.button("👥").on_hover_text("Open interactive terminal as duty...").clicked() {
                                 }
                                 // --- 💻 Terminal ---
-                                if ui.button("💻").on_hover_text("Open interactive terminal in VFS (as gui)").clicked() {
+                                if ui.button("💻").on_hover_text(format!("Open interactive terminal in VFS (as {})", crate::chat::GUI_DUTY)).clicked() {
                                     if let Ok(exe_path) = std::env::current_exe() {
                                         if let Some(parent) = exe_path.parent() {
                                             let autorno_path = parent.join("autorno");
@@ -476,7 +500,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                                     .arg("--workdir")
                                                     .arg(&start_dir)
                                                     .arg(&realm.name)
-                                                    .arg("gui")
+                                                    .arg(crate::chat::GUI_DUTY)
                                                     .spawn()
                                                     .is_ok()
                                                 {

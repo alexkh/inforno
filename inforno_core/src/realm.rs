@@ -6,19 +6,19 @@ use std::sync::Arc;
 
 /// A trust tier, 0-9. `0` and `1` are hardcoded and reserved:
 /// - `0` (`NONE`): no power, of any kind, can ever apply. Provably zero access.
-/// - `1` (`ROLE_ONLY`): only a role's OWN `powers` apply — tiers never cascade in.
+/// - `1` (`DUTY_ONLY`): only a duty's OWN `powers` apply — tiers never cascade in.
 /// Tiers `2..=9` are config-defined via `RealmConfig::tiers` and cascade
-/// upward: a role at tier N holds every power defined at any tier `2..=N`,
+/// upward: a duty at tier N holds every power defined at any tier `2..=N`,
 /// plus its own. Numbers ascend from least to most trusted, so adding a
 /// more-trusted tier later is just a bigger number — nothing existing needs
-/// renumbering, and low-tier roles never need to know how many tiers exist
+/// renumbering, and low-tier duties never need to know how many tiers exist
 /// above them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Tier(pub u32);
 
 impl Tier {
     pub const NONE: Tier = Tier(0);
-    pub const ROLE_ONLY: Tier = Tier(1);
+    pub const DUTY_ONLY: Tier = Tier(1);
     pub const MIN_CASCADING: Tier = Tier(2);
     pub const MAX: Tier = Tier(9);
 }
@@ -124,7 +124,7 @@ pub enum Cap {
     /// Write restricted to appending at end-of-file: no truncation, no
     /// arbitrary-offset writes. Enforced at the FUSE layer (blocking
     /// truncating `setattr` and non-EOF `write` offsets) for paths where a
-    /// role holds only `Append`, not `Write`.
+    /// duty holds only `Append`, not `Write`.
     Append,
     Create,
 }
@@ -167,25 +167,24 @@ pub enum Power {
     },
 }
 
-/// A role definition: a Tier plus any powers specific to this role alone
-/// (on top of whatever the Tier cascades in). Elevation/tier is intrinsic to
-/// the role, not assignable per-Actor, so a role's containment guarantee
-/// holds everywhere it's used, regardless of what other roles the same
-/// Actor simultaneously holds.
+/// A duty definition: a Tier plus any powers specific to this duty alone
+/// (on top of whatever the Tier cascades in). The tier belongs to the duty,
+/// not to whatever process carries it out, so a duty's containment holds
+/// everywhere it's used.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RoleConfig {
+pub struct DutyConfig {
     pub tier: Tier,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub powers: Vec<serde_saphyr::Commented<Power>>,
-    // `intro` was removed: roles are entries in `RealmConfig::roles`,
-    // already wrapped in `Commented<RoleConfig>`, so a description now
-    // lives as a YAML comment on/above the role's key instead of a
+    // `intro` was removed: duties are entries in `RealmConfig::duties`,
+    // already wrapped in `Commented<DutyConfig>`, so a description now
+    // lives as a YAML comment on/above the duty's key instead of a
     // dedicated (and previously required) field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boss: Option<String>,
     /// Glob expression selecting extra host binaries (matched by bare
     /// basename) to expose in `/bin`, on top of whatever the Realm-wide
-    /// `bin` and this role's Tier(s) already contribute. See
+    /// `bin` and this duty's Tier(s) already contribute. See
     /// `RealmConfig::bin` for how the cascade combines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bin: Vec<String>,
@@ -230,11 +229,12 @@ pub struct FolioRef {
     /// authorizes, and must not rely on a resolver reconstructing a path
     /// from a short name.
     pub path: PathBuf,
-    /// Realm roles this Folio is allowed to use.
+    /// Realm duties this Folio is allowed to use.
     /// Empty means the Folio is known but not authorized to open
-    /// this Realm under any role.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<String>,
+    /// this Realm under any duty. `roles` is the key's former name: still
+    /// read, never written.
+    #[serde(default, alias = "roles", skip_serializing_if = "Vec::is_empty")]
+    pub duties: Vec<String>,
     // A description lives as a YAML comment on/above the Folio's key in
     // `RealmConfig::folios` (`Commented<FolioRef>`), not in a field.
 }
@@ -251,8 +251,8 @@ pub struct TierConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub powers: Vec<serde_saphyr::Commented<Power>>,
     /// Glob expression selecting extra host binaries (matched by bare
-    /// basename) to expose in `/bin` to every role at or above this tier —
-    /// unioned with the Realm-wide `bin` and whatever the role adds itself.
+    /// basename) to expose in `/bin` to every duty at or above this tier —
+    /// unioned with the Realm-wide `bin` and whatever the duty adds itself.
     /// See `RealmConfig::bin` for how the cascade combines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bin: Vec<String>,
@@ -297,17 +297,19 @@ pub struct RealmConfig {
     /// at load time. Purely a config-authoring convenience.
     #[serde(default, rename = "spans", skip_serializing_if = "IndexMap::is_empty")]
     pub expressions: IndexMap<String, GlobExpr>,
-    /// Tier number (2-9) -> powers cascading to every role AT OR ABOVE that
+    /// Tier number (2-9) -> powers cascading to every duty AT OR ABOVE that
     /// tier. Sparse: a tier number with no entry contributes nothing, no
     /// contiguity required. 0 and 1 are reserved and may not appear here.
     /// `Commented` wrapping is the same comment-preservation mechanism as
     /// `mounts` above.
     #[serde(default)]
     pub tiers: BTreeMap<u32, serde_saphyr::Commented<TierConfig>>,
-    /// Role name -> Tier/role-specific powers. `Commented` wrapping is the
-    /// same comment-preservation mechanism as `mounts` above.
-    #[serde(default)]
-    pub roles: IndexMap<String, serde_saphyr::Commented<RoleConfig>>,
+    /// Duty name -> Tier/duty-specific powers. `Commented` wrapping is the
+    /// same comment-preservation mechanism as `mounts` above. `roles` is the
+    /// key's former name: still read, so existing Realm files load until
+    /// they're updated by hand, and never written.
+    #[serde(default, alias = "roles")]
+    pub duties: IndexMap<String, serde_saphyr::Commented<DutyConfig>>,
     /// Folios permitted to open this Realm, keyed by local name. The first
     /// entry is the default Folio, opened when the Realm itself is opened
     /// directly. Each Folio must provide an absolute `path` to a
@@ -322,8 +324,8 @@ pub struct RealmConfig {
     /// chroot `/bin`, on top of the fixed coreutils list (`bash`, `ls`,
     /// `cat`, ...) that's always present regardless of this cascade. This
     /// is the base of the `bin` cascade — applied first, then unioned with
-    /// whatever the actor's Tier(s) (`TierConfig::bin`) and Role
-    /// (`RoleConfig::bin`) add on top. A match at ANY level is enough to
+    /// whatever the duty's Tier(s) (`TierConfig::bin`) and the duty itself
+    /// (`DutyConfig::bin`) add on top. A match at ANY level is enough to
     /// expose a binary — "everything except X" is expressed within one
     /// level's own expression (`all` + `not`), not by subtracting across
     /// levels. See `ActiveRealm::bin_is_selected`.
@@ -380,16 +382,61 @@ pub fn folio_path_is_valid(path: &Path, realms_dir: &Path) -> bool {
     !canon_parent.starts_with(&canon_realms)
 }
 
+/// True for any key that is present, whatever its value (even empty).
+fn key_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(d).map(|_| true)
+}
+
+/// Reads only the keys whose names changed; every other key is skipped.
+#[derive(Deserialize)]
+struct LegacyKeyProbe {
+    #[serde(default, deserialize_with = "key_present")]
+    roles: bool,
+    #[serde(default)]
+    sandboxes: Option<IndexMap<String, FolioKeyProbe>>,
+    #[serde(default)]
+    folios: Option<IndexMap<String, FolioKeyProbe>>,
+}
+
+#[derive(Deserialize)]
+struct FolioKeyProbe {
+    #[serde(default, deserialize_with = "key_present")]
+    roles: bool,
+}
+
+/// The old key names a realm2.yml still uses, each with its new name, for
+/// the user to change by hand. They still load (`serde(alias)`), but
+/// nothing rewrites a Realm file on its own. Empty when there are none, or
+/// when the file doesn't parse (the real parse reports that).
+pub fn legacy_realm_keys(yaml: &str) -> Vec<String> {
+    let Ok(probe) = serde_saphyr::from_str::<LegacyKeyProbe>(yaml) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if probe.roles {
+        out.push("`roles:` at the top level → `duties:`".to_string());
+    }
+    if probe.sandboxes.is_some() {
+        out.push("`sandboxes:` at the top level → `folios:`".to_string());
+    }
+    for (name, folio) in probe.folios.iter().flatten().chain(probe.sandboxes.iter().flatten()) {
+        if folio.roles {
+            out.push(format!("`roles:` in Folio '{}' → `duties:`", name));
+        }
+    }
+    out
+}
+
 
 /// A compiled `Power`, ready to be matched against relative paths (`Fs`), or
 /// simply held as a resolved device grant (`Mic`/`Speaker` — there's
 /// nothing to compile for these beyond cloning the device list, but they
-/// share the enum so `effective_powers`/`describe_role_capabilities` keep
-/// treating all three uniformly as "things a role holds").
+/// share the enum so `effective_powers`/`describe_duty_capabilities` keep
+/// treating all three uniformly as "things a duty holds").
 #[derive(Clone)]
 pub enum CompiledPower {
     Fs {
-        /// Raw source, kept for display purposes (`describe_role_capabilities`
+        /// Raw source, kept for display purposes (`describe_duty_capabilities`
         /// via `describe_expr`) — matching always uses the compiled `span`.
         span_source: GlobExpr,
         span: Arc<CompiledExpr>,
@@ -470,7 +517,7 @@ pub struct CompiledMount {
 }
 
 #[derive(Clone)]
-pub struct CompiledRole {
+pub struct CompiledDuty {
     pub tier: Tier,
     pub boss: Option<String>,
     pub powers: Vec<CompiledPower>,
@@ -484,7 +531,7 @@ pub struct ActiveRealm {
     pub name: String,
     pub mounts: Vec<CompiledMount>,
     pub raw_config: RealmConfig,
-    pub roles: HashMap<String, CompiledRole>,
+    pub duties: HashMap<String, CompiledDuty>,
     /// Tier number -> powers cascading from that tier upward. `BTreeMap`
     /// keeps numeric order for `range()` queries during cascade resolution.
     pub tiers: BTreeMap<u32, Vec<CompiledPower>>,
@@ -498,12 +545,12 @@ pub struct ActiveRealm {
     pub bin: Option<Arc<globset::GlobSet>>,
     pub env: Option<Arc<globset::GlobSet>>,
     pub env_vars: HashMap<String, String>,
-    /// Plain-English capability descriptions per role name, computed once at
+    /// Plain-English capability descriptions per duty name, computed once at
     /// construction time. Correctness depends on `ActiveRealm` always being
     /// rebuilt fresh via `from_config` when realm2.yml changes, rather than
     /// mutated in place — if that assumption ever changes, this cache needs
     /// explicit invalidation.
-    pub role_capabilities: HashMap<String, Arc<Vec<String>>>,
+    pub duty_capabilities: HashMap<String, Arc<Vec<String>>>,
 }
 
 fn compile_bin_list(bins: &[String]) -> Result<Option<Arc<globset::GlobSet>>, String> {
@@ -604,23 +651,23 @@ impl ActiveRealm {
             }
         }
 
-        // --- Roles: validate tier 0 has no powers, tier <= 9, compile powers. ---
-        let mut roles: HashMap<String, CompiledRole> = HashMap::new();
-        for (rname, rcfg) in &raw_config.roles {
-            let rcfg = &rcfg.0;
-            if rcfg.tier.0 > Tier::MAX.0 {
-                return Err(format!("Role '{}' has tier {}, which exceeds the maximum of {}", rname, rcfg.tier.0, Tier::MAX.0));
+        // --- Duties: validate tier 0 has no powers, tier <= 9, compile powers. ---
+        let mut duties: HashMap<String, CompiledDuty> = HashMap::new();
+        for (dname, dcfg) in &raw_config.duties {
+            let dcfg = &dcfg.0;
+            if dcfg.tier.0 > Tier::MAX.0 {
+                return Err(format!("Duty '{}' has tier {}, which exceeds the maximum of {}", dname, dcfg.tier.0, Tier::MAX.0));
             }
-            if rcfg.tier == Tier::NONE && (!rcfg.powers.is_empty() || !rcfg.bin.is_empty()) {
+            if dcfg.tier == Tier::NONE && (!dcfg.powers.is_empty() || !dcfg.bin.is_empty()) {
                 return Err(format!(
-                    "Role '{}' is at tier 0 (no access, hardcoded) but declares its own powers \
+                    "Duty '{}' is at tier 0 (no access, hardcoded) but declares its own powers \
                      and/or extra binaries. Tier 0 can never receive any power or extra \
                      binary, of any kind — remove them or raise the tier.",
-                    rname
+                    dname
                 ));
             }
 
-            let compiled_powers = rcfg
+            let compiled_powers = dcfg
                 .powers
                 .iter()
                 .map(|p| {
@@ -629,33 +676,33 @@ impl ActiveRealm {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let compiled_bin = compile_bin_list(&rcfg.bin)
-                .map_err(|e| format!("In role '{}'s `bin`: {}", rname, e))?;
+            let compiled_bin = compile_bin_list(&dcfg.bin)
+                .map_err(|e| format!("In duty '{}'s `bin`: {}", dname, e))?;
 
-            let (compiled_env, env_vars) = compile_env_list(&rcfg.env)
-                .map_err(|e| format!("In role '{}'s `env`: {}", rname, e))?;
+            let (compiled_env, env_vars) = compile_env_list(&dcfg.env)
+                .map_err(|e| format!("In duty '{}'s `env`: {}", dname, e))?;
 
-            roles.insert(
-                rname.clone(),
-                CompiledRole {
-                    tier: rcfg.tier,
-                    boss: rcfg.boss.clone(),
+            duties.insert(
+                dname.clone(),
+                CompiledDuty {
+                    tier: dcfg.tier,
+                    boss: dcfg.boss.clone(),
                     powers: compiled_powers,
                     bin: compiled_bin,
-					env: compiled_env,
+                    env: compiled_env,
                     env_vars,
                 },
             );
         }
 
-        // --- Folios: validate required absolute .rno paths and allowed role names. ---
+        // --- Folios: validate required absolute .rno paths and allowed duty names. ---
         if let Some((fname, fref)) = raw_config.folios.first() {
             let fref = &fref.0;
             if !fref.path.exists() {
                 return Err(format!("Default Folio '{}' points to a non-existent path: {}", fname, fref.path.display()));
             }
-            if fref.roles.is_empty() {
-                return Err(format!("The default Folio '{}' must authorize at least one Realm role; otherwise the Realm cannot be opened through it.", fname));
+            if fref.duties.is_empty() {
+                return Err(format!("The default Folio '{}' must authorize at least one Realm duty; otherwise the Realm cannot be opened through it.", fname));
             }
         }
 
@@ -675,11 +722,11 @@ impl ActiveRealm {
                 ));
             }
 
-            for role_name in &fref.roles {
-                if !roles.contains_key(role_name) {
+            for duty_name in &fref.duties {
+                if !duties.contains_key(duty_name) {
                     return Err(format!(
-                        "Folio '{}' lists role '{}', but that role is not defined in this Realm",
-                        fname, role_name
+                        "Folio '{}' lists duty '{}', but that duty is not defined in this Realm",
+                        fname, duty_name
                     ));
                 }
             }
@@ -695,7 +742,7 @@ impl ActiveRealm {
             name,
             mounts,
             raw_config,
-            roles,
+            duties,
             tiers,
             tier_bins,
             tier_envs,
@@ -703,14 +750,14 @@ impl ActiveRealm {
             bin,
             env,
             env_vars,
-            role_capabilities: HashMap::new(),
+            duty_capabilities: HashMap::new(),
         };
 
-        let role_names: Vec<String> = realm.roles.keys().cloned().collect();
-        realm.role_capabilities = role_names
+        let duty_names: Vec<String> = realm.duties.keys().cloned().collect();
+        realm.duty_capabilities = duty_names
             .into_iter()
             .map(|n| {
-                let caps = realm.describe_role_capabilities(&n);
+                let caps = realm.describe_duty_capabilities(&n);
                 (n, Arc::new(caps))
             })
             .collect();
@@ -718,36 +765,36 @@ impl ActiveRealm {
         Ok(realm)
     }
 
-    /// All powers effectively held by `role`: every power defined at any
-    /// tier `2..=role.tier` (cascading; gaps in `tiers` simply contribute
-    /// nothing — no contiguity is required), plus the role's own `powers`.
+    /// All powers effectively held by `duty`: every power defined at any
+    /// tier `2..=duty.tier` (cascading; gaps in `tiers` simply contribute
+    /// nothing — no contiguity is required), plus the duty's own `powers`.
     /// Tier 0 never reaches here in practice (callers short-circuit it);
-    /// tier 1 correctly yields only the role's own powers, since the range
+    /// tier 1 correctly yields only the duty's own powers, since the range
     /// `2..=1` is empty.
-    fn effective_powers<'a>(&'a self, role: &'a CompiledRole) -> Vec<&'a CompiledPower> {
+    fn effective_powers<'a>(&'a self, duty: &'a CompiledDuty) -> Vec<&'a CompiledPower> {
         let mut out: Vec<&CompiledPower> = Vec::new();
-        if role.tier.0 >= Tier::MIN_CASCADING.0 {
-            for (_, powers) in self.tiers.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+        if duty.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, powers) in self.tiers.range(Tier::MIN_CASCADING.0..=duty.tier.0) {
                 out.extend(powers.iter());
             }
         }
-        out.extend(role.powers.iter());
+        out.extend(duty.powers.iter());
         out
     }
 
     /// Whether `candidate` (a bare binary basename, e.g. `Path::new("cc")`)
-    /// is selected by `role_name`'s effective `bin` expression. Resolution
+    /// is selected by `duty_name`'s effective `bin` expression. Resolution
     /// mirrors `effective_powers`: the Realm-wide `bin` (if any) is checked
-    /// first, then every cascading tier's `bin` from `2..=role.tier`, then
-    /// the role's own `bin` — a match at ANY level is sufficient (a union
+    /// first, then every cascading tier's `bin` from `2..=duty.tier`, then
+    /// the duty's own `bin` — a match at ANY level is sufficient (a union
     /// across levels). Excluding names ("everything except X") is
     /// expressed within a single level's own boolean expression
     /// (`all` + `not`), not by subtracting across levels. Tier 0 (`NONE`)
     /// is "provably zero access, of any kind" by design (see `Tier`), so it
     /// short-circuits to `false` even for the Realm-wide `bin`.
-    pub fn bin_is_selected(&self, role_name: &str, candidate: &Path) -> bool {
-        let Some(role) = self.roles.get(role_name) else { return false };
-        if role.tier == Tier::NONE {
+    pub fn bin_is_selected(&self, duty_name: &str, candidate: &Path) -> bool {
+        let Some(duty) = self.duties.get(duty_name) else { return false };
+        if duty.tier == Tier::NONE {
             return false;
         }
 
@@ -757,15 +804,15 @@ impl ActiveRealm {
             }
         }
 
-        if role.tier.0 >= Tier::MIN_CASCADING.0 {
-            for (_, expr) in self.tier_bins.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+        if duty.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, expr) in self.tier_bins.range(Tier::MIN_CASCADING.0..=duty.tier.0) {
                 if expr.is_match(candidate) {
                     return true;
                 }
             }
         }
 
-        if let Some(expr) = &role.bin {
+        if let Some(expr) = &duty.bin {
             if expr.is_match(candidate) {
                 return true;
             }
@@ -774,18 +821,11 @@ impl ActiveRealm {
         false
     }
 
-    /// Scans `search_dirs` (host directories, e.g. `/usr/bin`,
-    /// `/usr/local/bin`) for entries whose basename is selected by
-    /// `role_name`'s effective `bin` expression (`bin_is_selected`),
-    /// returning their absolute host paths. Used to decide which extra
-    /// binaries get bind-mounted into a spawned process's chroot `/bin`,
-    /// on top of the fixed coreutils list `realm_spawn.rs` always mounts.
-    /// A basename already seen in an earlier dir is skipped, so distros
-    /// where e.g. `/bin` symlinks to `/usr/bin` don't produce duplicate
-    /// mount attempts for the same name.
-    pub fn env_is_selected(&self, role_name: &str, candidate: &str) -> bool {
-        let Some(role) = self.roles.get(role_name) else { return false };
-        if role.tier == Tier::NONE {
+    /// Whether host variable `candidate` passes through to `duty_name`'s
+    /// processes. Same cascade as `bin_is_selected`.
+    pub fn env_is_selected(&self, duty_name: &str, candidate: &str) -> bool {
+        let Some(duty) = self.duties.get(duty_name) else { return false };
+        if duty.tier == Tier::NONE {
             return false;
         }
 
@@ -797,15 +837,15 @@ impl ActiveRealm {
             }
         }
 
-        if role.tier.0 >= Tier::MIN_CASCADING.0 {
-            for (_, set) in self.tier_envs.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+        if duty.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, set) in self.tier_envs.range(Tier::MIN_CASCADING.0..=duty.tier.0) {
                 if set.is_match(cand_path) {
                     return true;
                 }
             }
         }
 
-        if let Some(set) = &role.env {
+        if let Some(set) = &duty.env {
             if set.is_match(cand_path) {
                 return true;
             }
@@ -814,17 +854,17 @@ impl ActiveRealm {
         false
     }
 
-    pub fn allowed_envs(&self, role_name: &str) -> Vec<(String, String)> {
+    pub fn allowed_envs(&self, duty_name: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (k, v) in std::env::vars() {
-            if self.env_is_selected(role_name, &k) {
+            if self.env_is_selected(duty_name, &k) {
                 out.push((k, v));
             }
         }
 
-        let Some(role) = self.roles.get(role_name) else { return out };
+        let Some(duty) = self.duties.get(duty_name) else { return out };
 
-        if role.tier == Tier::NONE {
+        if duty.tier == Tier::NONE {
             return out;
         }
 
@@ -834,23 +874,32 @@ impl ActiveRealm {
         }
 
         // Apply tier custom env vars
-        if role.tier.0 >= Tier::MIN_CASCADING.0 {
-            for (_, vars) in self.tier_env_vars.range(Tier::MIN_CASCADING.0..=role.tier.0) {
+        if duty.tier.0 >= Tier::MIN_CASCADING.0 {
+            for (_, vars) in self.tier_env_vars.range(Tier::MIN_CASCADING.0..=duty.tier.0) {
                 for (k, v) in vars {
                     out.push((k.clone(), v.clone()));
                 }
             }
         }
 
-        // Apply role custom env vars
-        for (k, v) in &role.env_vars {
+        // Apply duty custom env vars
+        for (k, v) in &duty.env_vars {
             out.push((k.clone(), v.clone()));
         }
 
         out
     }
 
-    pub fn allowed_binaries(&self, role_name: &str, search_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    /// Scans `search_dirs` (host directories, e.g. `/usr/bin`,
+    /// `/usr/local/bin`) for entries whose basename is selected by
+    /// `duty_name`'s effective `bin` expression (`bin_is_selected`),
+    /// returning their absolute host paths. Used to decide which extra
+    /// binaries get bind-mounted into a spawned process's chroot `/bin`,
+    /// on top of the fixed coreutils list `realm_spawn.rs` always mounts.
+    /// A basename already seen in an earlier dir is skipped, so distros
+    /// where e.g. `/bin` symlinks to `/usr/bin` don't produce duplicate
+    /// mount attempts for the same name.
+    pub fn allowed_binaries(&self, duty_name: &str, search_dirs: &[PathBuf]) -> Vec<PathBuf> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for dir in search_dirs {
@@ -861,7 +910,7 @@ impl ActiveRealm {
                 if !seen.insert(name.to_os_string()) {
                     continue;
                 }
-                if self.bin_is_selected(role_name, Path::new(name)) {
+                if self.bin_is_selected(duty_name, Path::new(name)) {
                     out.push(path);
                 }
             }
@@ -874,12 +923,12 @@ impl ActiveRealm {
     /// is unconditional by default — nothing but an explicit
     /// `Power { caps: [visibility], overrides: "dotfiles" }` matching the
     /// path can unhide it, whether that power is declared directly on a
-    /// role or cascaded in from a tier. It exists so Realm definitions
+    /// duty or cascaded in from a tier. It exists so Realm definitions
     /// (e.g. under `.inforno/`) and other sensitive dotfiles stay invisible
     /// by default, unless a config author deliberately carves out an
     /// exception by name (tier-level exceptions are intentionally allowed —
     /// build tooling like Cargo relies heavily on dotfiles such as
-    /// `target/.fingerprint/`, and gating that per-role only would make
+    /// `target/.fingerprint/`, and gating that per-duty only would make
     /// tiers like the `**/target/**` grant above unworkable).
     fn is_builtin_dotfile_path(rel_path: &Path) -> bool {
         rel_path
@@ -887,27 +936,27 @@ impl ActiveRealm {
             .any(|c| c.as_os_str().to_str().map(|s| s.starts_with('.')).unwrap_or(false))
     }
 
-    /// True if `role_name`'s effective powers — its own `powers` plus
+    /// True if `duty_name`'s effective powers — its own `powers` plus
     /// whatever cascades in from its tier — include one overriding
     /// "dotfiles" for this path. Tier-level overrides are allowed
     /// deliberately: build tooling (Cargo, etc.) writes constantly to
     /// dotfiles/dot-directories under paths like `target/`, and requiring
-    /// every role to redeclare that exception itself, rather than
+    /// every duty to redeclare that exception itself, rather than
     /// inheriting it from a shared tier grant (e.g. the `**/target/**`
     /// power), would make tiers largely useless for this case.
-    fn dotfile_override_applies(&self, rel_path: &Path, role_name: &str) -> bool {
-        let Some(role) = self.roles.get(role_name) else { return false };
-        self.effective_powers(role).iter().any(|p| {
+    fn dotfile_override_applies(&self, rel_path: &Path, duty_name: &str) -> bool {
+        let Some(duty) = self.duties.get(duty_name) else { return false };
+        self.effective_powers(duty).iter().any(|p| {
             p.overrides() == Some("dotfiles")
                 && p.matches_path(rel_path)
         })
     }
 
-    /// Single source of truth for "is this path hidden from `actor`" — used
-    /// by both visibility checks (lookup/readdir) and creation checks, so
-    /// there is no blind-create gap where a hidden path can still be created
-    /// just because it can't be seen first.
-    pub fn is_path_hidden(&self, virtual_path: &Path, role_name: &str) -> bool {
+    /// Single source of truth for "is this path hidden from `duty_name`" —
+    /// used by both visibility checks (lookup/readdir) and creation checks,
+    /// so there is no blind-create gap where a hidden path can still be
+    /// created just because it can't be seen first.
+    pub fn is_path_hidden(&self, virtual_path: &Path, duty_name: &str) -> bool {
         let path_str = match virtual_path.to_str() {
             Some(s) => s,
             None => return true, // Safe fallback
@@ -922,7 +971,7 @@ impl ActiveRealm {
                 let rel_path = Path::new(relative);
 
                 if Self::is_builtin_dotfile_path(rel_path) {
-                    return !self.dotfile_override_applies(rel_path, role_name);
+                    return !self.dotfile_override_applies(rel_path, duty_name);
                 }
 
                 return false;
@@ -931,16 +980,16 @@ impl ActiveRealm {
         false // Outside all mounts: not this function's concern; secure_resolve_path returns None anyway.
     }
 
-    /// Whether `role_name` is actually defined in this Realm's `roles:` map.
-    /// Callers that assume a fixed role (e.g. the GUI's own "gui" role) use
-    /// this to treat an undefined role as zero access, rather than letting
+    /// Whether `duty_name` is actually defined in this Realm's `duties:` map.
+    /// Callers that assume a fixed duty (e.g. the GUI's own "gui" duty) use
+    /// this to treat an undefined duty as zero access, rather than letting
     /// `secure_resolve_path`'s visibility-only check silently let paths
-    /// through for a role the Realm has never heard of.
-    pub fn has_role(&self, role_name: &str) -> bool {
-        self.roles.contains_key(role_name)
+    /// through for a duty the Realm has never heard of.
+    pub fn has_duty(&self, duty_name: &str) -> bool {
+        self.duties.contains_key(duty_name)
     }
 
-    pub fn secure_resolve_path(&self, virtual_path: &Path, role_name: &str) -> Option<PathBuf> {
+    pub fn secure_resolve_path(&self, virtual_path: &Path, duty_name: &str) -> Option<PathBuf> {
         let path_str = virtual_path.to_str()?;
         for mount in &self.mounts {
             if path_str.starts_with(&mount.virtual_path) {
@@ -950,7 +999,7 @@ impl ActiveRealm {
                     .trim_start_matches('/');
                 let host_target = mount.host_path.join(relative);
 
-                if self.is_path_hidden(virtual_path, role_name) { return None; }
+                if self.is_path_hidden(virtual_path, duty_name) { return None; }
 
                 return Some(host_target);
             }
@@ -973,15 +1022,15 @@ impl ActiveRealm {
         true // If it's outside all mounts, treat as read-only to be safe
     }
 
-    /// The full actor-aware access check: hard restrictions (hidden, mount
-    /// read-only) MUST pass, AND at least one role the actor holds must carry
-    /// a power granting the requested `cap` for this path (via tier cascade or
-    /// the role's own powers). An actor holding no roles (or none the Realm
-    /// recognizes) is denied everything, without needing any power lookup.
-    pub fn can_access(&self, virtual_path: &Path, cap: Cap, role_name: &str) -> Result<(), String> {
+    /// The full access check for `duty_name`: hard restrictions (hidden,
+    /// mount read-only) MUST pass, AND the duty must hold a power granting
+    /// the requested `cap` for this path (cascaded in from its tier or its
+    /// own). A duty the Realm doesn't define is denied everything, without
+    /// needing any power lookup.
+    pub fn can_access(&self, virtual_path: &Path, cap: Cap, duty_name: &str) -> Result<(), String> {
         match cap {
             Cap::Create | Cap::Write | Cap::Append => {
-                if self.is_path_hidden(virtual_path, role_name) {
+                if self.is_path_hidden(virtual_path, duty_name) {
                     return Err("Path is hidden and cannot be modified".to_string());
                 }
                 if self.is_path_read_only(virtual_path) {
@@ -989,14 +1038,14 @@ impl ActiveRealm {
                 }
             }
             Cap::Read => {
-                if self.is_path_hidden(virtual_path, role_name) {
+                if self.is_path_hidden(virtual_path, duty_name) {
                     return Err("Path is hidden".to_string());
                 }
             }
         }
 
-        let Some(role) = self.roles.get(role_name) else {
-            return Err(format!("Role '{}' is not defined in this Realm; no filesystem access is possible", role_name));
+        let Some(duty) = self.duties.get(duty_name) else {
+            return Err(format!("Duty '{}' is not defined in this Realm; no filesystem access is possible", duty_name));
         };
 
         let path_str = virtual_path
@@ -1017,37 +1066,37 @@ impl ActiveRealm {
             .ok_or_else(|| "Path is outside all configured mounts".to_string())?;
         let rel_path = Path::new(&rel_path_owned);
 
-        let granted = self.effective_powers(role)
+        let granted = self.effective_powers(duty)
             .iter()
             .any(|p| p.grants(cap) && p.matches_path(rel_path));
 
         if granted {
             Ok(())
         } else {
-            Err(format!("Role '{}' does not grant {:?} access to '{}'", role_name, cap, virtual_path.display()))
+            Err(format!("Duty '{}' does not grant {:?} access to '{}'", duty_name, cap, virtual_path.display()))
         }
     }
 
-    /// Renders a role's actual, resolved capabilities as plain-English,
+    /// Renders a duty's actual, resolved capabilities as plain-English,
     /// positively-framed statements — no mention of tier numbers or any
-    /// other engine-internal mechanism, only concrete outcomes, plus any
-    /// authored `memo` guidance attached to a power. Intended to be
-    /// spliced into an Actor's system message so it knows up front exactly
-    /// what it can do (and how it should prefer to do it) without wasting
-    /// turns retrying blocked operations. Computed once and cached in
-    /// `role_capabilities` at construction time — call that field directly
-    /// rather than this method after construction.
-    fn describe_role_capabilities(&self, role_name: &str) -> Vec<String> {
-        let Some(role) = self.roles.get(role_name) else {
-            return vec!["This role does not exist in this Realm and has no filesystem access.".to_string()];
+    /// other engine-internal mechanism, only concrete outcomes, plus the
+    /// comment authored on each power. Intended to be spliced into the
+    /// system message of whoever carries out the duty, so it knows up front
+    /// exactly what it can do (and how it should prefer to do it) without
+    /// wasting turns retrying blocked operations. Computed once and cached
+    /// in `duty_capabilities` at construction time — call that field
+    /// directly rather than this method after construction.
+    fn describe_duty_capabilities(&self, duty_name: &str) -> Vec<String> {
+        let Some(duty) = self.duties.get(duty_name) else {
+            return vec!["This duty does not exist in this Realm and has no filesystem access.".to_string()];
         };
 
-        if role.tier == Tier::NONE {
-            return vec!["This role has no filesystem access of any kind. Do not attempt to read, write, or create any files — such attempts will always be denied.".to_string()];
+        if duty.tier == Tier::NONE {
+            return vec!["This duty has no filesystem access of any kind. Do not attempt to read, write, or create any files — such attempts will always be denied.".to_string()];
         }
 
         let mut lines = Vec::new();
-        for power in self.effective_powers(role) {
+        for power in self.effective_powers(duty) {
             let mut line = match power {
                 CompiledPower::Fs { caps, span_source, .. } => {
                     let verbs: Vec<&str> = caps
@@ -1085,7 +1134,7 @@ impl ActiveRealm {
         }
 
         if lines.is_empty() {
-            lines.push("This role has no filesystem access of any kind. Do not attempt to read, write, or create any files — such attempts will always be denied.".to_string());
+            lines.push("This duty has no filesystem access of any kind. Do not attempt to read, write, or create any files — such attempts will always be denied.".to_string());
         } else {
             lines.push("You have no other filesystem access beyond what's listed above — do not attempt anything else; such attempts will always be denied.".to_string());
         }
@@ -1168,7 +1217,7 @@ pub fn get_relative_path(
 
 pub fn resolve_filepath(
     realm: &Option<ActiveRealm>,
-    _role_name: &str,
+    _duty_name: &str,
     project_root: &Option<std::path::PathBuf>,
     requested_path: &str
 ) -> Option<(std::path::PathBuf, bool)> {

@@ -41,7 +41,7 @@ fn build_chat_request(query: &ChatQue) -> Result<ChatCompletionRequest, String> 
     let mut request_builder = ChatCompletionRequest::builder();
     request_builder
         .model(query.preset.model.clone())
-        .messages(query.chat.to_openrouter_messages(query.agent_ind));
+        .messages(query.chat.to_openrouter_messages(query.talker_ind));
 
     match opts.include_reasoning {
         // Explicit yes -> force high effort; explicit no -> disable;
@@ -119,16 +119,16 @@ pub async fn do_openr_chat_sync(
 
             if let Some(choice) = response.choices.first() {
                 if let Some(reasoning) = choice.reasoning() {
-                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, reasoning);
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.talker_ind, reasoning);
                 }
                 if let Some(content) = choice.content() {
-                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, content);
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.talker_ind, content);
                 }
             }
         }
         Err(e) => {
             let _ = tx.send(ChatStreamEvent::Error(
-                query.agent_ind, 
+                query.talker_ind,
                 format!("OpenRouter sync error: {:?}", e)
             ));
             wakeup();
@@ -153,7 +153,7 @@ pub async fn do_openr_chat_stream(
     let mut request_builder = ChatCompletionRequest::builder();
     request_builder
         .model(query.preset.model)
-        .messages(query.chat.to_openrouter_messages(query.agent_ind));
+        .messages(query.chat.to_openrouter_messages(query.talker_ind));
 
     // 2. Conditional: Apply Reasoning
     match query.preset.options.include_reasoning {
@@ -230,16 +230,16 @@ pub async fn do_openr_chat_stream(
             Ok(event) => {
                 if let Some(choice) = event.choices.first() {
                     if let Some(reasoning) = choice.reasoning() {
-                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, reasoning);
+                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.talker_ind, reasoning);
                     }
                     if let Some(content) = choice.content() {
-                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, content);
+                        crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.talker_ind, content);
                     }
                 }
             }
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(
-                            query.agent_ind, e.to_string()));
+                            query.talker_ind, e.to_string()));
                 wakeup();
             }
         }

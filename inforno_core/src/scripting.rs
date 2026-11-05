@@ -53,13 +53,13 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
         }
     });
 
-    engine.register_fn("autorno_start", |id: rhai::ImmutableString, realm: rhai::ImmutableString, role: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
+    engine.register_fn("autorno_start", |id: rhai::ImmutableString, realm: rhai::ImmutableString, duty: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
         #[cfg(target_os = "linux")]
         {
             send_ipc_command(DaemonCommand::Start {
                 id: id.to_string(),
                 realm: realm.to_string(),
-                role: role.to_string(),
+                duty: duty.to_string(),
                 cmd: cmd.to_string(),
             })
         }
@@ -82,12 +82,12 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
         }
     });
 
-    engine.register_fn("autorno_run", |realm: rhai::ImmutableString, role: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
+    engine.register_fn("autorno_run", |realm: rhai::ImmutableString, duty: rhai::ImmutableString, cmd: rhai::ImmutableString| -> String {
         #[cfg(target_os = "linux")]
         {
             send_ipc_command(DaemonCommand::Run {
                 realm: realm.to_string(),
-                role: role.to_string(),
+                duty: duty.to_string(),
                 cmd: cmd.to_string(),
             })
         }
@@ -124,9 +124,9 @@ pub fn run_rhai(script: &str) -> (String, Option<String>) {
 #[cfg(target_os = "linux")]
 #[derive(serde::Serialize)]
 pub enum DaemonCommand {
-    Start { id: String, realm: String, role: String, cmd: String },
+    Start { id: String, realm: String, duty: String, cmd: String },
     Stop { id: String },
-    Run { realm: String, role: String, cmd: String },
+    Run { realm: String, duty: String, cmd: String },
     Ping,
 }
 

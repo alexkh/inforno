@@ -15,7 +15,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 rust_i18n::i18n!("locales");
 
 // The flattened UI modules
-mod agent_config;
+mod talker_config;
 mod autocomplete;
 mod bottom_panel;
 mod chat;

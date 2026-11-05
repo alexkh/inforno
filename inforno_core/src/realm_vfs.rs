@@ -24,10 +24,10 @@ struct VNode {
 
 pub struct RealmFuseFS {
     realm: ActiveRealm,
-    /// The Role this mounted view is served on behalf of. Fixed for the
-    /// lifetime of the mount — one FUSE session currently represents one
-    /// Role's masked view, matching one `VfsMaskSession::spawn_vfs` call.
-    role: String,
+    /// The duty this mounted view is served on behalf of. Fixed for the
+    /// lifetime of the mount — one FUSE session represents one duty's
+    /// masked view, matching one `VfsMaskSession::spawn_vfs` call.
+    duty: String,
     inodes: HashMap<u64, VNode>,
     path_to_ino: HashMap<PathBuf, u64>,
     /// Reverse index of `path_to_ino`, maintained in lockstep on every
@@ -46,10 +46,10 @@ pub struct RealmFuseFS {
 }
 
 impl RealmFuseFS {
-    pub fn new(realm: ActiveRealm, role: String) -> Self {
+    pub fn new(realm: ActiveRealm, duty: String) -> Self {
         let mut fs = Self {
             realm,
-            role,
+            duty,
             inodes: HashMap::new(),
             path_to_ino: HashMap::new(),
             ino_to_path: HashMap::new(),
@@ -162,7 +162,7 @@ impl Filesystem for RealmFuseFS {
         let child_vpath = parent_vpath.join(name_str);
 
         // Security check via ActiveRealm
-        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.role) {
+        if let Some(host_path) = self.realm.secure_resolve_path(&child_vpath, &self.duty) {
             // `secure_resolve_path` only validates the virtual->host mapping and
             // visibility rules; it says nothing about whether anything actually
             // lives at that path. Without this check, `lookup` reports a
@@ -241,8 +241,8 @@ impl Filesystem for RealmFuseFS {
                 let is_write_access = (flags & O_WRONLY) != 0 || (flags & O_RDWR) != 0;
 
                 if is_write_access {
-                    let can_write = self.realm.can_access(&p, Cap::Write, &self.role).is_ok();
-                    let can_append = self.realm.can_access(&p, Cap::Append, &self.role).is_ok();
+                    let can_write = self.realm.can_access(&p, Cap::Write, &self.duty).is_ok();
+                    let can_append = self.realm.can_access(&p, Cap::Append, &self.duty).is_ok();
 
                     if !can_write && !can_append {
                         reply.error(EACCES);
@@ -252,7 +252,7 @@ impl Filesystem for RealmFuseFS {
                         reply.error(EACCES); // Append-only cannot truncate via open
                         return;
                     }
-                } else if self.realm.can_access(&p, Cap::Read, &self.role).is_err() {
+                } else if self.realm.can_access(&p, Cap::Read, &self.duty).is_err() {
                     reply.error(EACCES);
                     return;
                 }
@@ -287,7 +287,7 @@ impl Filesystem for RealmFuseFS {
     ) {
         let vpath = self.ino_to_path.get(&ino).cloned();
         if let Some(ref p) = vpath {
-            if self.realm.can_access(p, Cap::Read, &self.role).is_err() {
+            if self.realm.can_access(p, Cap::Read, &self.duty).is_err() {
                 reply.error(EACCES);
                 return;
             }
@@ -326,8 +326,8 @@ impl Filesystem for RealmFuseFS {
         let mut can_append = false;
 
         if let Some(ref p) = vpath {
-            can_write = self.realm.can_access(p, Cap::Write, &self.role).is_ok();
-            can_append = self.realm.can_access(p, Cap::Append, &self.role).is_ok();
+            can_write = self.realm.can_access(p, Cap::Write, &self.duty).is_ok();
+            can_append = self.realm.can_access(p, Cap::Append, &self.duty).is_ok();
 
             if !can_write && !can_append {
                 reply.error(EACCES);
@@ -405,7 +405,7 @@ impl Filesystem for RealmFuseFS {
         if size.is_some() || mode.is_some() || _atime.is_some() || _mtime.is_some() {
             if let Some(ref p) = vpath {
                 // Truncation, permission, and timestamp changes require Write access.
-                if self.realm.can_access(p, Cap::Write, &self.role).is_err() {
+                if self.realm.can_access(p, Cap::Write, &self.duty).is_err() {
                     reply.error(EACCES);
                     return;
                 }
@@ -495,18 +495,18 @@ impl Filesystem for RealmFuseFS {
 
         let child_vpath = parent_vpath.join(name_str);
 
-        // Full agent-aware check: hard restrictions (hidden, mount read-only,
-        // create_rules) AND whether the agent's roles actually grant Create
-        // here. We can't relay the reason through the FUSE reply (errno-only),
-        // so it's logged here; `role_capabilities` is how the agent learns
-        // its actual capabilities up front, to avoid retry loops.
-        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.role) {
+        // Full access check: hard restrictions (hidden, mount read-only) AND
+        // whether this mount's duty grants Create here. A FUSE reply carries
+        // only an errno, so the reason is logged here; the process in the
+        // mount learns what its duty allows up front from
+        // `duty_capabilities`, so it doesn't retry what will be refused.
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.duty) {
             eprintln!("Realm VFS: denied creating '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -559,13 +559,13 @@ impl Filesystem for RealmFuseFS {
 
         // Same Cap::Create gate as `create()` — directories are governed by
         // the same powers/create_rules as regular files.
-        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.role) {
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Create, &self.duty) {
             eprintln!("Realm VFS: denied mkdir '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -610,13 +610,13 @@ impl Filesystem for RealmFuseFS {
 
         // Deleting a file requires Write — Append alone (log-style grants)
         // intentionally does not permit removing the file outright.
-        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.role) {
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.duty) {
             eprintln!("Realm VFS: denied unlink '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -658,13 +658,13 @@ impl Filesystem for RealmFuseFS {
 
         let child_vpath = parent_vpath.join(name_str);
 
-        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.role) {
+        if let Err(reason) = self.realm.can_access(&child_vpath, Cap::Write, &self.duty) {
             eprintln!("Realm VFS: denied rmdir '{}': {}", child_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.role) {
+        let host_path = match self.realm.secure_resolve_path(&child_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -728,25 +728,25 @@ impl Filesystem for RealmFuseFS {
         // atomic write-then-rename pattern (e.g. rustc writing a temp file,
         // then renaming it onto the final `.rmeta` name) work anywhere
         // Create is already granted, with no separate "rename" capability.
-        if let Err(reason) = self.realm.can_access(&old_vpath, Cap::Write, &self.role) {
+        if let Err(reason) = self.realm.can_access(&old_vpath, Cap::Write, &self.duty) {
             eprintln!("Realm VFS: denied rename source '{}': {}", old_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
-        if let Err(reason) = self.realm.can_access(&new_vpath, Cap::Create, &self.role) {
+        if let Err(reason) = self.realm.can_access(&new_vpath, Cap::Create, &self.duty) {
             eprintln!("Realm VFS: denied rename destination '{}': {}", new_vpath.display(), reason);
             reply.error(EACCES);
             return;
         }
 
-        let old_host = match self.realm.secure_resolve_path(&old_vpath, &self.role) {
+        let old_host = match self.realm.secure_resolve_path(&old_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
                 return;
             }
         };
-        let new_host = match self.realm.secure_resolve_path(&new_vpath, &self.role) {
+        let new_host = match self.realm.secure_resolve_path(&new_vpath, &self.duty) {
             Some(p) => p,
             None => {
                 reply.error(EACCES);
@@ -814,7 +814,7 @@ impl Filesystem for RealmFuseFS {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let child_vpath = parent_vpath.join(&file_name);
 
-                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath, &self.role) {
+                    if let Some(resolved_host) = self.realm.secure_resolve_path(&child_vpath, &self.duty) {
                         let is_dir = resolved_host.is_dir();
                         let child_ino = self.get_or_create_ino(&child_vpath, Some(resolved_host), is_dir);
                         let ftype = if is_dir { FileType::Directory } else { FileType::RegularFile };

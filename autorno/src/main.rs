@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Debug)]
 pub enum DaemonCommand {
-    Start { id: String, realm: String, role: String, cmd: String },
+    Start { id: String, realm: String, duty: String, cmd: String },
     Stop { id: String },
-    Run { realm: String, role: String, cmd: String },
+    Run { realm: String, duty: String, cmd: String },
     Ping,
 }
 
@@ -74,6 +74,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let config_str = std::fs::read_to_string(&yaml_path)?;
+
+        // Rewriting would quietly switch old key names to the new ones, and
+        // Realm files are only ever changed by hand. Refuse until they are.
+        let legacy = inforno_core::realm::legacy_realm_keys(&config_str);
+        if !legacy.is_empty() {
+            eprintln!("Realm '{}' ({:?}) still uses old key names. Change them by hand first:", realm_name, yaml_path);
+            for key in &legacy {
+                eprintln!("  • {}", key);
+            }
+            std::process::exit(1);
+        }
+
         let mut config = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str)?;
 
         match action.as_str() {
@@ -95,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 
                 // CommentPosition::Above (not the default Inline) is required so that
-                // comments on mounts/roles/tiers/folios -- all non-scalar values --
+                // comments on mounts/duties/tiers/folios -- all non-scalar values --
                 // survive this rewrite; Inline silently drops comments on those.
                 let opts = serde_saphyr::ser_options! { comment_position: serde_saphyr::CommentPosition::Above };
                 std::fs::write(&yaml_path, serde_saphyr::to_string_with_options(&config, opts)?)?;
@@ -138,15 +150,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if args.len() < idx + 2 {
-            eprintln!("Usage: autorno exec [--workdir <dir>] <realm> <role> [cmd...]");
+            eprintln!("Usage: autorno exec [--workdir <dir>] <realm> <duty> [cmd...]");
             std::process::exit(1);
         }
 
         let realm_name = &args[idx];
-        let role_name = &args[idx + 1];
+        let duty_name = &args[idx + 1];
         let cmd = if args.len() > idx + 2 { args[idx + 2..].join(" ") } else { "".to_string() };
-        
-        let exit_code = match spawn_harness(realm_name, role_name, &cmd, work_dir.as_deref()) {
+
+        let exit_code = match spawn_harness(realm_name, duty_name, &cmd, work_dir.as_deref()) {
             Ok(mut harness) => {
                 let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
                 let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
@@ -268,13 +280,13 @@ async fn handle_client(mut stream: UnixStream, registry: Registry) -> Result<(),
 
 fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
     match cmd {
-        DaemonCommand::Start { id, realm, role, cmd } => {
+        DaemonCommand::Start { id, realm, duty, cmd } => {
             let mut reg = registry.lock().unwrap();
             if reg.contains_key(&id) {
                 return DaemonResponse::Error(format!("Harness '{}' already running", id));
             }
 
-            match spawn_harness(&realm, &role, &cmd, None) {
+            match spawn_harness(&realm, &duty, &cmd, None) {
                 Ok(harness) => {
                     reg.insert(id.clone(), harness);
                     DaemonResponse::Ok(format!("Started harness '{}'", id))
@@ -302,8 +314,8 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
                 DaemonResponse::Error(format!("Harness '{}' not found", id))
             }
         }
-        DaemonCommand::Run { realm, role, cmd } => {
-            match run_harness(&realm, &role, &cmd) {
+        DaemonCommand::Run { realm, duty, cmd } => {
+            match run_harness(&realm, &duty, &cmd) {
                 Ok(output) => DaemonResponse::Ok(output),
                 Err(e) => DaemonResponse::Error(e.to_string()),
             }
@@ -312,7 +324,7 @@ fn process_command(cmd: DaemonCommand, registry: Registry) -> DaemonResponse {
     }
 }
 
-fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str, work_dir: Option<&str>) -> Result<Harness, Box<dyn std::error::Error>> {
+fn spawn_harness(realm_name: &str, duty_name: &str, cmd: &str, work_dir: Option<&str>) -> Result<Harness, Box<dyn std::error::Error>> {
     let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
         .ok_or("Could not find project directories")?;
     let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
@@ -321,15 +333,15 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str, work_dir: Option<
     let config = serde_saphyr::from_str::<RealmConfig>(&config_str)?;
 
     let active_realm = ActiveRealm::from_config(realm_name.to_string(), config)?;
-    if !active_realm.has_role(role_name) {
-        return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
+    if !active_realm.has_duty(duty_name) {
+        return Err(format!("Duty '{}' is not defined in Realm '{}'", duty_name, realm_name).into());
     }
 
     // Resolved before `active_realm` is moved into `spawn_vfs` below.
-    let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
-    let allowed_envs = active_realm.allowed_envs(role_name);
+    let extra_binaries = active_realm.allowed_binaries(duty_name, &bin_search_dirs());
+    let allowed_envs = active_realm.allowed_envs(duty_name);
 
-    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
+    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, duty_name.to_string())?;
 
     // Wait for the FUSE mount to be fully ready before proceeding
     let mut retries = 50;
@@ -343,7 +355,7 @@ fn spawn_harness(realm_name: &str, role_name: &str, cmd: &str, work_dir: Option<
     Ok(Harness { vfs_session, child })
 }
 
-fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn run_harness(realm_name: &str, duty_name: &str, cmd: &str) -> Result<String, Box<dyn std::error::Error>> {
     let proj_dirs = directories::ProjectDirs::from("", "", "inforno")
         .ok_or("Could not find project directories")?;
     let yaml_path = proj_dirs.config_dir().join("realms").join(realm_name).join("realm2.yml");
@@ -352,16 +364,16 @@ fn run_harness(realm_name: &str, role_name: &str, cmd: &str) -> Result<String, B
     let config = serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str)?;
 
     let active_realm = inforno_core::realm::ActiveRealm::from_config(realm_name.to_string(), config)?;
-    if !active_realm.has_role(role_name) {
-        return Err(format!("Role '{}' is not defined in Realm '{}'", role_name, realm_name).into());
+    if !active_realm.has_duty(duty_name) {
+        return Err(format!("Duty '{}' is not defined in Realm '{}'", duty_name, realm_name).into());
     }
 
     // Resolved before `active_realm` is moved into `spawn_vfs` below.
-    let extra_binaries = active_realm.allowed_binaries(role_name, &bin_search_dirs());
-    let allowed_envs = active_realm.allowed_envs(role_name);
+    let extra_binaries = active_realm.allowed_binaries(duty_name, &bin_search_dirs());
+    let allowed_envs = active_realm.allowed_envs(duty_name);
 
     // Spin up an ephemeral FUSE session for the duration of this single command
-    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, role_name.to_string())?;
+    let vfs_session = VfsMaskSession::spawn_vfs(active_realm, duty_name.to_string())?;
     
     // Wait for the FUSE mount to be fully ready before proceeding
     let mut retries = 50;

@@ -21,7 +21,7 @@ use super::table::{render_table, split_tables, MdBlock};
 use crate::split_button::SplitButton;
 use crate::state::ChatMsgUi;
 
-use super::{ChatActions, MathCache, RenderCtx, GUI_ROLE};
+use super::{ChatActions, MathCache, RenderCtx, GUI_DUTY};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -402,7 +402,7 @@ fn render_code_block(
     render_comfy_workflow_button(ui, code, comfy_workflow_request);
 
     let resolved = filepath.and_then(|p| {
-        inforno_core::realm::resolve_filepath(active_realm, GUI_ROLE, project_root, p)
+        inforno_core::realm::resolve_filepath(active_realm, GUI_DUTY, project_root, p)
     });
 
     // --- HEADER: path / merge buttons on the left, copy + inline diff on the right ---

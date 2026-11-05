@@ -23,13 +23,12 @@ mod latex;
 mod message;
 mod table;
 
-/// Role the GUI itself assumes when resolving Realm-mapped paths referenced
-/// in chat (e.g. "open in editor" / autocorrect links on code blocks). This
-/// must match a `gui:` role in the user's realm.yml. If they haven't defined
-/// one, `resolve_filepath` treats the Realm as contributing nothing and we
-/// fall back to `project_root` — no special-casing needed here, the GUI just
-/// has no Realm access, which is the correct default.
-pub const GUI_ROLE: &str = "gui";
+/// The duty the GUI itself acts under in a Realm: the VFS terminal it opens
+/// runs as this duty, the Folio entry it suggests authorizes it, and it's
+/// passed when resolving Realm paths referenced in chat ("open in editor",
+/// autocorrected links on code blocks). A Realm needs a `gui:` entry under
+/// `duties:` for the terminal to start.
+pub const GUI_DUTY: &str = "gui";
 
 /// Byte cache shared by compiled math SVGs and decoded image attachments.
 type MathCache = std::rc::Rc<std::cell::RefCell<HashMap<String, std::sync::Arc<[u8]>>>>;
@@ -257,7 +256,7 @@ fn update_chat_width(ui: &mut egui::Ui, state: &mut State, chat_id: i64) -> f32 
     max_msg_width
 }
 
-/// Draws the Omnis (agent 0) timeline: user/system messages one per row,
+/// Draws the Omnis (talker 0) timeline: user/system messages one per row,
 /// consecutive assistant replies side by side in a grid, note cells, and
 /// the appender at the bottom.
 fn render_chat_body(
@@ -275,12 +274,12 @@ fn render_chat_body(
         cell::render_welcome(ui, ctx, actions, msg_ui_map);
     }
 
-    let Some(agent) = chat.agents.first() else { return };
-    let _agent_span = tracing::info_span!("process_agent_messages", agent_id = agent.id).entered();
+    let Some(omnis) = chat.talkers.first() else { return };
+    let _omnis_span = tracing::info_span!("process_omnis_messages", talker_id = omnis.id).entered();
 
     let mut assistant_batch: Vec<i64> = Vec::new();
 
-    for &msg_id in &agent.msg_ids {
+    for &msg_id in &omnis.msg_ids {
         let Some(msg) = msg_pool.get(&msg_id) else { continue };
         let _msg_span = tracing::info_span!("process_message", msg_id = msg_id, role = %msg.msg_role).entered();
 
@@ -317,9 +316,9 @@ fn apply_actions(ui: &mut egui::Ui, state: &mut State, chat_id: i64, actions: Ch
     if let Some(chat) = state.open_chats.get_mut(&chat_id) {
         for id in &actions.delete_requests {
             chat.msg_pool.remove(id);
-            for agent in chat.agents.iter_mut() {
-                agent.msg_ids.retain(|x| x != id);
-                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+            for talker in chat.talkers.iter_mut() {
+                talker.msg_ids.retain(|x| x != id);
+                let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
             }
             let _ = inforno_core::db::delete_msg(&state.db_conn, *id);
         }

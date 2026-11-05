@@ -4,8 +4,8 @@ use egui::{Key, Modifiers, Ui};
 use rusqlite::Connection;
 use rust_i18n::t;
 
-use inforno_core::{common::{Agent, Attachment, ModelPresetSelection, ModelPresets}, db::mod_agent_model_preset};
-use crate::{agent_config::AgentConfigState, state::{State, reload_db_chats, router_color, text_color}};
+use inforno_core::{common::{Attachment, ModelPresetSelection, ModelPresets, Talker}, db::mod_talker_model_preset};
+use crate::{talker_config::TalkerConfigState, state::{State, reload_db_chats, router_color, text_color}};
 
 use bulat::editor::{Token, Syntax, TokenType};
 
@@ -375,7 +375,7 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context, prom
         state.open_chats.insert(active_chat_id, inforno_core::common::Chat::default());
     }
 
-    egui::ScrollArea::vertical().id_salt("agent_scroll").show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("talker_scroll").show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
             ui.vertical(|ui| {
@@ -383,24 +383,24 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context, prom
                 // Scope the mutable borrow of the chat
                 let chat = state.open_chats.get_mut(&active_chat_id).unwrap();
 
-                for (i, agent) in chat.agents.iter_mut().enumerate().skip(1) {
-                    if agent.deleted { continue; }
+                for (i, talker) in chat.talkers.iter_mut().enumerate().skip(1) {
+                    if talker.deleted { continue; }
                     ui.horizontal(|ui| {
                         ui.set_width(ui.available_width());
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        let id_source = format!("chat_agent_{}", i);
-                        ui.label(format!("{}", agent.id));
-                        render_agent(ui, agent, &mut state.agent_config_state, presets, &id_source, &state.db_conn);
+                        let id_source = format!("chat_talker_{}", i);
+                        ui.label(format!("{}", talker.id));
+                        render_talker(ui, talker, &mut state.talker_config_state, presets, &id_source, &state.db_conn);
                     });
                 }
 
-                let is_full = chat.agents.len() >= 127;
+                let is_full = chat.talkers.len() >= 127;
                 if ui.add_enabled(!is_full, egui::Button::new("+"))
-                .on_hover_text(if is_full { "Max agents reached" } else { "Add another agent" })
+                .on_hover_text(if is_full { "Max talkers reached" } else { "Add another talker" })
                 .clicked() {
-                    if let Err(e) = chat.add_agent_try_sync(&state.db_conn) {
-                        eprintln!("Failed to add agent: {}", e);
-                        state.error_msg = Some(format!("Failed to add agent: {}", e));
+                    if let Err(e) = chat.add_talker_try_sync(&state.db_conn) {
+                        eprintln!("Failed to add talker: {}", e);
+                        state.error_msg = Some(format!("Failed to add talker: {}", e));
                         state.is_modal_open = true;
                     }
                 }
@@ -409,59 +409,59 @@ fn render_actions_col(ui: &mut Ui, state: &mut State,  ctx: &egui::Context, prom
     });
 }
 
-/// Renders a single agent's controls (Label + Preset Selector)
-fn render_agent(
+/// Renders a single talker's controls (Label + Model Preset Selector)
+fn render_talker(
     ui: &mut egui::Ui,
-    agent: &mut Agent,
-    substate: &mut AgentConfigState,
+    talker: &mut Talker,
+    substate: &mut TalkerConfigState,
     presets: &ModelPresets,
     id_source: &str,
     conn: &Connection,
 ) {
-    // button that mutes/unmutes the agent
-    let btn_text = &agent.name;
-    let btn = egui::Button::new(btn_text).selected(!agent.muted);
+    // button that mutes/unmutes the talker
+    let btn_text = &talker.name;
+    let btn = egui::Button::new(btn_text).selected(!talker.muted);
 
     if ui.add(btn).on_hover_text("Click to Mute or Unmute").clicked() {
-        agent.muted = !agent.muted;
+        talker.muted = !talker.muted;
     }
 
     // Sync the selection first (ensure title matches ID)
-    agent.preset_selection.sync_with_presets(presets);
+    talker.preset_selection.sync_with_presets(presets);
 
     // Model Preset Combo Box
-    // We pass the specific agent's preset_selection
+    // We pass the specific talker's preset_selection
     if model_preset_combo_box(
         ui,
         id_source,
-        &mut agent.preset_selection,
+        &mut talker.preset_selection,
         presets
     ) {
         // value changed. Save it to the database
-        let _ = mod_agent_model_preset(conn, agent.id, agent.preset_selection.id,
-                presets.get(agent.preset_selection.id));
-        agent.preset = presets.get(agent.preset_selection.id).cloned();
+        let _ = mod_talker_model_preset(conn, talker.id, talker.preset_selection.id,
+                presets.get(talker.preset_selection.id));
+        talker.preset = presets.get(talker.preset_selection.id).cloned();
     }
 
     // wrench menu here 🔧
     if crate::emoji_render::emoji_button(ui, "🔧").on_hover_text("Modify this model preset").clicked() {
         // A. Get the current preset data
-        if let Some(_current_preset) = presets.get(agent.preset_selection.id) {
-            if let Some(agent_preset) = agent.preset.as_ref() {
+        if let Some(_current_preset) = presets.get(talker.preset_selection.id) {
+            if let Some(talker_preset) = talker.preset.as_ref() {
 
-                // B. Initialize the Agent Config Window State
-                substate.target_agent_id = Some(agent.id);
-                substate.target_agent_ind = Some(agent.agent_ind);
+                // B. Initialize the Talker Config Window State
+                substate.target_talker_id = Some(talker.id);
+                substate.target_talker_ind = Some(talker.talker_ind);
 
                 // C. Clone the preset into the editor state
-                substate.editor_state.edited_preset = agent_preset.clone();
+                substate.editor_state.edited_preset = talker_preset.clone();
                 substate.editor_state.router_changed = true; // Trigger validation refresh
 
                 // D. Set up UI strings (seed/temp) for the text inputs
-                substate.editor_state.seed_entered = agent_preset.options.seed
+                substate.editor_state.seed_entered = talker_preset.options.seed
                     .map(|s| s.to_string()).unwrap_or_default();
                 substate.editor_state.temperature_entered =
-                    agent_preset.options.temperature
+                    talker_preset.options.temperature
                     .map(|t| t.to_string()).unwrap_or_default();
 
                 substate.is_open = true;
@@ -469,8 +469,8 @@ fn render_agent(
         }
     }
 
-    if let Some(current) = &agent.preset {
-        if let Some(original) = presets.get(agent.preset_selection.id) {
+    if let Some(current) = &talker.preset {
+        if let Some(original) = presets.get(talker.preset_selection.id) {
             if current.options.include_reasoning !=
                     original.options.include_reasoning {
                 egui::Frame::new()
@@ -624,8 +624,8 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     // Temporarily extract the active chat to satisfy the borrow checker
     let mut chat = state.open_chats.remove(&active_chat_id).unwrap_or_default();
 
-    if !chat.agents.iter().skip(1).any(|a| state.presets.get(a.preset_selection.id).is_some()) {
-        state.error_msg = Some(t!("error_no_agent_preset_selected").to_string());
+    if !chat.talkers.iter().skip(1).any(|t| state.presets.get(t.preset_selection.id).is_some()) {
+        state.error_msg = Some(t!("error_no_talker_preset_selected").to_string());
         state.is_modal_open = true;
         // Put it back if we fail early
         state.open_chats.insert(active_chat_id, chat);
@@ -681,9 +681,9 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
             if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut sys_msg) {
                 chat.msg_pool.insert(sys_msg.id, sys_msg.clone());
-                for agent in chat.agents.iter_mut() {
-                    agent.msg_ids.push(sys_msg.id);
-                    let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+                for talker in chat.talkers.iter_mut() {
+                    talker.msg_ids.push(sys_msg.id);
+                    let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
                 }
                 state.bottom_panel_state.show_system_prompt = false;
             }
@@ -722,17 +722,17 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
     let abort_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.chat_streaming_state.abort_flag = Some(abort_flag.clone());
 
-    let agent_count = std::cmp::min(chat.agents.len(), 128);
+    let talker_count = std::cmp::min(chat.talkers.len(), 128);
     state.chat_streaming_state.msg_ids.clear();
-    state.chat_streaming_state.msg_ids.resize_with(agent_count, || 0);
+    state.chat_streaming_state.msg_ids.resize_with(talker_count, || 0);
     state.chat_streaming_state.content_buffers.clear();
-    state.chat_streaming_state.content_buffers.resize_with(agent_count, || String::new());
+    state.chat_streaming_state.content_buffers.resize_with(talker_count, || String::new());
     state.chat_streaming_state.reasoning_buffers.clear();
-    state.chat_streaming_state.reasoning_buffers.resize_with(agent_count, || String::new());
+    state.chat_streaming_state.reasoning_buffers.resize_with(talker_count, || String::new());
 
-    for (_index, agent) in chat.agents.iter_mut().enumerate() {
-        agent.msg_ids.push(usr_msg_id);
-        let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+    for talker in chat.talkers.iter_mut() {
+        talker.msg_ids.push(usr_msg_id);
+        let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
     }
 
     let mut chat_for_llm = chat.clone();
@@ -742,18 +742,18 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
 
     let shared_chat = std::sync::Arc::new(chat_for_llm);
 
-    for index in 1..chat.agents.len() {
-        if chat.agents[index].deleted || chat.agents[index].muted {
+    for index in 1..chat.talkers.len() {
+        if chat.talkers[index].deleted || chat.talkers[index].muted {
             continue;
         }
 
-        if chat.agents[index].preset.is_none() {
-            let preset_id = chat.agents[index].preset_selection.id;
-            chat.agents[index].preset = state.presets.get(preset_id).cloned();
-            let _ = inforno_core::db::update_agent_model_preset_snapshot(&state.db_conn, chat.agents[index].id, chat.agents[index].preset.as_ref());
+        if chat.talkers[index].preset.is_none() {
+            let preset_id = chat.talkers[index].preset_selection.id;
+            chat.talkers[index].preset = state.presets.get(preset_id).cloned();
+            let _ = inforno_core::db::update_talker_model_preset_snapshot(&state.db_conn, chat.talkers[index].id, chat.talkers[index].preset.as_ref());
         }
 
-        let Some(mut preset) = chat.agents[index].preset.clone() else {
+        let Some(mut preset) = chat.talkers[index].preset.clone() else {
             continue;
         };
 
@@ -765,17 +765,17 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
         let que = inforno_core::common::ChatQue {
             preset,
             chat: shared_chat.clone(),
-            agent_ind: index,
+            talker_ind: index,
         };
 
         let (effective_preset, preset_id) = {
-            let agent = &chat.agents[index];
-            if let Some(override_p) = &agent.preset {
-                // Explicitly annotate Option<Preset> here to satisfy E0282
+            let talker = &chat.talkers[index];
+            if let Some(override_p) = &talker.preset {
+                // Explicitly annotate Option<ModelPreset> here to satisfy E0282
                 let override_preset: Option<inforno_core::common::ModelPreset> = Some(override_p.clone());
-                (override_preset, agent.preset_selection.id)
+                (override_preset, talker.preset_selection.id)
             } else {
-                (state.presets.get(agent.preset_selection.id).cloned(), agent.preset_selection.id)
+                (state.presets.get(talker.preset_selection.id).cloned(), talker.preset_selection.id)
             }
         };
 
@@ -786,21 +786,21 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
             reasoning: None,
             preset: effective_preset,
             preset_id,
-            name: Some(chat.agents[index].name.clone()),
+            name: Some(chat.talkers[index].name.clone()),
             ..Default::default()
         };
 
         if let Ok(()) = inforno_core::db::mk_msg(&state.db_conn, &mut assistant_msg) {
             state.chat_streaming_state.msg_ids[index] = assistant_msg.id;
 
-            if let Some(omnis) = chat.agents.get_mut(0) {
+            if let Some(omnis) = chat.talkers.get_mut(0) {
                 omnis.msg_ids.push(assistant_msg.id);
-                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, omnis.id, &omnis.msg_ids);
+                let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, omnis.id, &omnis.msg_ids);
             }
 
-            if let Some(agent) = chat.agents.get_mut(index) {
-                agent.msg_ids.push(assistant_msg.id);
-                let _ = inforno_core::db::mod_agent_msgs(&state.db_conn, agent.id, &agent.msg_ids);
+            if let Some(talker) = chat.talkers.get_mut(index) {
+                talker.msg_ids.push(assistant_msg.id);
+                let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
             }
 
             chat.msg_pool.insert(assistant_msg.id, assistant_msg);

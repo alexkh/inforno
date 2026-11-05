@@ -11,7 +11,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRe
 use secrecy::SecretString;
 use strum::{Display, EnumString};
 use thiserror::Error;
-use crate::db::mk_agent;
+use crate::db::mk_talker;
 use ollama_rs::generation::chat::{ChatMessage, MessageRole};
 use ollama_rs::generation::images::Image;
 
@@ -53,13 +53,13 @@ pub(crate) fn emit_text(
     tx: &Sender<ChatStreamEvent>,
     wakeup: &(dyn Fn() + Send + Sync),
     event: fn(usize, String) -> ChatStreamEvent,
-    agent_ind: usize,
+    talker_ind: usize,
     text: &str,
 ) {
     if text.is_empty() {
         return;
     }
-    let _ = tx.send(event(agent_ind, text.to_string()));
+    let _ = tx.send(event(talker_ind, text.to_string()));
     wakeup();
 }
 
@@ -304,11 +304,14 @@ impl From<ChatMsg> for Message {
     }
 }
 
+/// A chat participant: a name and a model preset, with its own view of the
+/// chat (`msg_ids`). Talker 0, Omnis, is hidden and holds every message in
+/// order.
 #[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
-pub struct Agent {
+pub struct Talker {
     pub id: i64,
     pub name: String,
-    pub agent_ind: usize,
+    pub talker_ind: usize,
     pub msg_ids: Vec<i64>,
     pub preset_selection: ModelPresetSelection,
     pub preset: Option<ModelPreset>,
@@ -322,7 +325,7 @@ pub struct Chat {
     pub id: i64,
     pub title: String,
     pub msg_pool: HashMap<i64, ChatMsg>,
-    pub agents: Vec<Agent>,
+    pub talkers: Vec<Talker>,
     #[serde(skip)]
     pub draft_note: String, // Buffer for the bottom notebook cell
     #[serde(skip)]
@@ -331,26 +334,25 @@ pub struct Chat {
 
 impl Default for Chat {
     fn default() -> Self {
-        // 1. Create Agent 0 (Omnis)
-        // We assume Agent::default() sets basic fields.
+        // 1. Create Talker 0 (Omnis): hidden, holds every message in order.
         // We explicitly set what we need (e.g., preset_id = 0, name = "Omnis").
-        let mut omnis = Agent::default();
-        omnis.agent_ind = 0;
+        let mut omnis = Talker::default();
+        omnis.talker_ind = 0;
         omnis.name = "Omnis".to_string();
         omnis.preset_selection.id = 0;
         omnis.hidden = true;
 
-        // 2. Create Agent 1 (Agent1)
-        let mut agent1 = Agent::default();
-        agent1.agent_ind = 1;
-        agent1.name = "Agent1".to_string();
-        agent1.preset_selection.id = 0;
+        // 2. Create Talker 1 (Talker1)
+        let mut talker1 = Talker::default();
+        talker1.talker_ind = 1;
+        talker1.name = "Talker1".to_string();
+        talker1.preset_selection.id = 0;
 
         Self {
             id: 0, // 0 indicates it hasn't been saved to DB yet
             title: "Unnamed Chat".to_string(),
             msg_pool: HashMap::new(),
-            agents: vec![omnis, agent1],
+            talkers: vec![omnis, talker1],
             draft_note: String::new(),
             draft_is_rhai: false,
         }
@@ -358,11 +360,11 @@ impl Default for Chat {
 }
 
 impl Chat {
-    /// Converts a specific agent history into a vector of OpenRouter Messages.
-    /// Returns an empty vector if the hist_id is not found.
-    pub fn to_openrouter_messages(&self, agent_ind: usize) -> Vec<Message> {
-        if let Some(agent) = self.agents.get(agent_ind) {
-            agent.msg_ids
+    /// Converts a specific talker's history into a vector of OpenRouter Messages.
+    /// Returns an empty vector if there is no talker at `talker_ind`.
+    pub fn to_openrouter_messages(&self, talker_ind: usize) -> Vec<Message> {
+        if let Some(talker) = self.talkers.get(talker_ind) {
+            talker.msg_ids
                 .iter()
                 .filter_map(|msg_id| {
                     let msg = self.msg_pool.get(msg_id)?;
@@ -378,10 +380,10 @@ impl Chat {
         }
     }
 
-    /// Converts a specific history branch into a vector of Ollama ChatMessages.
-    pub fn to_ollama_messages(&self, agent_ind: usize) -> Vec<ChatMessage> {
-        if let Some(agent) = self.agents.get(agent_ind) {
-            agent.msg_ids
+    /// Converts a specific talker's history into a vector of Ollama ChatMessages.
+    pub fn to_ollama_messages(&self, talker_ind: usize) -> Vec<ChatMessage> {
+        if let Some(talker) = self.talkers.get(talker_ind) {
+            talker.msg_ids
                 .iter()
                 .filter_map(|msg_id| {
                     let msg = self.msg_pool.get(msg_id)?;
@@ -397,32 +399,32 @@ impl Chat {
         }
     }
 
-    /// Adds a new agent sequentially if the limit has not been reached.
-    pub fn add_agent_try_sync(&mut self, conn: &Connection) ->
+    /// Adds a new talker sequentially if the limit has not been reached.
+    pub fn add_talker_try_sync(&mut self, conn: &Connection) ->
                 Result<(), Box<dyn std::error::Error>> {
-        // Enforce limit of 127 agents (indices 0-126)
-        if self.agents.len() >= 127 {
-            return Err("Maximum number of agents (127) reached".into());
+        // Enforce limit of 127 talkers (indices 0-126)
+        if self.talkers.len() >= 127 {
+            return Err("Maximum number of talkers (127) reached".into());
         }
 
-        let new_ind = self.agents.len();
+        let new_ind = self.talkers.len();
 
         // 2. Create the struct locally first
-        let mut new_agent = Agent::default();
-        new_agent.agent_ind = new_ind;
-        new_agent.name = format!("Agent{}", new_ind);
-        new_agent.hidden = false;
-        new_agent.deleted = false;
-        new_agent.muted = false;
+        let mut new_talker = Talker::default();
+        new_talker.talker_ind = new_ind;
+        new_talker.name = format!("Talker{}", new_ind);
+        new_talker.hidden = false;
+        new_talker.deleted = false;
+        new_talker.muted = false;
 
         // 3. Persist to DB immediately, but only if chat id is not 0
-        // We pass &mut new_agent so mk_agent can update new_agent.id
+        // We pass &mut new_talker so mk_talker can update new_talker.id
         if self.id != 0 {
-            mk_agent(conn, self.id, &mut new_agent)?;
+            mk_talker(conn, self.id, &mut new_talker)?;
         }
 
         // 4. Push to state (now containing the correct DB ID)
-        self.agents.push(new_agent);
+        self.talkers.push(new_talker);
 
         Ok(())
     }
@@ -705,7 +707,7 @@ pub struct OllamaDownloading {
 
 #[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ChatQue {
-    pub agent_ind: usize,
+    pub talker_ind: usize,
     pub preset: ModelPreset,
     pub chat: Arc<Chat>,
 }
@@ -752,7 +754,7 @@ pub async fn run_chat_stream_router(
     wakeup: Arc<dyn Fn() + Send + Sync>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Agent options: {:?}", &query.preset.options);
+    println!("Talker options: {:?}", &query.preset.options);
 
     // Default to streaming unless explicitly set to false
     let use_streaming = query.preset.options.stream.unwrap_or(true);

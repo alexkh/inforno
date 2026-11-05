@@ -92,16 +92,16 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                     crate::panes::open_chat_in_right_pane(state, temp_id);
                 }
 
-                if ui.button(t!("new_chat_copying_agents_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_tooltip")).strong().heading()).clicked() {
+                if ui.button(t!("new_chat_copying_talkers_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_talkers_tooltip")).strong().heading()).clicked() {
                     let active_id = state.active_chat_id.unwrap_or(0);
                     let temp_id = get_temp_id(state);
                     let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
                     template.id = temp_id;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
-                    for agent in &mut template.agents {
-                        agent.id = 0;
-                        agent.msg_ids.clear();
+                    for talker in &mut template.talkers {
+                        talker.id = 0;
+                        talker.msg_ids.clear();
                     }
                     state.open_chats.insert(temp_id, template);
                     crate::panes::open_chat_in_tab(state, temp_id);
@@ -119,7 +119,7 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                     crate::panes::open_chat_in_tab(state, temp_id);
                 }
 
-                if ui.button(t!("new_chat_copying_agents_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_agents_prompts_tooltip")).strong().heading()).clicked() {
+                if ui.button(t!("new_chat_copying_talkers_prompts_btn")).on_hover_text(egui::RichText::new(t!("new_chat_copying_talkers_prompts_tooltip")).strong().heading()).clicked() {
                     let active_id = state.active_chat_id.unwrap_or(0);
                     let temp_id = get_temp_id(state);
                     let mut template = state.open_chats.get(&active_id).cloned().unwrap_or_default();
@@ -127,9 +127,9 @@ pub fn ui_side_panel(ui: &mut egui::Ui, state: &mut State) {
                     template.id = temp_id;
                     template.title = "Unnamed Chat".to_string();
                     template.msg_pool.clear();
-                    for agent in &mut template.agents {
-                        agent.id = 0;
-                        agent.msg_ids.clear();
+                    for talker in &mut template.talkers {
+                        talker.id = 0;
+                        talker.msg_ids.clear();
                     }
                     state.open_chats.insert(temp_id, template);
                     crate::panes::open_chat_in_tab(state, temp_id);
@@ -310,9 +310,9 @@ fn extract_prompts(
     let mut first_usr = None;
     let mut details = None;
 
-    // Omnis agent contains all the ordered messages
-    if let Some(agent) = chat.agents.first() {
-        for msg_id in &agent.msg_ids {
+    // Omnis (talker 0) contains all the ordered messages
+    if let Some(omnis) = chat.talkers.first() {
+        for msg_id in &omnis.msg_ids {
             if let Some(msg) = chat.msg_pool.get(msg_id) {
                 if first_sys.is_none() && msg.msg_role == inforno_core::common::MsgRole::System {
                     first_sys = Some(msg.content.clone());

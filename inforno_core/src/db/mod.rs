@@ -2,7 +2,7 @@ use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::OnceLock};
 use regex::Regex;
 use rusqlite::{Connection, params, Result};
 use directories::ProjectDirs;
-use crate::common::{Agent, Chat, ChatMsg, DbChat, ModelPreset, ModelPresetSelection, ModelPresets, MyError};
+use crate::common::{Chat, ChatMsg, DbChat, ModelPreset, ModelPresetSelection, ModelPresets, MyError, Talker};
 
 pub mod cache;
 
@@ -187,7 +187,7 @@ fn table_exists(conn: &Connection, table_name: &str) -> rusqlite::Result<bool> {
 
 pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
     // 1. Start Transaction
-    // Transactions are crucial here so you don't end up with a Chat that has no Agents
+    // Transactions are crucial here so you don't end up with a Chat that has no Talkers
     // if something fails halfway through.
     conn.execute("BEGIN", [])?;
 
@@ -201,13 +201,13 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
         // Update the Chat struct immediately
         chat.id = conn.last_insert_rowid();
 
-        // 3. Persist Agents
-        // We iterate through the agents already present in the struct.
+        // 3. Persist Talkers
+        // We iterate through the talkers already present in the struct.
         // This is perfect for "cloning" a chat or creating a new default one.
-        for agent in &mut chat.agents {
-            // We delegate to the mutating mk_agent function.
-            // This handles serializing msg_ids, preset_json, and updating agent.id.
-            mk_agent(conn, chat.id, agent)?;
+        for talker in &mut chat.talkers {
+            // We delegate to the mutating mk_talker function.
+            // This handles serializing msg_ids, preset_json, and updating talker.id.
+            mk_talker(conn, chat.id, talker)?;
         }
 
         Ok(())
@@ -227,15 +227,15 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
     }
 }
 
-pub fn mk_agent(
+pub fn mk_talker(
     conn: &rusqlite::Connection,
     chat_id: i64,
-    agent: &mut Agent
+    talker: &mut Talker
 ) -> rusqlite::Result<()> {
 
     // 1. Serialize
-    let msg_ids_json = serde_json::to_string(&agent.msg_ids).unwrap_or_else(|_| "[]".into());
-    let preset_json = agent.preset.as_ref().and_then(|p| p.to_json());
+    let msg_ids_json = serde_json::to_string(&talker.msg_ids).unwrap_or_else(|_| "[]".into());
+    let preset_json = talker.preset.as_ref().and_then(|p| p.to_json());
 
     // 2. Insert
     conn.execute(
@@ -252,26 +252,26 @@ pub fn mk_agent(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
             chat_id,
-            agent.agent_ind as i64,
-            agent.name,
+            talker.talker_ind as i64,
+            talker.name,
             msg_ids_json,
-            agent.preset_selection.id,
+            talker.preset_selection.id,
             preset_json,
-            agent.muted,
-            agent.hidden,
-            agent.deleted
+            talker.muted,
+            talker.hidden,
+            talker.deleted
         ],
     )?;
 
     // 3. Update the Struct ID immediately
-    agent.id = conn.last_insert_rowid();
+    talker.id = conn.last_insert_rowid();
 
     Ok(())
 }
 
-/// Updates an EXISTING agent using its unique database row ID.
-/// (Use this when you have the 'id' field from the Agent struct)
-pub fn mod_agent_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
+/// Updates an EXISTING talker using its unique database row ID.
+/// (Use this when you have the 'id' field from the Talker struct)
+pub fn mod_talker_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
         -> rusqlite::Result<()> {
     let json_ids = serde_json::to_string(msg_ids)
             .unwrap_or_else(|_| "[]".to_string());
@@ -285,8 +285,8 @@ pub fn mod_agent_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
     Ok(())
 }
 
-/// Updates an agent's base model preset selection and its snapshot
-pub fn mod_agent_model_preset(
+/// Updates a talker's base model preset selection and its snapshot
+pub fn mod_talker_model_preset(
     conn: &Connection,
     id: i64,
     preset_id: i64,
@@ -306,9 +306,9 @@ pub fn mod_agent_model_preset(
 }
 
 // only update snapshot - when tweaking parameters in the bottom_panel
-pub fn update_agent_model_preset_snapshot(
+pub fn update_talker_model_preset_snapshot(
     conn: &Connection,
-    agent_id: i64,
+    talker_id: i64,
     preset: Option<&ModelPreset>
 ) -> rusqlite::Result<()> {
 
@@ -316,7 +316,7 @@ pub fn update_agent_model_preset_snapshot(
 
     conn.execute(
         "UPDATE agent SET preset_json = ?1 WHERE id = ?2",
-        rusqlite::params![json, agent_id]
+        rusqlite::params![json, talker_id]
     )?;
 
     Ok(())
@@ -591,9 +591,9 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
     )?;
 
     // ---------------------------------------------------------
-    // 1. Fetch Chat Histories (aka Agents)
+    // 1. Fetch Chat Histories (aka Talkers)
     // We expect 'msg_ids' column to store JSON: "[1, 2, 3]"
-    let mut stmt_agent = conn.prepare(
+    let mut stmt_talker = conn.prepare(
         "SELECT agent_ind, msg_ids, id, preset_id, preset_json,
                 name, muted, hidden, deleted
          FROM agent
@@ -601,8 +601,8 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
          ORDER BY agent_ind ASC"
     )?;
 
-    let agent_iter = stmt_agent.query_map([chat_id], |row| {
-        let agent_ind: usize = row.get::<_, i64>(0)? as usize;
+    let talker_iter = stmt_talker.query_map([chat_id], |row| {
+        let talker_ind: usize = row.get::<_, i64>(0)? as usize;
         let json_str: String = row.get(1).unwrap_or_else(|_| "[]".to_string());
         let msg_ids: Vec<i64> = serde_json::from_str(&json_str)
                 .unwrap_or_default();
@@ -615,9 +615,9 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         let hidden: bool = row.get(7)?;
         let deleted: bool = row.get(8)?;
 
-    Ok(Agent {
+    Ok(Talker {
             id,
-            agent_ind,
+            talker_ind,
             msg_ids,
             preset_selection: ModelPresetSelection::from_id(preset_id, presets),
             preset: preset_snapshot, // <--- Populated from DB
@@ -628,20 +628,20 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         })
     })?;
 
-    let mut agents = Vec::new();
+    let mut talkers = Vec::new();
     let mut all_msg_ids = Vec::new();
 
-    for agent_res in agent_iter {
-        let agent = agent_res?;
-        if agent.agent_ind == 0 {
-            all_msg_ids = agent.msg_ids.clone();
+    for talker_res in talker_iter {
+        let talker = talker_res?;
+        if talker.talker_ind == 0 {
+            all_msg_ids = talker.msg_ids.clone();
         }
 
-        agents.push(agent);
+        talkers.push(talker);
     }
 
     // ---------------------------------------------------------
-    // 2. Fetch Messages into HashMap (Only for agent_ind == 0)
+    // 2. Fetch Messages into HashMap (Only for talker_ind == 0)
     // ---------------------------------------------------------
     let mut msg_pool = HashMap::new();
 
@@ -695,7 +695,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         id: chat_id,
         title,
         msg_pool,
-        agents,
+        talkers,
         draft_note: String::new(),
         draft_is_rhai: false,
     })
@@ -997,9 +997,9 @@ pub fn export_notebook_to_ron(conn: &Connection, chat_id: i64, presets: &ModelPr
     let chat = fetch_chat(conn, chat_id, presets)?;
     let mut cells = Vec::new();
 
-    // Export the linear timeline from the Omnis agent (index 0)
-    if let Some(agent) = chat.agents.first() {
-        for msg_id in &agent.msg_ids {
+    // Export the linear timeline from Omnis (talker 0)
+    if let Some(omnis) = chat.talkers.first() {
+        for msg_id in &omnis.msg_ids {
             if let Some(msg) = chat.msg_pool.get(msg_id) {
                 cells.push(crate::common::NotebookCellExport {
                     role: msg.msg_role.clone(),
@@ -1024,8 +1024,8 @@ pub fn export_chat_to_markdown(conn: &Connection, chat_id: i64, presets: &ModelP
     let mut md = String::new();
     md.push_str(&format!("# {}\n\n", chat.title));
 
-    if let Some(agent) = chat.agents.first() {
-        for msg_id in &agent.msg_ids {
+    if let Some(omnis) = chat.talkers.first() {
+        for msg_id in &omnis.msg_ids {
             if let Some(msg) = chat.msg_pool.get(msg_id) {
                 let role_label = match msg.msg_role {
                     crate::common::MsgRole::User => "User",

@@ -46,7 +46,7 @@ fn build_options(opts: &crate::common::ModelOptions) -> ModelOptions {
 fn build_chat_request(query: &ChatQue) -> ChatMessageRequest {
     let mut request = ChatMessageRequest::new(
         query.preset.model.clone(),
-        query.chat.to_ollama_messages(query.agent_ind),
+        query.chat.to_ollama_messages(query.talker_ind),
     ).options(build_options(&query.preset.options));
 
     // Unset leaves the decision to the server/model default.
@@ -86,13 +86,13 @@ pub async fn do_ollama_chat_sync(
 
             let msg = response.message;
             if let Some(thinking) = &msg.thinking {
-                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, thinking);
+                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.talker_ind, thinking);
             }
-            crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, &msg.content);
+            crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.talker_ind, &msg.content);
         }
         Err(e) => {
             let _ = tx.send(ChatStreamEvent::Error(
-                query.agent_ind,
+                query.talker_ind,
                 format!("Ollama sync error: {:?}", e)
             ));
             wakeup();
@@ -113,7 +113,7 @@ pub async fn do_ollama_chat_stream(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ollama = Ollama::default();
     let model_name = query.preset.model.clone();
-    let messages = query.chat.to_ollama_messages(query.agent_ind);
+    let messages = query.chat.to_ollama_messages(query.talker_ind);
 
     // 1. Prepare the ModelOptions (Seed & Temperature)
     let mut options = ModelOptions::default();
@@ -185,7 +185,7 @@ pub async fn do_ollama_chat_stream(
 
     while let Some(res) = stream.next().await {
         if abort_flag.load(Ordering::Relaxed) {
-            println!("Agent {} stream aborted by user.", query.agent_ind);
+            println!("Talker {} stream aborted by user.", query.talker_ind);
             break;
         }
         
@@ -198,14 +198,14 @@ pub async fn do_ollama_chat_stream(
         match res {
             Ok(response) => {
                 let msg = response.message;
-                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.agent_ind, &msg.content);
+                crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Content, query.talker_ind, &msg.content);
                 if let Some(thinking) = &msg.thinking {
-                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.agent_ind, thinking);
+                    crate::common::emit_text(&tx, &*wakeup, ChatStreamEvent::Reasoning, query.talker_ind, thinking);
                 }
             }
             Err(e) => {
                 let _ = tx.send(ChatStreamEvent::Error(
-                    query.agent_ind,
+                    query.talker_ind,
                     format!("Ollama stream error: {:?}", e)
                 ));
                 wakeup();

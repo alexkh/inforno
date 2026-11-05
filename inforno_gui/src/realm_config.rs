@@ -44,16 +44,16 @@ pub struct RealmConfigState {
     pub tier_edit_env: Vec<String>,
     pub tier_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
 
-    // --- Visual Builder: Role Edit State ---
-    pub is_editing_role: bool,
-    pub role_edit_original_key: Option<String>, // None means "Adding new"
-    pub role_edit_key: String,
-    pub role_edit_comment: String,
-    pub role_edit_tier: String,
-    pub role_edit_boss: String,
-    pub role_edit_bin: String,
-    pub role_edit_env: Vec<String>,
-    pub role_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
+    // --- Visual Builder: Duty Edit State ---
+    pub is_editing_duty: bool,
+    pub duty_edit_original_key: Option<String>, // None means "Adding new"
+    pub duty_edit_key: String,
+    pub duty_edit_comment: String,
+    pub duty_edit_tier: String,
+    pub duty_edit_boss: String,
+    pub duty_edit_bin: String,
+    pub duty_edit_env: Vec<String>,
+    pub duty_edit_powers: Vec<serde_saphyr::Commented<inforno_core::realm::Power>>,
 
     // --- Visual Builder: Folio Edit State ---
     pub is_editing_folio: bool,
@@ -61,13 +61,13 @@ pub struct RealmConfigState {
     pub folio_edit_key: String,
     pub folio_edit_comment: String,
     pub folio_edit_path: String,
-    pub folio_edit_roles: Vec<String>,
+    pub folio_edit_duties: Vec<String>,
 
     pub cached_config: Option<inforno_core::realm::RealmConfig>,
     pub show_save_confirmation: bool,
 
-    // The role selected in the VFS tree preview dropdown
-    pub vfs_preview_role: String,
+    // The duty selected in the VFS tree preview dropdown
+    pub vfs_preview_duty: String,
 
     // Indicates the app booted with a broken YAML file and is offering a rescue
     pub is_fixing_broken_realm: bool,
@@ -260,16 +260,16 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
                     ui.separator();
                     if let Some(realm) = &state.active_realm {
                         ui.horizontal(|ui| {
-                            ui.label("Preview as Role:");
-                            if substate.vfs_preview_role.is_empty() && !realm.roles.is_empty() {
-                                substate.vfs_preview_role = realm.roles.keys().next().unwrap().clone();
+                            ui.label("Preview as Duty:");
+                            if substate.vfs_preview_duty.is_empty() && !realm.duties.is_empty() {
+                                substate.vfs_preview_duty = realm.duties.keys().next().unwrap().clone();
                             }
 
-                            egui::ComboBox::from_id_salt("vfs_preview_role")
-                                .selected_text(&substate.vfs_preview_role)
+                            egui::ComboBox::from_id_salt("vfs_preview_duty")
+                                .selected_text(&substate.vfs_preview_duty)
                                 .show_ui(ui, |ui| {
-                                    for role in realm.roles.keys() {
-                                        ui.selectable_value(&mut substate.vfs_preview_role, role.clone(), role);
+                                    for duty in realm.duties.keys() {
+                                        ui.selectable_value(&mut substate.vfs_preview_duty, duty.clone(), duty);
                                     }
                                 });
                         });
@@ -277,7 +277,7 @@ pub fn ui_realm_config(ctx: &egui::Context, state: &mut State) {
 
                         // Use both() to allow horizontal scrolling for deep folder trees
                         ScrollArea::both().id_salt("vfs_tree_scroll").max_height(350.0).show(ui, |ui| {
-                            render_vfs_tree(ui, realm, &substate.vfs_preview_role);
+                            render_vfs_tree(ui, realm, &substate.vfs_preview_duty);
                         });
                     } else {
                         ui.label("No active realm loaded to display (Apply changes first).");
@@ -918,46 +918,46 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
     ui.add_space(10.0);
 
-    egui::CollapsingHeader::new(format!("🎭 Roles ({})", parsed_config.roles.len()))
+    egui::CollapsingHeader::new(format!("🎭 Duties ({})", parsed_config.duties.len()))
         .show(ui, |ui| {
             let available_refs: Vec<String> = parsed_config.expressions.keys().cloned().collect();
             let (mic_devices, speaker_devices) = substate.available_audio_devices
                 .get_or_insert_with(enumerate_audio_devices)
                 .clone();
 
-            if substate.is_editing_role {
+            if substate.is_editing_duty {
                 ui.group(|ui| {
-                    ui.heading(if substate.role_edit_original_key.is_some() { "Edit Role" } else { "Add Role" });
+                    ui.heading(if substate.duty_edit_original_key.is_some() { "Edit Duty" } else { "Add Duty" });
 
                     ui.horizontal(|ui| {
                         ui.label("Name:");
-                        ui.text_edit_singleline(&mut substate.role_edit_key);
+                        ui.text_edit_singleline(&mut substate.duty_edit_key);
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Comment:");
-                        ui.text_edit_singleline(&mut substate.role_edit_comment);
+                        ui.text_edit_singleline(&mut substate.duty_edit_comment);
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Tier (0-9):");
-                        ui.text_edit_singleline(&mut substate.role_edit_tier);
+                        ui.text_edit_singleline(&mut substate.duty_edit_tier);
                     });
 
                     ui.horizontal(|ui| {
                         ui.label("Boss:");
-                        ui.text_edit_singleline(&mut substate.role_edit_boss);
+                        ui.text_edit_singleline(&mut substate.duty_edit_boss);
                     });
 
                     ui.add_space(5.0);
                     ui.columns(2, |cols| {
                         cols[0].vertical(|ui| {
                             ui.label("Extra Binaries (one per line):");
-                            ui.text_edit_multiline(&mut substate.role_edit_bin);
+                            ui.text_edit_multiline(&mut substate.duty_edit_bin);
                         });
                         cols[1].vertical(|ui| {
                             ui.label("Environment Variables:");
-                            ui_edit_env_list(ui, &mut substate.role_edit_env, 5000);
+                            ui_edit_env_list(ui, &mut substate.duty_edit_env, 5000);
                         });
                     });
 
@@ -970,7 +970,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                         }
                     });
                     let mut to_remove_power = None;
-                    for (i, p) in substate.role_edit_powers.iter_mut().enumerate() {
+                    for (i, p) in substate.duty_edit_powers.iter_mut().enumerate() {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(format!("Power {}", i + 1)).strong());
@@ -1022,10 +1022,10 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                         });
                     }
                     if let Some(i) = to_remove_power {
-                        substate.role_edit_powers.remove(i);
+                        substate.duty_edit_powers.remove(i);
                     }
                     if ui.button("+ Add Power").clicked() {
-                        substate.role_edit_powers.push(serde_saphyr::Commented(
+                        substate.duty_edit_powers.push(serde_saphyr::Commented(
                             inforno_core::realm::Power::Fs {
                                 span: inforno_core::realm::GlobExpr::Pattern("**/*".to_string()),
                                 caps: vec![inforno_core::realm::Cap::Read],
@@ -1037,18 +1037,18 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        let parsed_tier = substate.role_edit_tier.parse::<u32>();
+                        let parsed_tier = substate.duty_edit_tier.parse::<u32>();
                         let is_valid_tier = parsed_tier.is_ok() && parsed_tier.as_ref().unwrap() <= &9;
-                        
+
                         let mut tier_zero_violation = false;
                         if is_valid_tier && *parsed_tier.as_ref().unwrap() == 0 {
-                            if !substate.role_edit_powers.is_empty() || !substate.role_edit_bin.trim().is_empty() {
+                            if !substate.duty_edit_powers.is_empty() || !substate.duty_edit_bin.trim().is_empty() {
                                 tier_zero_violation = true;
                             }
                         }
-                        
-                        let can_apply = !substate.role_edit_key.trim().is_empty() && is_valid_tier && !tier_zero_violation;
-                        
+
+                        let can_apply = !substate.duty_edit_key.trim().is_empty() && is_valid_tier && !tier_zero_violation;
+
                         let tooltip = if tier_zero_violation {
                             "Tier 0 cannot have powers or extra binaries."
                         } else {
@@ -1056,101 +1056,101 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                         };
 
                         if ui.add_enabled(can_apply, egui::Button::new("✔ Apply")).on_disabled_hover_text(tooltip).clicked() {
-                            let new_key = substate.role_edit_key.trim().to_string();
+                            let new_key = substate.duty_edit_key.trim().to_string();
                             let new_tier = parsed_tier.unwrap();
-                            let boss_val = substate.role_edit_boss.trim().to_string();
-                            
-                            let bin_lines: Vec<String> = substate.role_edit_bin.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                            let env_lines: Vec<String> = substate.role_edit_env.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                            let boss_val = substate.duty_edit_boss.trim().to_string();
 
-                            let new_role = serde_saphyr::Commented(
-                                inforno_core::realm::RoleConfig {
+                            let bin_lines: Vec<String> = substate.duty_edit_bin.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                            let env_lines: Vec<String> = substate.duty_edit_env.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+                            let new_duty = serde_saphyr::Commented(
+                                inforno_core::realm::DutyConfig {
                                     tier: inforno_core::realm::Tier(new_tier),
                                     boss: if boss_val.is_empty() { None } else { Some(boss_val) },
-                                    powers: substate.role_edit_powers.clone(),
+                                    powers: substate.duty_edit_powers.clone(),
                                     bin: bin_lines,
                                     env: env_lines,
                                 },
-                                substate.role_edit_comment.clone()
+                                substate.duty_edit_comment.clone()
                             );
 
-                            if let Some(ref orig_key) = substate.role_edit_original_key {
-                                let mut new_roles = indexmap::IndexMap::new();
-                                for (k, v) in parsed_config.roles.iter() {
+                            if let Some(ref orig_key) = substate.duty_edit_original_key {
+                                let mut new_duties = indexmap::IndexMap::new();
+                                for (k, v) in parsed_config.duties.iter() {
                                     if k == orig_key {
-                                        new_roles.insert(new_key.clone(), new_role.clone());
+                                        new_duties.insert(new_key.clone(), new_duty.clone());
                                     } else {
-                                        new_roles.insert(k.clone(), v.clone());
+                                        new_duties.insert(k.clone(), v.clone());
                                     }
                                 }
-                                new_config.roles = new_roles;
+                                new_config.duties = new_duties;
                             } else {
-                                new_config.roles.insert(new_key, new_role);
+                                new_config.duties.insert(new_key, new_duty);
                             }
 
                             config_changed = true;
-                            substate.is_editing_role = false;
+                            substate.is_editing_duty = false;
                         }
                         if ui.button("✖ Cancel").clicked() {
-                            substate.is_editing_role = false;
+                            substate.is_editing_duty = false;
                         }
                     });
                 });
             } else {
-                for (name, role_cfg) in &parsed_config.roles {
-                    let role = &role_cfg.0;
+                for (name, duty_cfg) in &parsed_config.duties {
+                    let duty = &duty_cfg.0;
                     ui.group(|ui| {
-                        if !role_cfg.1.trim().is_empty() {
-                            ui.label(egui::RichText::new(format!("# {}", role_cfg.1.trim())).weak());
+                        if !duty_cfg.1.trim().is_empty() {
+                            ui.label(egui::RichText::new(format!("# {}", duty_cfg.1.trim())).weak());
                         }
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(name).strong());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("🗑").on_hover_text("Delete Role").clicked() {
-                                    new_config.roles.shift_remove(name);
+                                if ui.button("🗑").on_hover_text("Delete Duty").clicked() {
+                                    new_config.duties.shift_remove(name);
                                     config_changed = true;
                                 }
-                                if ui.button("✏").on_hover_text("Edit Role").clicked() {
-                                    substate.is_editing_role = true;
-                                    substate.role_edit_original_key = Some(name.clone());
-                                    substate.role_edit_key = name.clone();
-                                    substate.role_edit_comment = role_cfg.1.trim().to_string();
-                                    substate.role_edit_tier = role.tier.0.to_string();
-                                    substate.role_edit_boss = role.boss.clone().unwrap_or_default();
-                                    substate.role_edit_bin = role.bin.join("\n");
-                                    substate.role_edit_env = role.env.clone();
-                                    substate.role_edit_powers = role.powers.clone();
+                                if ui.button("✏").on_hover_text("Edit Duty").clicked() {
+                                    substate.is_editing_duty = true;
+                                    substate.duty_edit_original_key = Some(name.clone());
+                                    substate.duty_edit_key = name.clone();
+                                    substate.duty_edit_comment = duty_cfg.1.trim().to_string();
+                                    substate.duty_edit_tier = duty.tier.0.to_string();
+                                    substate.duty_edit_boss = duty.boss.clone().unwrap_or_default();
+                                    substate.duty_edit_bin = duty.bin.join("\n");
+                                    substate.duty_edit_env = duty.env.clone();
+                                    substate.duty_edit_powers = duty.powers.clone();
                                 }
                             });
                         });
                         ui.horizontal(|ui| {
                             ui.label("Tier:");
-                            ui.label(role.tier.0.to_string());
+                            ui.label(duty.tier.0.to_string());
                         });
-                        if let Some(boss) = &role.boss {
+                        if let Some(boss) = &duty.boss {
                             ui.horizontal(|ui| {
                                 ui.label("Boss:");
                                 ui.label(boss);
                             });
                         }
-                        if !role.powers.is_empty() {
-                            ui.label(format!("Powers: {} defined", role.powers.len()));
+                        if !duty.powers.is_empty() {
+                            ui.label(format!("Powers: {} defined", duty.powers.len()));
                         }
-                        if !role.bin.is_empty() {
-                            ui.label(egui::RichText::new(format!("Includes {} extra binaries.", role.bin.len())).weak().small());
+                        if !duty.bin.is_empty() {
+                            ui.label(egui::RichText::new(format!("Includes {} extra binaries.", duty.bin.len())).weak().small());
                         }
                     });
                 }
-                if ui.button("+ Add Role").clicked() {
-                    substate.is_editing_role = true;
-                    substate.role_edit_original_key = None;
-                    substate.role_edit_key = "new_role".to_string();
-                    substate.role_edit_comment = "".to_string();
-                    substate.role_edit_tier = "2".to_string();
-                    substate.role_edit_boss = "".to_string();
-                    substate.role_edit_bin = "".to_string();
-                    substate.role_edit_env = vec![];
-                    substate.role_edit_powers = vec![];
+                if ui.button("+ Add Duty").clicked() {
+                    substate.is_editing_duty = true;
+                    substate.duty_edit_original_key = None;
+                    substate.duty_edit_key = "new_duty".to_string();
+                    substate.duty_edit_comment = "".to_string();
+                    substate.duty_edit_tier = "2".to_string();
+                    substate.duty_edit_boss = "".to_string();
+                    substate.duty_edit_bin = "".to_string();
+                    substate.duty_edit_env = vec![];
+                    substate.duty_edit_powers = vec![];
                 }
             }
         });
@@ -1179,33 +1179,33 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     ui.label(egui::RichText::new("Must be an absolute path ending in .rno").weak().small());
 
                     ui.add_space(5.0);
-                    ui.label(egui::RichText::new("Authorized Roles:").strong());
-                    ui.indent("folio_roles_indent", |ui| {
-                        for role_name in parsed_config.roles.keys() {
-                            let mut is_authorized = substate.folio_edit_roles.contains(role_name);
-                            if ui.checkbox(&mut is_authorized, role_name).changed() {
+                    ui.label(egui::RichText::new("Authorized Duties:").strong());
+                    ui.indent("folio_duties_indent", |ui| {
+                        for duty_name in parsed_config.duties.keys() {
+                            let mut is_authorized = substate.folio_edit_duties.contains(duty_name);
+                            if ui.checkbox(&mut is_authorized, duty_name).changed() {
                                 if is_authorized {
-                                    substate.folio_edit_roles.push(role_name.clone());
+                                    substate.folio_edit_duties.push(duty_name.clone());
                                 } else {
-                                    substate.folio_edit_roles.retain(|r| r != role_name);
+                                    substate.folio_edit_duties.retain(|d| d != duty_name);
                                 }
                             }
                         }
 
-                        // Display a warning if a role is authorized but missing from the Realm configuration
-                        let mut to_remove_role = None;
-                        for (i, role_name) in substate.folio_edit_roles.iter().enumerate() {
-                            if !parsed_config.roles.contains_key(role_name) {
+                        // Display a warning if a duty is authorized but missing from the Realm configuration
+                        let mut to_remove_duty = None;
+                        for (i, duty_name) in substate.folio_edit_duties.iter().enumerate() {
+                            if !parsed_config.duties.contains_key(duty_name) {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(format!("{} (Unknown Role)", role_name)).color(ui.visuals().error_fg_color));
+                                    ui.label(egui::RichText::new(format!("{} (Unknown Duty)", duty_name)).color(ui.visuals().error_fg_color));
                                     if ui.button("✖").clicked() {
-                                        to_remove_role = Some(i);
+                                        to_remove_duty = Some(i);
                                     }
                                 });
                             }
                         }
-                        if let Some(i) = to_remove_role {
-                            substate.folio_edit_roles.remove(i);
+                        if let Some(i) = to_remove_duty {
+                            substate.folio_edit_duties.remove(i);
                         }
                     });
 
@@ -1213,20 +1213,20 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     ui.horizontal(|ui| {
                         let path_valid = std::path::Path::new(&substate.folio_edit_path).is_absolute()
                                       && substate.folio_edit_path.ends_with(".rno");
-                        let roles_valid = !substate.folio_edit_roles.is_empty();
+                        let duties_valid = !substate.folio_edit_duties.is_empty();
                         let key_valid = !substate.folio_edit_key.trim().is_empty();
-                        
-                        let can_apply = key_valid && path_valid && roles_valid;
+
+                        let can_apply = key_valid && path_valid && duties_valid;
 
                         if ui.add_enabled(can_apply, egui::Button::new("✔ Apply"))
-                            .on_disabled_hover_text("Name required. Path must be absolute .rno. At least 1 role must be authorized.")
+                            .on_disabled_hover_text("Name required. Path must be absolute .rno. At least 1 duty must be authorized.")
                             .clicked() {
-                                
+
                             let new_key = substate.folio_edit_key.trim().to_string();
                             let new_folio = serde_saphyr::Commented(
                                 inforno_core::realm::FolioRef {
                                     path: std::path::PathBuf::from(substate.folio_edit_path.trim()),
-                                    roles: substate.folio_edit_roles.clone(),
+                                    duties: substate.folio_edit_duties.clone(),
                                 },
                                 substate.folio_edit_comment.clone()
                             );
@@ -1274,13 +1274,13 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                                     substate.folio_edit_key = name.clone();
                                     substate.folio_edit_comment = folio_cfg.1.trim().to_string();
                                     substate.folio_edit_path = folio.path.display().to_string();
-                                    substate.folio_edit_roles = folio.roles.clone();
+                                    substate.folio_edit_duties = folio.duties.clone();
                                 }
                             });
                         });
                         ui.label(format!("Path: {}", folio.path.display()));
-                        if !folio.roles.is_empty() {
-                            ui.label(format!("Roles: {}", folio.roles.join(", ")));
+                        if !folio.duties.is_empty() {
+                            ui.label(format!("Duties: {}", folio.duties.join(", ")));
                         }
                     });
                 }
@@ -1290,14 +1290,14 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     substate.folio_edit_key = "new_folio".to_string();
                     substate.folio_edit_comment = "".to_string();
                     substate.folio_edit_path = "/path/to/folio.rno".to_string();
-                    substate.folio_edit_roles = vec![];
+                    substate.folio_edit_duties = vec![];
                 }
             }
         });
 
     // If the visual builder produced changes, serialize them automatically back to the right-side text editor.
     // CommentPosition::Above (rather than the default Inline) is required here: Inline silently
-    // drops comments attached to non-scalar values (mounts/roles/tiers/folios are all
+    // drops comments attached to non-scalar values (mounts/duties/tiers/folios are all
     // structs), so without this every comment on those would vanish the moment the Visual
     // Builder touches anything. This also changes how `places` comments render -- as a line
     // above the key instead of trailing on the same line -- rather than reflowing per field.
@@ -1307,7 +1307,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
             Ok(yaml) => {
                 let mut lines: Vec<String> = yaml.lines().map(String::from).collect();
 
-                // Pass 1: Handle Inner Struct Comments (Mounts, Roles, Tiers)
+                // Pass 1: Handle Inner Struct Comments (Mounts, Duties, Tiers)
                 let mut i = 0;
                 while i < lines.len() {
                     let current_line = &lines[i];
@@ -1416,12 +1416,12 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                     i += 1;
                 }
 
-                // Pass 4: Collapse short arrays (like caps: and folio roles:) into inline flow style
+                // Pass 4: Collapse short arrays (like caps: and folio duties:) into inline flow style
                 let mut i = 0;
                 while i < lines.len() {
                     let trimmed = lines[i].trim();
-                    // Target `caps:` and any indented `roles:` (to avoid collapsing the top-level roles: block)
-                    if trimmed == "caps:" || (trimmed == "roles:" && lines[i].starts_with(' ')) {
+                    // Target `caps:` and any indented `duties:` (to avoid collapsing the top-level duties: block)
+                    if trimmed == "caps:" || (trimmed == "duties:" && lines[i].starts_with(' ')) {
                         let base_indent = lines[i].len() - lines[i].trim_start().len();
                         let mut list_items = Vec::new();
                         let mut j = i + 1;
@@ -1450,7 +1450,7 @@ fn render_form_column(ui: &mut egui::Ui, state: &mut State) {
                 }
 
                 // Pass 5: Insert empty lines between major top-level sections
-                let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "roles:", "folios:", "bin:", "env:"];
+                let top_level_keys = ["mounts:", "places:", "spans:", "tiers:", "duties:", "folios:", "bin:", "env:"];
                 let mut i = 0;
                 while i < lines.len() {
                     if top_level_keys.contains(&lines[i].as_str()) {
@@ -1644,15 +1644,15 @@ fn ui_new_realm_wizard(ctx: &egui::Context, state: &mut State) {
                             let minimal_yaml = format!(r#"mounts: {{}}
 places: {{}}
 tiers: {{}}
-roles:
-  gui:
+duties:
+  {duty}:
     tier: 1
-{}folios:
+{audio}folios:
   default:
-    path: {}
-    roles:
-      - gui
-"#, audio_powers_yaml, path_str);
+    path: {path}
+    duties:
+      - {duty}
+"#, duty = crate::chat::GUI_DUTY, audio = audio_powers_yaml, path = path_str);
 
                             let yaml_path = realm_dir.join("realm2.yml");
                             let _ = std::fs::write(&yaml_path, minimal_yaml.clone());
@@ -2030,10 +2030,10 @@ fn ui_edit_glob_expr(
     });
 }
 
-fn render_vfs_tree(ui: &mut egui::Ui, realm: &inforno_core::realm::ActiveRealm, role: &str) {
+fn render_vfs_tree(ui: &mut egui::Ui, realm: &inforno_core::realm::ActiveRealm, duty: &str) {
     for mount in &realm.mounts {
         let v_path = std::path::PathBuf::from(&mount.virtual_path);
-        render_vfs_node(ui, realm, &mount.host_path, &v_path, role, true);
+        render_vfs_node(ui, realm, &mount.host_path, &v_path, duty, true);
     }
 }
 
@@ -2042,11 +2042,11 @@ fn render_vfs_node(
     realm: &inforno_core::realm::ActiveRealm,
     host_path: &std::path::Path,
     virtual_path: &std::path::Path,
-    role: &str,
+    duty: &str,
     is_root: bool
 ) {
     // 1. FUSE Visibility Gate: If the Realm hides it (e.g. dotfiles), it doesn't exist to `ls`.
-    if realm.is_path_hidden(virtual_path, role) {
+    if realm.is_path_hidden(virtual_path, duty) {
         return;
     }
 
@@ -2065,9 +2065,9 @@ fn render_vfs_node(
             can_append = false;
         }
     } else {
-        can_read = realm.can_access(virtual_path, inforno_core::realm::Cap::Read, role).is_ok();
-        can_write = realm.can_access(virtual_path, inforno_core::realm::Cap::Write, role).is_ok();
-        can_append = realm.can_access(virtual_path, inforno_core::realm::Cap::Append, role).is_ok();
+        can_read = realm.can_access(virtual_path, inforno_core::realm::Cap::Read, duty).is_ok();
+        can_write = realm.can_access(virtual_path, inforno_core::realm::Cap::Write, duty).is_ok();
+        can_append = realm.can_access(virtual_path, inforno_core::realm::Cap::Append, duty).is_ok();
     }
 
     let icon = if can_write {
@@ -2119,7 +2119,7 @@ fn render_vfs_node(
                                 realm,
                                 &entry.path(),
                                 &virtual_path.join(entry.file_name()),
-                                role,
+                                duty,
                                 false
                             );
                         }

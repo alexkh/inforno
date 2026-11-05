@@ -6,7 +6,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_snarl::{ui::{PinInfo, SnarlPin, SnarlViewer}, InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 
-use inforno_core::common::{Agent, Chat, ChatMsg, ChatQue, ChatRouter, MsgRole, ModelPreset};
+use inforno_core::common::{Chat, ChatMsg, ChatQue, ChatRouter, MsgRole, ModelPreset, Talker};
 use rucomfyui::object_info::{Object, ObjectInfo, ObjectInputMetaTyped, ObjectType};
 
 use crate::state::State;
@@ -1008,11 +1008,11 @@ async fn run_llm_node(node: &InfornoNode, preset: &ModelPreset) -> Result<String
     let user_id = 2;
     chat.msg_pool.insert(sys_id, ChatMsg { id: sys_id, msg_role: MsgRole::System, content: system_prompt.clone(), ..Default::default() });
     chat.msg_pool.insert(user_id, ChatMsg { id: user_id, msg_role: MsgRole::User, content: user_prompt.clone(), ..Default::default() });
-    let mut agent = Agent::default();
-    agent.msg_ids = vec![sys_id, user_id];
-    chat.agents = vec![agent];
+    let mut talker = Talker::default();
+    talker.msg_ids = vec![sys_id, user_id];
+    chat.talkers = vec![talker];
 
-    let query = ChatQue { agent_ind: 0, preset, chat: Arc::new(chat) };
+    let query = ChatQue { talker_ind: 0, preset, chat: Arc::new(chat) };
 
     match router_hint {
         ChatRouter::Ollama => inforno_core::ollama::do_ollama_chat_que(query).await

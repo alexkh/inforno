@@ -11,7 +11,7 @@ use egui::Color32;
 use inforno_core::common::{self, ChatRouter, ApiKey, ChatStreamEvent, DbChat, FileOp, FileOpMsg, ModelPresets, OllamaDownloading, load_model_presets};
 use inforno_core::db::{fetch_chat, fetch_chat_titles, get_folio_db_conn, mod_msg_content_reasoning};
 use inforno_core::db::cache::{get_cache_db_conn, get_ollama_model_names, get_openr_model_names};
-use crate::agent_config::{AgentConfigState, ui_agent_config};
+use crate::talker_config::{TalkerConfigState, ui_talker_config};
 use crate::bottom_panel::{BottomPanelState, ui_bottom_panel};
 use crate::chat::ui_chat;
 use crate::key_manager::ui_key_manager;
@@ -103,7 +103,7 @@ pub struct MyAppPermanent {
 
 pub struct ChatStreamingState {
     pub streaming: bool,
-    pub bitmask: u128, // each bit flags which agent is streaming
+    pub bitmask: u128, // each bit flags which talker is streaming
     pub msg_ids: Vec<i64>,
     pub content_buffers: Vec<String>, // used when chat streaming
     pub reasoning_buffers: Vec<String>,
@@ -156,13 +156,13 @@ pub struct State {
     pub is_in_home_folio: bool,
     pub folio: PathBuf,
     // when receiving reply from the LLM's we need to store them during
-    // streaming. Each buffer is indexed by the Agent index.
+    // streaming. Each buffer is indexed by the Talker index.
     pub chat_streaming_state: ChatStreamingState,
     // error modal's content:
     pub error_msg: Option<String>,
     pub is_modal_open: bool,
     pub bottom_panel_state: BottomPanelState,
-    pub agent_config_state: AgentConfigState,
+    pub talker_config_state: TalkerConfigState,
     pub math_cache: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, std::sync::Arc<[u8]>>>>,
     pub copy_presets_checked: bool,
     pub show_realm_folio_init_modal: bool,
@@ -179,6 +179,9 @@ pub struct State {
     pub chat_widths: std::collections::HashMap<i64, f32>,
     /// Search term highlighted in a chat opened from the search results, by chat id
     pub chat_highlights: std::collections::HashMap<i64, crate::search_highlight::ChatHighlight>,
+    /// Old key names the open Realm's realm2.yml still uses, for the banner
+    /// (`inforno_core::realm::legacy_realm_keys`). Empty outside a Realm.
+    pub realm_legacy_keys: Vec<String>,
 }
 
 impl State {
@@ -225,6 +228,7 @@ impl State {
         }
 
         let mut initial_error_msg = None;
+        let mut realm_legacy_keys = Vec::new();
         let mut is_fixing_broken_realm = false;
         let mut broken_realm_yaml = String::new();
         let mut broken_realm_name = String::new();
@@ -240,6 +244,7 @@ impl State {
                 let yaml_path = realm_dir.join("realm2.yml");
                 match std::fs::read_to_string(&yaml_path) {
                     Ok(config_str) => {
+                        realm_legacy_keys = inforno_core::realm::legacy_realm_keys(&config_str);
                         match serde_saphyr::from_str::<inforno_core::realm::RealmConfig>(&config_str) {
                             Ok(raw_config) => {
                                 match inforno_core::realm::ActiveRealm::from_config(realm_name.clone(), raw_config) {
@@ -533,7 +538,7 @@ impl State {
             error_msg: initial_error_msg.clone(), // if there is an error, modal will auto open
             is_modal_open: initial_error_msg.is_some() || show_realm_folio_init,
             bottom_panel_state: BottomPanelState::default(),
-            agent_config_state: AgentConfigState::default(),
+            talker_config_state: TalkerConfigState::default(),
             math_cache: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
             copy_presets_checked: true,
             show_realm_folio_init_modal: show_realm_folio_init,
@@ -549,6 +554,7 @@ impl State {
             search_query: String::new(),
             chat_widths: std::collections::HashMap::new(),
             chat_highlights: std::collections::HashMap::new(),
+            realm_legacy_keys,
         }
     }
 
@@ -865,7 +871,7 @@ impl eframe::App for MyApp {
                     }
                 }
                 ChatStreamEvent::Finished(ind) => {
-                    // tur off the bit for this agent
+                    // turn off the bit for this talker
                     state.chat_streaming_state.bitmask &= !(1 << ind as u128);
                     // persist the result to db
                     let content = state.chat_streaming_state
@@ -879,7 +885,7 @@ impl eframe::App for MyApp {
                             state.chat_streaming_state.msg_ids[ind],
                             &content, &reasoning);
 
-                    // check if all agents are done
+                    // check if all talkers are done
                     if state.chat_streaming_state.bitmask == 0 {
                         state.chat_streaming_state.streaming = false;
                         println!("Streaming finished");
@@ -888,12 +894,12 @@ impl eframe::App for MyApp {
                 ChatStreamEvent::Error(ind, err) => {
                     // Check for minor serialization error first
                     if err.starts_with("Serialization error") {
-                        eprintln!("Agent {} Ignored Error: {}", ind, err);
-                        // Do nothing else here - this keeps the agent "streaming"
+                        eprintln!("Talker {} Ignored Error: {}", ind, err);
+                        // Do nothing else here - this keeps the talker "streaming"
                         // and does not clear the bitmask.
                     } else {
                         // Handle actual fatal errors
-                        eprintln!("Agent {} Error: {}", ind, err);
+                        eprintln!("Talker {} Error: {}", ind, err);
 
                         if let Some(buf) = state.chat_streaming_state
                                     .content_buffers.get_mut(ind) {
@@ -920,13 +926,15 @@ impl eframe::App for MyApp {
 
         ui_top_panel(ui, state);
 
+        crate::top_panel::ui_realm_legacy_banner(ui, state);
+
         ui_side_panel(ui, state);
 
         ui_key_manager(ui, state);
 
         ui_model_preset_editor(ui, state);
 
-        ui_agent_config(ui, state);
+        ui_talker_config(ui, state);
 
         ui_realm_config(ui, state);
 
@@ -1127,9 +1135,9 @@ impl eframe::App for MyApp {
                     match &folio_path {
                         Ok(path) => {
                             let entry = format!(
-                                "folios:\n  default:\n    path: {}\n    roles: [{}]",
+                                "folios:\n  default:\n    path: {}\n    duties: [{}]",
                                 path.display(),
-                                crate::chat::GUI_ROLE
+                                crate::chat::GUI_DUTY
                             );
                             ui.label("To make it this Realm's default Folio, add this to realm2.yml by hand:");
                             ui.horizontal(|ui| {

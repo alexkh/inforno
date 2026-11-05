@@ -78,7 +78,7 @@ welcome_tour: |
 
   Inforno is a graphical user interface frontend for Ollama and OpenRouter.
   It does not run any Large Language Models (LLMs), bur rather
-  redirects the prompt entered by user to one or more Agents, which are
+  redirects the prompt entered by user to one or more Talkers, which are
   provided by one or both of the backend solutions: Ollama and OpenRouter.
 
   Ollama is a background service that runs on your computer
@@ -166,10 +166,10 @@ welcome_tour: |
   write the Prompt into the textbox in the bottom panel, select a Model Preset and
   click "Send Prompt" button or press Ctrl+Enter.
 
-error_no_agent_preset_selected: "Error: no agent has a valid model preset selected!"
+error_no_talker_preset_selected: "Error: no talker has a valid model preset selected!"
 error_empty_prompt: "Error: no prompt text entered!"
-agent_config_window_title: "Agent Config"
-config_editor_invitation: "Here you can override model preset settings for an agent without modifying the model preset itself:"
+talker_config_window_title: "Talker Config"
+config_editor_invitation: "Here you can override model preset settings for a talker without modifying the model preset itself:"
 include_reasoning: "Include reasoning?"
 currently: "Initially"
 unset: "Unset"
@@ -178,8 +178,8 @@ no: "No"
 seed: "Seed"
 generate_random_seed_btn: "Generate Random Seed"
 temperature_range: "Temperature (0.0-2.0)"
-agent_config_save_changes_btn: "Save Agent Config Changes"
-error_saving_agent_config_to_folio: "Error saving agent config to Folio"
+talker_config_save_changes_btn: "Save Talker Config Changes"
+error_saving_talker_config_to_folio: "Error saving talker config to Folio"
 revert_to_initial_tooltip: "Revert to initial value"
 cancel_btn: "Cancel"
 router_label: "Router:"
@@ -193,12 +193,12 @@ thought_process: "💭 Thought Process"
 chats_label: "Chats:"
 new_chat_btn: "➕ New Chat"
 new_chat_tooltip: "Start a New Chat"
-new_chat_copying_agents_btn: "A"
-new_chat_copying_agents_tooltip: "New Chat, Copying Agents"
+new_chat_copying_talkers_btn: "T"
+new_chat_copying_talkers_tooltip: "New Chat, Copying Talkers"
 new_chat_copying_prompts_btn: "P"
 new_chat_copying_prompts_tooltip: "New Chat, Copying Prompts"
-new_chat_copying_agents_prompts_btn: "A+P"
-new_chat_copying_agents_prompts_tooltip: "New Chat, Copying Agents and Prompts"
+new_chat_copying_talkers_prompts_btn: "T+P"
+new_chat_copying_talkers_prompts_tooltip: "New Chat, Copying Talkers and Prompts"
 chat_options_tooltip: "Chat Options"
 rename_chat_btn: "Rename"
 delete_chat_btn: "Delete"

@@ -8,9 +8,9 @@ use crate::realm_vfs::RealmFuseFS;
 
 /// A `VfsMaskSession` is NOT an isolated sandbox or VM boundary — it is a thin
 /// virtual filesystem layer over real host directories, in two senses at once:
-/// it masks PATHS (presenting short, role-agnostic virtual paths in place of
+/// it masks PATHS (presenting short, duty-agnostic virtual paths in place of
 /// long or developer-specific real ones) and it masks PERMISSIONS (hiding,
-/// read-only, and create rules applied per access level/role). It does not
+/// read-only, and create rules applied per duty). It does not
 /// copy, snapshot, or isolate the underlying files. Those files are ordinary
 /// files on disk, may be reachable through multiple concurrent VfsMasks (or
 /// directly, outside any VfsMask) at the same time, and writes made through
@@ -80,9 +80,9 @@ pub struct VfsMaskSession {
 
 impl VfsMaskSession {
     /// Spawns the background FUSE mount representing the Realm's masked view,
-    /// as enforced for the given Role for the lifetime of the session — a
-    /// different Role needs its own `spawn_vfs` call and its own mount.
-    pub fn spawn_vfs(realm: ActiveRealm, role: String) -> Result<Self, Box<dyn std::error::Error>> {
+    /// as enforced for the given duty for the lifetime of the session — a
+    /// different duty needs its own `spawn_vfs` call and its own mount.
+    pub fn spawn_vfs(realm: ActiveRealm, duty: String) -> Result<Self, Box<dyn std::error::Error>> {
         let base_dir = if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "inforno") {
             proj_dirs.cache_dir().join("autorno_mounts")
         } else {
@@ -91,7 +91,7 @@ impl VfsMaskSession {
         std::fs::create_dir_all(&base_dir)?;
         let mount_dir = tempfile::Builder::new().prefix("vfs_").tempdir_in(&base_dir)?;
         
-        let fs = RealmFuseFS::new(realm, role);
+        let fs = RealmFuseFS::new(realm, duty);
 
         // Intentionally omitting MountOption::RO to allow FUSE to selectively handle write operations.
         let session = fuser::spawn_mount2(fs, mount_dir.path(), &[
@@ -113,7 +113,7 @@ impl VfsMaskSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::realm::{ActiveRealm, RealmConfig, RealmMountConfig, GlobExpr, RoleConfig, Tier, Power, Cap};
+    use crate::realm::{ActiveRealm, RealmConfig, RealmMountConfig, GlobExpr, DutyConfig, Tier, Power, Cap};
     use indexmap::IndexMap;
     use std::fs::{self, File};
     use std::io::Write;
@@ -142,14 +142,14 @@ mod tests {
             read_only: false,
         }, String::new()));
 
-        let mut roles = IndexMap::new();
-        roles.insert("tester".to_string(), serde_saphyr::Commented(RoleConfig {
+        let mut duties = IndexMap::new();
+        duties.insert("tester".to_string(), serde_saphyr::Commented(DutyConfig {
             tier: Tier(2),
             boss: None,
             powers: vec![],
             bin: vec![],
             env: vec![],
-        }, " Test Role".to_string()));
+        }, " Test Duty".to_string()));
 
         let mut tiers = std::collections::BTreeMap::new();
         tiers.insert(2u32, serde_saphyr::Commented(crate::realm::TierConfig { bin: vec![], env: vec![], powers: vec![
@@ -176,7 +176,7 @@ mod tests {
             mounts,
             places: IndexMap::new(),
             folios: IndexMap::new(),
-            roles,
+            duties,
             tiers,
             bin: vec![],
             env: vec![],

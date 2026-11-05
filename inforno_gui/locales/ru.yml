@@ -79,7 +79,7 @@ welcome_tour: |
   Инфорно (Inforno) — это графический интерфейс (фронтенд) для Ollama и
   OpenRouter. Сама
   программа не запускает Большие Языковые Модели (LLM), а просто перенаправляет
-  введённый пользователем запрос одному или нескольким Агентам, которые
+  введённый пользователем запрос одному или нескольким Собеседникам, которые
   предоставляются одним или обоими бэкенд-решениями: Ollama и OpenRouter.
 
   Ollama — это фоновая служба, работающая на вашем компьютере, которая позволяет
@@ -172,10 +172,10 @@ welcome_tour: |
   нижней панели, выберите пресет модели и нажмите кнопку "Отправить Промпт" или
   Ctrl+Enter.
 
-error_no_agent_preset_selected: "Ошибка: Пресет Модели не выбран ни для одного Агента!"
+error_no_talker_preset_selected: "Ошибка: Пресет Модели не выбран ни для одного Собеседника!"
 error_empty_prompt: "Ошибка: пустое поле промпта!"
-agent_config_window_title: "Настройки Агента"
-config_editor_invitation: "Здесь вы можете перекрыть настройки пресета модели для агента, не модифицируя сам пресет:"
+talker_config_window_title: "Настройки Собеседника"
+config_editor_invitation: "Здесь вы можете перекрыть настройки пресета модели для собеседника, не модифицируя сам пресет:"
 include_reasoning: "Включить рассуждение?"
 currently: "Изначально"
 unset: "Неуст"
@@ -184,8 +184,8 @@ no: "Нет"
 seed: "Сид"
 generate_random_seed_btn: "Сгенерировать Случайный Сид"
 temperature_range: "Температура (0.0-2.0)"
-agent_config_save_changes_btn: "Сохранить Изменения Настроек Агента"
-error_saving_agent_config_to_folio: "Ошибка сохранения настроек агента в Фолианте"
+talker_config_save_changes_btn: "Сохранить Изменения Настроек Собеседника"
+error_saving_talker_config_to_folio: "Ошибка сохранения настроек собеседника в Фолианте"
 revert_to_initial_tooltip: "Вернуть изначальное значение"
 cancel_btn: "Отменить"
 router_label: "Рутер:"
@@ -199,12 +199,12 @@ thought_process: "💭 Мыслительный процесс"
 chats_label: "Чаты:"
 new_chat_btn: "➕ Новый Чат"
 new_chat_tooltip: "Начать Новый Чат"
-new_chat_copying_agents_btn: "А"
-new_chat_copying_agents_tooltip: "Новый Чат, Копируя Агентов"
+new_chat_copying_talkers_btn: "С"
+new_chat_copying_talkers_tooltip: "Новый Чат, Копируя Собеседников"
 new_chat_copying_prompts_btn: "П"
 new_chat_copying_prompts_tooltip: "Новый Чат, Копируя Промпты"
-new_chat_copying_agents_prompts_btn: "А+П"
-new_chat_copying_agents_prompts_tooltip: "Новый Чат, Копируя Агентов и Промпты"
+new_chat_copying_talkers_prompts_btn: "С+П"
+new_chat_copying_talkers_prompts_tooltip: "Новый Чат, Копируя Собеседников и Промпты"
 chat_options_tooltip: "Опции Чата"
 rename_chat_btn: "Переименовать"
 delete_chat_btn: "Удалить"
