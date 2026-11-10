@@ -84,14 +84,14 @@ pub struct CodeEditorState {
 /// nested vertical one that finishes later would take it.
 pub fn autoscroll_while_dragging(ui: &egui::Ui) {
     let viewport = ui.clip_rect();
-    let (origin, pos, down, dt) = ui.input(|i| {
-        (i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down(), i.stable_dt.min(0.1))
+    let (pos, down, dt) = ui.input(|i| {
+        (i.pointer.interact_pos(), i.pointer.primary_down(), i.stable_dt.min(0.1))
     });
-    let (Some(origin), Some(pos)) = (origin, pos) else { return };
+    let Some(pos) = pos else { return };
 
-    // Ignore drags that started on the scroll bar.
+    // Ignore drags that started on the scroll bar, or in a window lying over us.
     let content = viewport.with_max_x(viewport.max.x - ui.spacing().scroll.allocated_width());
-    if !down || !content.contains(origin) {
+    if !down || !drag_started_in(ui, content) {
         return;
     }
 
@@ -106,6 +106,26 @@ pub fn autoscroll_while_dragging(ui: &egui::Ui) {
     let speed = (beyond * 12.0).clamp(-3000.0, 3000.0); // points per second
     ui.scroll_with_delta(egui::vec2(0.0, -speed * dt));
     ui.ctx().request_repaint();
+}
+
+/// Whether the current press landed in `content` of this `ui` itself, and not
+/// in a window or popup lying over it (those are other layers, and a plain rect
+/// test can't tell them apart). Decided the first time this `ui` sees a press
+/// and remembered until the next one: a window dragged by its title bar moves
+/// away from the press point, and a later test would find this `ui` under it.
+fn drag_started_in(ui: &egui::Ui, content: egui::Rect) -> bool {
+    let Some(origin) = ui.input(|i| i.pointer.press_origin()) else { return false };
+    let id = ui.id().with("drag_started_in");
+    if let Some((seen, here)) = ui.data(|d| d.get_temp::<(egui::Pos2, bool)>(id)) {
+        if seen == origin {
+            return here;
+        }
+    }
+    // `None`: no Area under the point, i.e. the background/panel layer.
+    let here = content.contains(origin)
+        && ui.ctx().layer_id_at(origin).is_none_or(|layer| layer == ui.layer_id());
+    ui.data_mut(|d| d.insert_temp(id, (origin, here)));
+    here
 }
 
 /// Content-space y of both ends of a label drag-selection in one scroll area.
@@ -143,7 +163,7 @@ pub fn selectable_scroll_contents<R>(
             i.pointer.primary_pressed(),
         )
     });
-    let started_here = press.is_some_and(|p| content.contains(p));
+    let started_here = drag_started_in(ui, content);
     let dragging_here = down && started_here;
     let has_selection = ui
         .ctx()
