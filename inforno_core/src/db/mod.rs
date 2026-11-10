@@ -87,32 +87,55 @@ pub fn folio_or_home_path(folio: &Option<PathBuf>) -> Result<PathBuf, MyError> {
     Ok(path)
 }
 
-/// The Folio's schema version, or None if it has no schema yet.
+/// The Folio's schema version, or None if it has no Inforno schema (yet).
+/// Inforno's own tables, triggers and views all start with `rno_`; every
+/// other object in the file belongs to the user and is left alone.
 pub(crate) fn schema_version(conn: &Connection) -> rusqlite::Result<Option<i32>> {
-    if !table_exists(conn, "schema_version")? {
+    if !table_exists(conn, "rno_schema_version")? {
         return Ok(None);
     }
-    conn.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+    conn.query_row("SELECT version FROM rno_schema_version", [], |row| row.get(0))
         .map(Some)
 }
 
-/// Opens the Folio at `folio`, creating it with the current schema if it's
-/// new. A Folio in another format is refused before anything is written to
-/// it: version 2 with `LegacyFolio`, which `migrate::convert_legacy_folio`
-/// converts.
+/// The version of a Folio from before the `rno_` prefix (version 2, or a
+/// development build of version 3), or None if this isn't one.
+pub(crate) fn legacy_schema_version(conn: &Connection) -> rusqlite::Result<Option<i32>> {
+    if !table_exists(conn, "schema_version")? {
+        return Ok(None);
+    }
+    // Read leniently: a user's own `schema_version` table, with other
+    // columns or without Inforno's row, only means this isn't an old Folio.
+    Ok(conn
+        .query_row(
+            "SELECT version FROM schema_version WHERE name = 'inforno_main_db'",
+            [],
+            |row| row.get(0),
+        )
+        .ok())
+}
+
+/// Opens the Folio at `folio`, creating the current schema if it has none:
+/// a new file, or a user's own database, whose tables are left alone. A
+/// Folio in another format is refused before anything is written to it:
+/// one from before the `rno_` prefix with `LegacyFolio`, which
+/// `migrate::convert_legacy_folio` converts.
 pub fn connect_folio_db(folio: &Path) -> Result<Connection, MyError> {
     let conn = Connection::open(folio)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
     match schema_version(&conn)? {
         Some(CURRENT_FOLIO_VERSION) => Ok(conn),
-        Some(2) => Err(MyError::LegacyFolio(2)),
         Some(other) => Err(MyError::FolioVersionMismatch(CURRENT_FOLIO_VERSION, other)),
-        None => {
-            println!("Folio has no schema yet. Creating it...");
-            create_database_schema(&conn)?;
-            Ok(conn)
-        }
+        None => match legacy_schema_version(&conn)? {
+            Some(version @ (2 | 3)) => Err(MyError::LegacyFolio(version)),
+            Some(other) => Err(MyError::FolioVersionMismatch(CURRENT_FOLIO_VERSION, other)),
+            None => {
+                println!("Folio has no schema yet. Creating it...");
+                create_database_schema(&conn)?;
+                Ok(conn)
+            }
+        },
     }
 }
 
@@ -125,24 +148,27 @@ pub fn open_scratch_folio() -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Clear Folio: drops Inforno's own objects (the `rno_` ones) and creates
+/// them afresh. Tables the user added to the file are kept; triggers the
+/// user put on Inforno's tables go with those tables.
 pub fn reset_folio_db(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("PRAGMA foreign_keys = OFF", [])?;
 
     let tx = conn.unchecked_transaction()?;
 
-    // 1. Get Views (Wrap in block so `stmt` dies at the closing brace)
+    // 1. Get Inforno's views (Wrap in block so `stmt` dies at the closing brace)
     let views: Vec<String> = {
         let mut stmt = tx.prepare(
-            "SELECT name FROM sqlite_master WHERE type='view' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name FROM sqlite_master WHERE type='view' AND substr(name, 1, 4) = 'rno_'"
         )?;
         stmt.query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?
     }; // <--- `stmt` is dropped here, releasing the borrow on `tx`
 
-    // 2. Get Tables (Wrap in block here too)
+    // 2. Get Inforno's tables (Wrap in block here too)
     let tables: Vec<String> = {
         let mut stmt = tx.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            "SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 4) = 'rno_'"
         )?;
         stmt.query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?
@@ -201,7 +227,7 @@ pub fn mk_chat(conn: &Connection, chat: &mut Chat) -> rusqlite::Result<()> {
         chat.title = chat.title.split('\n').next().unwrap_or(&chat.title).trim().to_string();
 
         // 2. Insert Chat Row
-        conn.execute("INSERT INTO chat (title) VALUES (?1)", [&chat.title])?;
+        conn.execute("INSERT INTO rno_chat (title) VALUES (?1)", [&chat.title])?;
 
         // Update the Chat struct immediately
         chat.id = conn.last_insert_rowid();
@@ -244,7 +270,7 @@ pub fn mk_talker(
 
     // 2. Insert
     conn.execute(
-        "INSERT INTO talker (
+        "INSERT INTO rno_talker (
             chat_id,
             talker_ind,
             name,
@@ -282,7 +308,7 @@ pub fn mod_talker_msgs(conn: &Connection, id: i64, msg_ids: &[i64])
             .unwrap_or_else(|_| "[]".to_string());
 
     conn.execute(
-        "UPDATE talker
+        "UPDATE rno_talker
          SET msg_ids = ?1
          WHERE id = ?2",
         (json_ids, id),
@@ -302,7 +328,7 @@ pub fn mod_talker_model_preset(
     let json = preset_snapshot.and_then(|p| p.to_json());
 
     conn.execute(
-        "UPDATE talker
+        "UPDATE rno_talker
          SET model_preset_id = ?1, model_preset_json = ?2
          WHERE id = ?3",
         params![preset_id, json, id],
@@ -320,7 +346,7 @@ pub fn update_talker_model_preset_snapshot(
     let json = preset.and_then(|p| p.to_json());
 
     conn.execute(
-        "UPDATE talker SET model_preset_json = ?1 WHERE id = ?2",
+        "UPDATE rno_talker SET model_preset_json = ?1 WHERE id = ?2",
         rusqlite::params![json, talker_id]
     )?;
 
@@ -487,7 +513,7 @@ pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
 
     // 2. Insert
     conn.execute(
-        "INSERT INTO msg (
+        "INSERT INTO rno_msg (
             role, content, reasoning, name, details, model_preset_json, model_preset_id
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
@@ -515,7 +541,7 @@ pub fn mod_msg(conn: &Connection, msg: &ChatMsg) -> Result<()> {
 
     // 2. Update the row
     conn.execute(
-        "UPDATE msg
+        "UPDATE rno_msg
          SET content = ?1,
              reasoning = ?2,
              name = ?3,
@@ -539,7 +565,7 @@ pub fn mod_msg(conn: &Connection, msg: &ChatMsg) -> Result<()> {
 
 pub fn mod_msg_content(conn: &Connection, id: i64, content: &str) -> Result<()> {
     conn.execute(
-        "UPDATE msg
+        "UPDATE rno_msg
          SET content = ?2
          WHERE id = ?1",
         params![id, content],
@@ -550,7 +576,7 @@ pub fn mod_msg_content(conn: &Connection, id: i64, content: &str) -> Result<()> 
 pub fn mod_msg_content_reasoning(conn: &Connection, id: i64, content: &str,
         reasoning: &str) -> Result<()> {
     conn.execute(
-        "UPDATE msg
+        "UPDATE rno_msg
          SET content = ?2, reasoning = ?3
          WHERE id = ?1",
         params![id, content, reasoning],
@@ -559,7 +585,7 @@ pub fn mod_msg_content_reasoning(conn: &Connection, id: i64, content: &str,
 }
 
 pub fn delete_msg(conn: &Connection, msg_id: i64) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM msg WHERE id = ?1", params![msg_id])?;
+    conn.execute("DELETE FROM rno_msg WHERE id = ?1", params![msg_id])?;
     Ok(())
 }
 
@@ -569,7 +595,7 @@ pub fn delete_msg(conn: &Connection, msg_id: i64) -> rusqlite::Result<()> {
 /// isn't a cell.
 pub fn convert_cell_to_assistant(conn: &Connection, msg_id: i64) -> rusqlite::Result<bool> {
     let changed = conn.execute(
-        "UPDATE msg SET role = ?1 WHERE id = ?2 AND role = ?3",
+        "UPDATE rno_msg SET role = ?1 WHERE id = ?2 AND role = ?3",
         params![
             crate::common::MsgRole::Assistant,
             msg_id,
@@ -581,7 +607,7 @@ pub fn convert_cell_to_assistant(conn: &Connection, msg_id: i64) -> rusqlite::Re
 
 pub fn fetch_chat_titles(conn: &Connection) -> rusqlite::Result<Vec<DbChat>> {
     let mut stmt = conn.prepare(
-        "select id, title, ts_created from chat where parent is null or
+        "select id, title, ts_created from rno_chat where parent is null or
         parent = 0 order by ts_created desc"
     )?;
 
@@ -602,7 +628,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
     // ---------------------------------------------------------
     // We do this first so we fail fast if the chat_id doesn't exist.
     let title: String = conn.query_row(
-        "SELECT title FROM chat WHERE id = ?1",
+        "SELECT title FROM rno_chat WHERE id = ?1",
         [chat_id],
         |row| row.get(0),
     )?;
@@ -613,7 +639,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
     let mut stmt_talker = conn.prepare(
         "SELECT talker_ind, msg_ids, id, model_preset_id, model_preset_json,
                 name, muted, hidden, deleted
-         FROM talker
+         FROM rno_talker
          WHERE chat_id = ?1
          ORDER BY talker_ind ASC"
     )?;
@@ -669,7 +695,7 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
         let sql = format!(
             "SELECT id, role, content, name, reasoning, details, model_preset_json,
                     model_preset_id
-             FROM msg
+             FROM rno_msg
              WHERE id IN ({})",
             placeholders
         );
@@ -722,19 +748,19 @@ pub fn fetch_chat(conn: &Connection, chat_id: i64, presets: &ModelPresets)
 pub fn mod_chat_title(conn: &Connection, chat_id: i64,  new_title: &str)
         -> rusqlite::Result<()> {
     let clean_title = new_title.split('\n').next().unwrap_or(new_title).trim();
-    conn.execute("update chat set title = ?1 where id = ?2",
+    conn.execute("update rno_chat set title = ?1 where id = ?2",
         params![clean_title, chat_id])?;
     Ok(())
 }
 
 pub fn delete_chat(conn: &Connection, chat_id: i64) -> rusqlite::Result<()> {
-    conn.execute("delete from chat where id = ?1", params![chat_id])?;
+    conn.execute("delete from rno_chat where id = ?1", params![chat_id])?;
     Ok(())
 }
 
 pub fn delete_model_preset(conn: &Connection, id: i64) ->
         rusqlite::Result<()> {
-    conn.execute("delete from model_preset where id = ?1", params![id])?;
+    conn.execute("delete from rno_model_preset where id = ?1", params![id])?;
     Ok(())
 }
 
@@ -746,7 +772,7 @@ pub fn save_model_preset(conn: &Connection, entry: &mut ModelPreset) ->
     if entry.id == 0 {
         // 0 means that the preset is brand new, we need to insert it
         conn.execute(
-            "INSERT INTO model_preset (title, tooltip, chat_router, model, options)
+            "INSERT INTO rno_model_preset (title, tooltip, chat_router, model, options)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 entry.title,
@@ -760,7 +786,7 @@ pub fn save_model_preset(conn: &Connection, entry: &mut ModelPreset) ->
     } else {
         // the preset is already in the database, we just need to update it
         let changes = conn.execute(
-            "UPDATE model_preset
+            "UPDATE rno_model_preset
              SET title = ?2,
                  tooltip = ?3,
                  chat_router = ?4,
@@ -789,7 +815,7 @@ pub fn load_model_presets_vec(conn: &Connection)
         -> rusqlite::Result<Vec<ModelPreset>> {
     let mut stmt = conn.prepare(
         "select id, title, tooltip, chat_router, model, options, deleted
-        from model_preset order by title"
+        from rno_model_preset order by title"
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -877,9 +903,9 @@ pub fn search_chats(conn: &Connection, keyword: &str, scope: SearchScope) -> rus
     // We use json_each to unpack the msg_ids JSON array directly in SQLite
     let mut stmt = conn.prepare(&format!(
         "SELECT DISTINCT c.id, c.title, m.content, c.ts_created
-         FROM msg m
-         JOIN talker t ON EXISTS (SELECT 1 FROM json_each(t.msg_ids) WHERE value = m.id)
-         JOIN chat c ON c.id = t.chat_id
+         FROM rno_msg m
+         JOIN rno_talker t ON EXISTS (SELECT 1 FROM json_each(t.msg_ids) WHERE value = m.id)
+         JOIN rno_chat c ON c.id = t.chat_id
          WHERE m.content LIKE ?1{}
          ORDER BY c.ts_created DESC",
         scope_filter
@@ -937,41 +963,42 @@ pub(crate) fn msg_table_sql(name: &str) -> String {
 
 /// Puts a default model preset back whenever the last one is deleted.
 pub(crate) const MODEL_PRESET_NOT_EMPTY_TRIGGER: &str =
-    "create trigger ensure_model_preset_not_empty_trigger
-        after delete on model_preset
-        when not exists (select 1 from model_preset)
+    "create trigger rno_model_preset_not_empty_trigger
+        after delete on rno_model_preset
+        when not exists (select 1 from rno_model_preset)
         begin
-            insert into model_preset (title, tooltip, chat_router, model, options)
+            insert into rno_model_preset (title, tooltip, chat_router, model, options)
             values ('DeepSeek: R1 0528 (free)', '',
                 'Openrouter',
                 'deepseek/deepseek-r1-0528:free',
                 '');
         end;";
 
+/// Keeps a chat's `ts_modified` current on any update that doesn't set it
+/// itself (the WHEN clause), so the trigger's own update doesn't loop.
+pub(crate) const CHAT_TIMESTAMP_TRIGGER: &str =
+    "CREATE TRIGGER rno_chat_timestamp_trigger
+     AFTER UPDATE ON rno_chat
+     FOR EACH ROW
+     WHEN NEW.ts_modified IS OLD.ts_modified
+     BEGIN
+         UPDATE rno_chat SET ts_modified = CURRENT_TIMESTAMP WHERE id = NEW.id;
+     END;";
+
 fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
     // we keep a history of all the messages in this database for easy access
-    conn.execute_batch(&msg_table_sql("msg"))?;
+    conn.execute_batch(&msg_table_sql("rno_msg"))?;
     // chats contain messages
-    conn.execute("create table chat (
+    conn.execute("create table rno_chat (
         id integer primary key autoincrement,
         parent integer,
         title text,
         ts_created datetime default current_timestamp,
         ts_modified datetime default current_timestamp
     );", ())?;
-    // . create the Loop-Safe Trigger that will update ts_modified on any update
-    conn.execute(
-        "CREATE TRIGGER update_chat_timestamp
-         AFTER UPDATE ON chat
-         FOR EACH ROW
-         WHEN NEW.ts_modified IS OLD.ts_modified
-         BEGIN
-             UPDATE chat SET ts_modified = CURRENT_TIMESTAMP WHERE id = NEW.id;
-         END;",
-        (),
-    )?;
+    conn.execute_batch(CHAT_TIMESTAMP_TRIGGER)?;
     // a talker's view of a chat: which messages it sees, and its model preset
-    conn.execute("create table talker (
+    conn.execute("create table rno_talker (
         id integer primary key autoincrement,
         name text not null default '',
         chat_id integer not null,
@@ -984,17 +1011,17 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
         deleted integer not null default 0,
         ts_created datetime default current_timestamp,
         unique(chat_id, talker_ind),
-        foreign key (chat_id) references chat(id) on delete cascade
+        foreign key (chat_id) references rno_chat(id) on delete cascade
     );", ())?;
     // this version is needed to update older tables to newer versions
-    conn.execute("create table schema_version (
+    conn.execute("create table rno_schema_version (
         id integer primary key check (id = 0),
         name text,
         version int,
         applied_on datetime default current_timestamp
     );", ())?;
     // model presets are for ease of use, to fine-tune settings and keep them handy
-    conn.execute("create table model_preset (
+    conn.execute("create table rno_model_preset (
         id integer primary key autoincrement,
         title text not null unique,
         tooltip text,
@@ -1008,10 +1035,10 @@ fn create_database_schema(conn: &Connection) -> rusqlite::Result<()> {
     )", ())?;
     conn.execute_batch(MODEL_PRESET_NOT_EMPTY_TRIGGER)?;
     // fire the trigger once so that the default model preset is added:
-    conn.execute("insert into model_preset (id, title) values (0, 'temporary')", ())?;
-    conn.execute("delete from model_preset", ())?;
+    conn.execute("insert into rno_model_preset (id, title) values (0, 'temporary')", ())?;
+    conn.execute("delete from rno_model_preset", ())?;
 
-    conn.execute("insert into schema_version (id, name, version)
+    conn.execute("insert into rno_schema_version (id, name, version)
         values (0, 'inforno_main_db', ?1);",
         (CURRENT_FOLIO_VERSION,))?;
 /*
@@ -1118,7 +1145,7 @@ mod tests {
             "id   | chat_id  | talker_ind | name            | msg_ids");
 
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, talker_ind, name, msg_ids FROM talker")
+            "SELECT id, chat_id, talker_ind, name, msg_ids FROM rno_talker")
             .unwrap();
 
         let rows = stmt.query_map([], |row| {
@@ -1155,6 +1182,45 @@ id   | chat_id  | talker_ind | name            | msg_ids
 2    | 1        | 1          | Talker1         | []
 ";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn clear_folio_keeps_the_users_tables() {
+        let conn = setup_db();
+        let mut chat = crate::common::Chat::default();
+        mk_chat(&conn, &mut chat).unwrap();
+        conn.execute_batch("
+            create table my_notes (
+                id integer primary key,
+                chat_id integer references rno_chat(id),
+                note text
+            );
+            insert into my_notes (chat_id, note) values (1, 'mine');
+            create table rnox (id integer);
+        ").unwrap();
+
+        reset_folio_db(&conn).unwrap();
+
+        let chats: i64 = conn.query_row("select count(*) from rno_chat", [], |r| r.get(0)).unwrap();
+        assert_eq!(chats, 0);
+        let note: String = conn.query_row("select note from my_notes", [], |r| r.get(0)).unwrap();
+        assert_eq!(note, "mine");
+        assert!(table_exists(&conn, "rnox").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), Some(CURRENT_FOLIO_VERSION));
+    }
+
+    #[test]
+    fn a_users_schema_version_table_is_not_an_old_folio() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            create table schema_version (v integer);
+            insert into schema_version values (7);
+        ").unwrap();
+        assert_eq!(legacy_schema_version(&conn).unwrap(), None);
+        assert_eq!(schema_version(&conn).unwrap(), None);
+
+        create_database_schema(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), Some(CURRENT_FOLIO_VERSION));
     }
 
 }

@@ -1,5 +1,6 @@
-//! Converting a version 2 Folio (tables `agent` and `preset`, long role
-//! names) to the current version 3.
+//! Converting a Folio from before the `rno_` prefix to the current version
+//! 3: a version 2 Folio (tables `agent` and `preset`, long role names), or
+//! one a development build of version 3 wrote (v3 tables, no prefix).
 //!
 //! The original is never written to. It's copied with `VACUUM INTO`, the
 //! copy is converted in one transaction, and only then is the original
@@ -12,8 +13,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::common::MyError;
 use super::{
-    folio_path_for, folios_dir, home_folio_file, msg_table_sql, schema_version,
-    MODEL_PRESET_NOT_EMPTY_TRIGGER,
+    folio_path_for, folios_dir, home_folio_file, legacy_schema_version, msg_table_sql,
+    schema_version, CHAT_TIMESTAMP_TRIGGER, MODEL_PRESET_NOT_EMPTY_TRIGGER,
 };
 
 /// Each v2 role string and its v3 code. In v2, `developer` only ever meant
@@ -104,7 +105,7 @@ pub fn legacy_backup_path(src: &Path) -> PathBuf {
         .expect("some backup name is free")
 }
 
-/// Converts the version 2 Folio `src` and puts the result at `dest`, which
+/// Converts the older-format Folio `src` and puts the result at `dest`, which
 /// may be `src` itself to convert it where it is. Returns where the
 /// original was kept. On any failure the original stays as it was.
 pub fn convert_legacy_folio(src: &Path, dest: &Path) -> Result<PathBuf, MyError> {
@@ -155,10 +156,10 @@ pub fn convert_legacy_folio(src: &Path, dest: &Path) -> Result<PathBuf, MyError>
 /// Copies `src` to `tmp` and converts the copy. `src` is opened read-only.
 fn copy_and_migrate(src: &Path, tmp: &Path) -> Result<(), MyError> {
     let src_conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    match schema_version(&src_conn)? {
-        Some(2) => {}
-        Some(v) => return Err(failed(format!("it's version {}, not 2", v))),
-        None => return Err(failed("it isn't a Folio")),
+    match legacy_schema_version(&src_conn)? {
+        Some(2 | 3) => {}
+        Some(v) => return Err(failed(format!("it's version {}, not 2 or 3", v))),
+        None => return Err(failed("it isn't a Folio in an older format")),
     }
     let tmp_str = tmp
         .to_str()
@@ -172,8 +173,9 @@ fn copy_and_migrate(src: &Path, tmp: &Path) -> Result<(), MyError> {
     Ok(())
 }
 
-/// Converts a version 2 Folio to version 3, in one transaction: the Folio
-/// is either fully converted or left as it was.
+/// Converts a Folio from before the `rno_` prefix (version 2, or a
+/// development build's version 3) to the current version 3, in one
+/// transaction: the Folio is either fully converted or left as it was.
 pub(crate) fn v2_to_v3(conn: &mut Connection) -> Result<(), MyError> {
     // Rebuilding a table needs foreign keys off (SQLite's procedure for
     // changing a table), and they can't be switched inside a transaction.
@@ -188,12 +190,26 @@ pub(crate) fn v2_to_v3(conn: &mut Connection) -> Result<(), MyError> {
 fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), MyError> {
     let tx = conn.transaction()?;
 
-    match schema_version(&tx)? {
-        Some(2) => {}
-        Some(v) => return Err(failed(format!("expected a version 2 Folio, found version {}", v))),
+    if let Some(v) = schema_version(&tx)? {
+        return Err(failed(format!("this Folio is already in the current format (version {})", v)));
+    }
+    match legacy_schema_version(&tx)? {
+        Some(2) => {
+            v2_tables_to_v3(&tx)?;
+            add_rno_prefix(&tx)?;
+        }
+        Some(3) => add_rno_prefix(&tx)?,
+        Some(v) => return Err(failed(format!("expected a version 2 or 3 Folio, found version {}", v))),
         None => return Err(failed("this isn't a Folio")),
     }
 
+    tx.commit()?;
+    Ok(())
+}
+
+/// The version 2 tables to the version 3 ones, still without the `rno_`
+/// prefix (`add_rno_prefix` comes next).
+fn v2_tables_to_v3(tx: &Connection) -> Result<(), MyError> {
     // A role this doesn't know about stops the conversion.
     let known = ROLE_CODES
         .iter()
@@ -252,15 +268,34 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), MyError> {
          ALTER TABLE talker RENAME COLUMN preset_json TO model_preset_json;",
     )?;
 
-    // 3. preset -> model_preset, with its trigger recreated under the new names.
+    // 3. preset -> model_preset. Its trigger is recreated by `add_rno_prefix`.
     tx.execute_batch(
         "DROP TRIGGER IF EXISTS ensure_preset_not_empty_trigger;
          ALTER TABLE preset RENAME TO model_preset;",
     )?;
-    tx.execute_batch(MODEL_PRESET_NOT_EMPTY_TRIGGER)?;
 
     tx.execute("UPDATE schema_version SET version = 3", [])?;
-    tx.commit()?;
+    Ok(())
+}
+
+/// Gives Inforno's tables and triggers the `rno_` prefix, so that whatever
+/// else is in the file is the user's. Renaming a table also rewrites the
+/// foreign keys, triggers and views that refer to it (the user's included)
+/// and its `sqlite_sequence` row. Triggers keep their names, so Inforno's
+/// are dropped and recreated.
+fn add_rno_prefix(tx: &Connection) -> Result<(), MyError> {
+    tx.execute_batch(
+        "DROP TRIGGER IF EXISTS update_chat_timestamp;
+         DROP TRIGGER IF EXISTS ensure_model_preset_not_empty_trigger;
+         DROP TRIGGER IF EXISTS ensure_preset_not_empty_trigger;
+         ALTER TABLE msg RENAME TO rno_msg;
+         ALTER TABLE chat RENAME TO rno_chat;
+         ALTER TABLE talker RENAME TO rno_talker;
+         ALTER TABLE model_preset RENAME TO rno_model_preset;
+         ALTER TABLE schema_version RENAME TO rno_schema_version;",
+    )?;
+    tx.execute_batch(CHAT_TIMESTAMP_TRIGGER)?;
+    tx.execute_batch(MODEL_PRESET_NOT_EMPTY_TRIGGER)?;
     Ok(())
 }
 
@@ -356,27 +391,69 @@ mod tests {
         assert_eq!(schema_version(&conn).unwrap(), Some(3));
 
         let roles: Vec<String> = conn
-            .prepare("select role from msg order by id").unwrap()
+            .prepare("select role from rno_msg order by id").unwrap()
             .query_map([], |r| r.get(0)).unwrap()
             .collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(roles, ["usr", "asst", "sys", "cell", "tool"]);
 
         let (preset_id, preset_json): (i64, String) = conn.query_row(
-            "select model_preset_id, model_preset_json from talker where talker_ind = 1",
+            "select model_preset_id, model_preset_json from rno_talker where talker_ind = 1",
             [], |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
         assert_eq!((preset_id, preset_json.as_str()), (7, "{}"));
 
         // The deleted message's id isn't handed out again, and the v3 role
         // check applies.
-        conn.execute("insert into msg (content, role) values ('d', 'dev')", []).unwrap();
+        conn.execute("insert into rno_msg (content, role) values ('d', 'dev')", []).unwrap();
         assert_eq!(conn.last_insert_rowid(), 7);
-        assert!(conn.execute("insert into msg (content, role) values ('x', 'developer')", []).is_err());
+        assert!(conn.execute("insert into rno_msg (content, role) values ('x', 'developer')", []).is_err());
 
         // The trigger came along under its new name.
-        conn.execute("delete from model_preset", []).unwrap();
-        let presets: i64 = conn.query_row("select count(*) from model_preset", [], |r| r.get(0)).unwrap();
+        conn.execute("delete from rno_model_preset", []).unwrap();
+        let presets: i64 = conn.query_row("select count(*) from rno_model_preset", [], |r| r.get(0)).unwrap();
         assert_eq!(presets, 1);
+
+        // No unprefixed Inforno table is left behind.
+        for old in ["msg", "chat", "talker", "model_preset", "schema_version", "agent", "preset"] {
+            assert!(!crate::db::table_exists(&conn, old).unwrap(), "{old} is still there");
+        }
+    }
+
+    #[test]
+    fn the_users_tables_come_along() {
+        let mut conn = v2_folio();
+        conn.execute_batch("
+            create table my_notes (
+                id integer primary key,
+                chat_id integer references chat(id),
+                note text
+            );
+            insert into my_notes (chat_id, note) values (1, 'mine');
+        ").unwrap();
+        v2_to_v3(&mut conn).unwrap();
+
+        let note: String = conn.query_row("select note from my_notes", [], |r| r.get(0)).unwrap();
+        assert_eq!(note, "mine");
+        // Its foreign key followed the renamed table.
+        let parent: String = conn
+            .query_row("select \"table\" from pragma_foreign_key_list('my_notes')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(parent, "rno_chat");
+    }
+
+    #[test]
+    fn a_dev_v3_folio_gets_the_prefix() {
+        let mut conn = v2_folio();
+        v2_tables_to_v3(&conn).unwrap();
+        assert_eq!(legacy_schema_version(&conn).unwrap(), Some(3));
+        assert_eq!(schema_version(&conn).unwrap(), None);
+
+        v2_to_v3(&mut conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), Some(3));
+        let msgs: i64 = conn.query_row("select count(*) from rno_msg", [], |r| r.get(0)).unwrap();
+        assert_eq!(msgs, 5);
+        // The chat trigger was recreated on the renamed table.
+        conn.execute("update rno_chat set title = 'renamed' where id = 1", []).unwrap();
     }
 
     #[test]
@@ -388,7 +465,7 @@ mod tests {
 
         let err = v2_to_v3(&mut conn).unwrap_err();
         assert!(err.to_string().contains("oracle"));
-        assert_eq!(schema_version(&conn).unwrap(), Some(2));
+        assert_eq!(legacy_schema_version(&conn).unwrap(), Some(2));
         assert!(conn.prepare("select agent_ind from agent").is_ok());
     }
 }
