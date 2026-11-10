@@ -90,7 +90,8 @@ pub struct MyAppPermanent {
     pub rt: Handle,
     /// Inforno's vault, opened once in main and kept across reloads.
     pub keys: inforno_core::api_keys::KeyStore,
-    /// What startup found out about the vault; taken by the first `State::new`.
+    /// What startup found out about the vault; every `State::new` copies it
+    /// for the key manager to show.
     pub vault_notices: Mutex<Option<Vec<String>>>,
     pub folio: Option<PathBuf>,
     pub active_realm_name: Mutex<Option<String>>,
@@ -407,20 +408,16 @@ impl State {
             }
         }
 
-        // Once per run, not on every Folio reload: what startup found out
-        // about the vault, and whether to ask for keys (vaultorno design doc
-        // §15): none saved, or about to expire.
-        let mut vault_notices = Vec::new();
-        let mut ask_for_keys = false;
-        if let Some(notices) = permanent.vault_notices.lock().unwrap().take() {
-            ask_for_keys = !key_saved
-                || inforno_core::api_keys::expires_within(
-                    key_storage.expires,
-                    inforno_core::api_keys::RENEW_DAYS,
-                )
-                || !notices.is_empty();
-            vault_notices = notices;
-        }
+        // What startup found out about the vault, shown inside the key
+        // manager. The manager doesn't open on its own: a user who never
+        // uses OpenRouter needs no API keys at all. Cloned, not taken, so
+        // the notices are still there after a Folio reload.
+        let vault_notices = permanent
+            .vault_notices
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
 
         // --- 3. Cache Database and Async Model Fetching ---
         let mut cache_conn: Option<rusqlite::Connection> = None;
@@ -533,7 +530,7 @@ impl State {
             cache_conn,
             db_conn: conn,
             db_chats: chats,
-            show_key_manager: ask_for_keys,
+            show_key_manager: false,
             show_preset_editor: false,
             show_realm_config: false,
             show_workflow_editor: false,
