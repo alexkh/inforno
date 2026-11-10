@@ -212,30 +212,37 @@ impl FromSql for MsgRole {
     }
 }
 
-impl From<MsgRole> for Role {
-    fn from(source: MsgRole) -> Self {
-        match source {
-            MsgRole::System => Role::System,
-            MsgRole::Developer => Role::Developer,
-            MsgRole::User => Role::User,
-            MsgRole::Assistant => Role::Assistant,
-            MsgRole::Tool => Role::Tool,
-            // Never reached: to_openrouter_messages drops cells first.
-            MsgRole::Cell => Role::Developer,
+/// What a role is sent as over a backend's API, or None for a message
+/// that's never sent: a notebook cell. The message builders
+/// (`Chat::to_openrouter_messages`, `Chat::to_ollama_messages`) leave out
+/// whatever has no wire role, so a cell can't reach a model by any path.
+pub trait WireRole<R> {
+    fn wire_role(&self) -> Option<R>;
+}
+
+impl WireRole<Role> for MsgRole {
+    fn wire_role(&self) -> Option<Role> {
+        match self {
+            MsgRole::System => Some(Role::System),
+            MsgRole::Developer => Some(Role::Developer),
+            MsgRole::User => Some(Role::User),
+            MsgRole::Assistant => Some(Role::Assistant),
+            MsgRole::Tool => Some(Role::Tool),
+            MsgRole::Cell => None,
         }
     }
 }
 
-impl From<MsgRole> for MessageRole {
-    fn from(source: MsgRole) -> Self {
-        match source {
-            MsgRole::System => MessageRole::System,
-            MsgRole::Developer => MessageRole::System,
-            MsgRole::User => MessageRole::User,
-            MsgRole::Assistant => MessageRole::Assistant,
-            MsgRole::Tool => MessageRole::Tool,
-            // Never reached: to_ollama_messages drops cells first.
-            MsgRole::Cell => MessageRole::System,
+/// Ollama has no developer role, so a developer message goes as system.
+impl WireRole<MessageRole> for MsgRole {
+    fn wire_role(&self) -> Option<MessageRole> {
+        match self {
+            MsgRole::System => Some(MessageRole::System),
+            MsgRole::Developer => Some(MessageRole::System),
+            MsgRole::User => Some(MessageRole::User),
+            MsgRole::Assistant => Some(MessageRole::Assistant),
+            MsgRole::Tool => Some(MessageRole::Tool),
+            MsgRole::Cell => None,
         }
     }
 }
@@ -287,65 +294,60 @@ pub struct ChatMsg {
     pub is_unsaved: bool,
 }
 
-// convert inhouse ChatMsg to Ollama's ChatMessage:
-impl From<ChatMsg> for ChatMessage {
-    fn from(item: ChatMsg) -> Self {
-        let mut full_content = item.content;
-        let mut images = Vec::new(); // Rust will now infer this as Vec<Image>
-
-        // Deserialize the JSON array and append text or gather images
-        if let Some(details) = item.details {
-            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&details) {
-                for att in attachments {
-                    if att.mime_type.starts_with("text/") {
-                        full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
-                        full_content.push_str(&att.content);
-                    } else if att.mime_type.starts_with("image/") {
-                        // FIX: Convert the base64 string into ollama_rs's Image type
-                        images.push(Image::from_base64(&att.content));
-                    }
-                }
-            }
-        }
-
-        ChatMessage {
-            role: item.msg_role.into(),
-            content: full_content,
-            tool_calls: vec![],
-            images: if images.is_empty() { None } else { Some(images) },
-            thinking: item.reasoning,
-        }
-    }
+/// The attachments stored as JSON in `msg.details`; none if it doesn't parse.
+fn attachments(msg: &ChatMsg) -> Vec<Attachment> {
+    msg.details
+        .as_deref()
+        .and_then(|details| serde_json::from_str(details).ok())
+        .unwrap_or_default()
 }
 
-// convert inhouse ChatMsg to OpenRouter's Message
-impl From<ChatMsg> for Message {
-    fn from(item: ChatMsg) -> Self {
-        let mut full_content = item.content;
+/// `msg` as Ollama gets it: text attachments appended, images passed
+/// separately. None for a message that's never sent (`WireRole`).
+fn ollama_message(msg: &ChatMsg) -> Option<ChatMessage> {
+    let role: MessageRole = msg.msg_role.wire_role()?;
+    let mut full_content = msg.content.clone();
+    let mut images = Vec::new();
 
-        // Deserialize the JSON array and append text attachments
-        if let Some(details) = item.details {
-            if let Ok(attachments) = serde_json::from_str::<Vec<Attachment>>(&details) {
-                for att in attachments {
-                    if att.mime_type.starts_with("text/") {
-                        full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
-                        full_content.push_str(&att.content);
-                    } else if att.mime_type.starts_with("image/") {
-                        // For OpenRouter, passing standard Markdown Data URIs works perfectly for multi-modal parsing
-                        full_content.push_str(&format!("\n\n![{}]({})\n", att.filename, format!("data:{};base64,{}", att.mime_type, att.content)));
-                    }
-                }
-            }
+    for att in attachments(msg) {
+        if att.mime_type.starts_with("text/") {
+            full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
+            full_content.push_str(&att.content);
+        } else if att.mime_type.starts_with("image/") {
+            images.push(Image::from_base64(&att.content));
         }
-
-        // Use the library's constructor instead of a struct expression
-        let mut msg = Message::new(item.msg_role.into(), full_content);
-
-        // Since `name` is an optional public field, we can assign it after creation
-        msg.name = item.name;
-
-        msg
     }
+
+    Some(ChatMessage {
+        role,
+        content: full_content,
+        tool_calls: vec![],
+        images: if images.is_empty() { None } else { Some(images) },
+        thinking: msg.reasoning.clone(),
+    })
+}
+
+/// `msg` as OpenRouter gets it: text attachments appended, images as
+/// Markdown data URIs. None for a message that's never sent (`WireRole`).
+fn openrouter_message(msg: &ChatMsg) -> Option<Message> {
+    let role: Role = msg.msg_role.wire_role()?;
+    let mut full_content = msg.content.clone();
+
+    for att in attachments(msg) {
+        if att.mime_type.starts_with("text/") {
+            full_content.push_str(&format!("\n\n--- File: {} ---\n", att.filename));
+            full_content.push_str(&att.content);
+        } else if att.mime_type.starts_with("image/") {
+            full_content.push_str(&format!(
+                "\n\n![{}](data:{};base64,{})\n",
+                att.filename, att.mime_type, att.content
+            ));
+        }
+    }
+
+    let mut out = Message::new(role, full_content);
+    out.name = msg.name.clone();
+    Some(out)
 }
 
 /// A chat participant: a name and a model preset, with its own view of the
@@ -404,43 +406,25 @@ impl Default for Chat {
 }
 
 impl Chat {
-    /// Converts a specific talker's history into a vector of OpenRouter Messages.
-    /// Returns an empty vector if there is no talker at `talker_ind`.
+    /// A talker's history as OpenRouter messages, leaving out whatever is
+    /// never sent (`WireRole`). Empty if there's no talker at `talker_ind`.
     pub fn to_openrouter_messages(&self, talker_ind: usize) -> Vec<Message> {
-        if let Some(talker) = self.talkers.get(talker_ind) {
-            talker.msg_ids
-                .iter()
-                .filter_map(|msg_id| {
-                    let msg = self.msg_pool.get(msg_id)?;
-                    // Notebook cells are never sent
-                    if msg.msg_role == MsgRole::Cell {
-                        return None;
-                    }
-                    Some(msg.clone().into()) // Clone ChatMsg, Convert to openrouter
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        self.talker_msgs(talker_ind).filter_map(openrouter_message).collect()
     }
 
-    /// Converts a specific talker's history into a vector of Ollama ChatMessages.
+    /// A talker's history as Ollama messages, leaving out whatever is never
+    /// sent (`WireRole`). Empty if there's no talker at `talker_ind`.
     pub fn to_ollama_messages(&self, talker_ind: usize) -> Vec<ChatMessage> {
-        if let Some(talker) = self.talkers.get(talker_ind) {
-            talker.msg_ids
-                .iter()
-                .filter_map(|msg_id| {
-                    let msg = self.msg_pool.get(msg_id)?;
-                    // Notebook cells are never sent
-                    if msg.msg_role == MsgRole::Cell {
-                        return None;
-                    }
-                    Some(msg.clone().into()) // Clone ChatMsg, Convert to ollama_rs
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        self.talker_msgs(talker_ind).filter_map(ollama_message).collect()
+    }
+
+    /// The messages talker `talker_ind` sees, in order.
+    fn talker_msgs(&self, talker_ind: usize) -> impl Iterator<Item = &ChatMsg> {
+        self.talkers
+            .get(talker_ind)
+            .into_iter()
+            .flat_map(|talker| talker.msg_ids.iter())
+            .filter_map(|msg_id| self.msg_pool.get(msg_id))
     }
 
     /// Adds a new talker sequentially if the limit has not been reached.

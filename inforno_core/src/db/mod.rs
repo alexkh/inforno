@@ -507,25 +507,25 @@ pub fn mk_msg(conn: &rusqlite::Connection, msg: &mut ChatMsg)
     Ok(())
 }
 
+/// Saves a message's fields, all but its role: the only change of role is
+/// `convert_cell_to_assistant`.
 pub fn mod_msg(conn: &Connection, msg: &ChatMsg) -> Result<()> {
     // 1. Serialize the embedded preset
     let preset_json = msg.preset.as_ref().and_then(|p| p.to_json());
 
-    // 2. Update the row (the role is stored by its code, via ToSql)
+    // 2. Update the row
     conn.execute(
         "UPDATE msg
          SET content = ?1,
              reasoning = ?2,
-             role = ?3,
-             name = ?4,
-             details = ?5,
-             model_preset_json = ?6,
-             model_preset_id = ?7
-         WHERE id = ?8",
+             name = ?3,
+             details = ?4,
+             model_preset_json = ?5,
+             model_preset_id = ?6
+         WHERE id = ?7",
         params![
             msg.content,
             msg.reasoning,
-            msg.msg_role,
             msg.name,
             msg.details,
             preset_json,
@@ -561,6 +561,22 @@ pub fn mod_msg_content_reasoning(conn: &Connection, id: i64, content: &str,
 pub fn delete_msg(conn: &Connection, msg_id: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM msg WHERE id = ?1", params![msg_id])?;
     Ok(())
+}
+
+/// Turns the note cell `msg_id` into an assistant message, for good: from
+/// then on it's part of what models see. This is the only change of role
+/// there is, and nothing ever becomes a cell. Returns false if `msg_id`
+/// isn't a cell.
+pub fn convert_cell_to_assistant(conn: &Connection, msg_id: i64) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE msg SET role = ?1 WHERE id = ?2 AND role = ?3",
+        params![
+            crate::common::MsgRole::Assistant,
+            msg_id,
+            crate::common::MsgRole::Cell
+        ],
+    )?;
+    Ok(changed == 1)
 }
 
 pub fn fetch_chat_titles(conn: &Connection) -> rusqlite::Result<Vec<DbChat>> {
@@ -841,17 +857,33 @@ pub fn extract_snippet(text: &str, keyword: &str) -> String {
     }
 }
 
-/// Searches all messages for keywords and returns deduplicated chats containing them
-pub fn search_chats(conn: &Connection, keyword: &str) -> rusqlite::Result<Vec<crate::common::SearchResult>> {
+/// Who a search is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchScope {
+    /// The user, looking through their chats: every message, cells included.
+    User,
+    /// Anything whose results a model will see: notebook cells are left
+    /// out, as everywhere else a model is concerned (`WireRole`).
+    Model,
+}
+
+/// Searches the messages `scope` allows for `keyword` and returns the chats
+/// containing them, one result per chat.
+pub fn search_chats(conn: &Connection, keyword: &str, scope: SearchScope) -> rusqlite::Result<Vec<crate::common::SearchResult>> {
+    let scope_filter = match scope {
+        SearchScope::User => String::new(),
+        SearchScope::Model => format!(" AND m.role != '{}'", crate::common::MsgRole::Cell.db_code()),
+    };
     // We use json_each to unpack the msg_ids JSON array directly in SQLite
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT DISTINCT c.id, c.title, m.content, c.ts_created
          FROM msg m
          JOIN talker t ON EXISTS (SELECT 1 FROM json_each(t.msg_ids) WHERE value = m.id)
          JOIN chat c ON c.id = t.chat_id
-         WHERE m.content LIKE ?1
-         ORDER BY c.ts_created DESC"
-    )?;
+         WHERE m.content LIKE ?1{}
+         ORDER BY c.ts_created DESC",
+        scope_filter
+    ))?;
 
     let kw_param = format!("%{}%", keyword);
     let rows = stmt.query_map(rusqlite::params![kw_param], |row| {

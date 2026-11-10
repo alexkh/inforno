@@ -15,7 +15,7 @@ use inforno_core::scripting::is_likely_rhai;
 use crate::state::{ChatMsgUi, State};
 
 use super::content::render_msg_content;
-use super::message::render_delete_menu;
+use super::message::render_msg_menu;
 use super::{ChatActions, RenderCtx};
 
 // --- Layout helpers ---
@@ -158,7 +158,7 @@ pub(super) fn render_note_cell(
     cell_row(ui, max_w, |ui| {
         note_frame(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
-                render_delete_menu(ui, msg.id, &mut actions.delete_requests);
+                render_msg_menu(ui, msg.id, &mut actions.delete_requests, Some(&mut actions.cell_conversions));
 
                 ui.label(RichText::new("📝 Note Cell").weak().small());
                 if msg.is_unsaved {

@@ -154,7 +154,7 @@ fn render_msg_header(
     delete_requests: &mut Vec<i64>,
 ) {
     ui.horizontal(|ui| {
-        render_delete_menu(ui, msg.id, delete_requests);
+        render_msg_menu(ui, msg.id, delete_requests, None);
 
         ui.label(RichText::new(label).strong());
 
@@ -183,17 +183,54 @@ fn render_msg_header(
     });
 }
 
-/// The 🔧 button with its options popup (currently just Delete). Shared by
-/// message headers and note cells.
-pub(super) fn render_delete_menu(ui: &mut egui::Ui, msg_id: i64, delete_requests: &mut Vec<i64>) {
+/// The 🔧 button with its options popup: Delete, and for a note cell
+/// (`cell_conversions` given), turning it into an assistant message, which
+/// asks first since it can't be undone. Shared by message headers and note
+/// cells.
+pub(super) fn render_msg_menu(
+    ui: &mut egui::Ui,
+    msg_id: i64,
+    delete_requests: &mut Vec<i64>,
+    mut cell_conversions: Option<&mut Vec<i64>>,
+) {
     let popup_id = ui.make_persistent_id(format!("msg_wrench_{}", msg_id));
+    let confirm_id = popup_id.with("confirm_convert");
     let wrench_resp = ui.button("🔧").on_hover_text("Message Options");
+    if wrench_resp.clicked() {
+        ui.data_mut(|d| d.remove::<bool>(confirm_id));
+    }
     egui::Popup::from_toggle_button_response(&wrench_resp)
         .id(popup_id)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        // Each item closes the popup itself, so the conversion can ask first.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(140.0); // Prevent text wrapping
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                if let Some(cell_conversions) = cell_conversions.as_mut() {
+                    let confirming = ui.data(|d| d.get_temp::<bool>(confirm_id).unwrap_or(false));
+                    if !confirming {
+                        let convert_btn = egui::Button::new(RichText::new(t!("convert_cell_btn"))).frame(false);
+                        if ui.add(convert_btn)
+                            .on_hover_text(RichText::new(t!("convert_cell_tooltip")).strong().heading())
+                            .clicked()
+                        {
+                            ui.data_mut(|d| d.insert_temp(confirm_id, true));
+                        }
+                    } else {
+                        ui.label(RichText::new(t!("convert_cell_confirm")).color(ui.visuals().warn_fg_color));
+                        ui.horizontal(|ui| {
+                            if ui.button(t!("convert_cell_confirm_btn")).clicked() {
+                                cell_conversions.push(msg_id);
+                                ui.data_mut(|d| d.remove::<bool>(confirm_id));
+                                ui.close();
+                            }
+                            if ui.button(t!("cancel_btn")).clicked() {
+                                ui.data_mut(|d| d.remove::<bool>(confirm_id));
+                            }
+                        });
+                    }
+                    ui.separator();
+                }
                 let delete_btn = egui::Button::new(
                     RichText::new(t!("delete_msg_btn")).color(ui.visuals().error_fg_color)
                 ).frame(false);

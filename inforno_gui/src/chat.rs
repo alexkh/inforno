@@ -53,6 +53,8 @@ struct RenderCtx<'a> {
 #[derive(Default)]
 struct ChatActions {
     delete_requests: Vec<i64>,
+    /// Note cells to turn into assistant messages (one way).
+    cell_conversions: Vec<i64>,
     /// (msg_id, content, is_unsaved)
     content_updates: Vec<(i64, String, bool)>,
     /// (msg_id, content) to persist to the DB
@@ -321,6 +323,20 @@ fn apply_actions(ui: &mut egui::Ui, state: &mut State, chat_id: i64, actions: Ch
                 let _ = inforno_core::db::mod_talker_msgs(&state.db_conn, talker.id, &talker.msg_ids);
             }
             let _ = inforno_core::db::delete_msg(&state.db_conn, *id);
+        }
+
+        for id in actions.cell_conversions {
+            match inforno_core::db::convert_cell_to_assistant(&state.db_conn, id) {
+                Ok(true) => {
+                    if let Some(m) = chat.msg_pool.get_mut(&id) {
+                        m.msg_role = MsgRole::Assistant;
+                    }
+                }
+                Ok(false) => {} // not a cell (any more)
+                Err(e) => {
+                    state.error_msg = Some(format!("Couldn't convert the note: {}", e));
+                }
+            }
         }
 
         for (id, content, unsaved) in actions.content_updates {
