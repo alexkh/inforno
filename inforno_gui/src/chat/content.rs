@@ -60,6 +60,14 @@ pub(super) fn render_msg_content(
             }
             ContentChunk::Code { lang, code, filepath } => {
                 let mime_type = resolve_mime(lang, filepath.as_deref());
+                if is_abc(lang) {
+                    render_abc_block(
+                        ui, msg, msg_ui, i, code, filepath.as_deref(), mime_type,
+                        ctx.project_root, ctx.active_realm, ctx.op_tx,
+                        &mut actions.comfy_workflow_request,
+                    );
+                    continue;
+                }
                 // Only note cells may run scripts. Rhai anywhere else, model
                 // replies above all, renders as plain code: one click must
                 // never execute what a model wrote (Rhai can reach autorno_run).
@@ -376,6 +384,43 @@ fn render_rhai_block(
                         .desired_width(f32::INFINITY),
                 );
             }
+        });
+    ui.add_space(6.0);
+}
+
+// ---------------------------------------------------------------------------
+// ABC music blocks
+// ---------------------------------------------------------------------------
+
+/// The fence tags drawn as scores. `abci` is ABC with sharp notation.
+fn is_abc(lang: &str) -> bool {
+    lang.eq_ignore_ascii_case("abc") || lang.eq_ignore_ascii_case("abci")
+}
+
+/// An ABC block: the score, then its source as an ordinary code block (copy
+/// and file buttons included), folded away below it.
+fn render_abc_block(
+    ui: &mut egui::Ui,
+    msg: &ChatMsg,
+    msg_ui: &mut ChatMsgUi,
+    chunk_idx: usize,
+    code: &str,
+    filepath: Option<&str>,
+    mime_type: &'static str,
+    project_root: &Option<PathBuf>,
+    active_realm: &Option<ActiveRealm>,
+    op_tx: &Sender<FileOpMsg>,
+    comfy_workflow_request: &mut Option<String>,
+) {
+    ui.add_space(6.0);
+    super::score::show_score(ui, egui::Id::new(("abc_score", msg.id, chunk_idx)), code);
+    egui::CollapsingHeader::new(RichText::new("ABC source").weak())
+        .id_salt(("abc_source", msg.id, chunk_idx))
+        .show(ui, |ui| {
+            render_code_block(
+                ui, msg, msg_ui, chunk_idx, code, filepath, mime_type,
+                project_root, active_realm, op_tx, comfy_workflow_request,
+            );
         });
     ui.add_space(6.0);
 }

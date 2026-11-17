@@ -202,27 +202,31 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
 
                 match pane {
                     Pane::Chat { chat_id } => {
+                        // Per pane (we're inside push_id(tile_id)): a press waits here for the next frame.
+                        let nav_id = ui.id().with("chat_nav");
                         let scroll = egui::ScrollArea::vertical()
                             .id_salt(format!("pane_scroll_{:?}", tile_id))
                             .stick_to_bottom(true)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let mut highlight = self.state.chat_highlights.remove(chat_id);
-                                bulat::editor::selectable_scroll_contents(ui, |ui| {
+                                let msg_tops = bulat::editor::selectable_scroll_contents(ui, |ui| {
                                     crate::search_highlight::highlight_contents(ui, highlight.as_mut(), |ui| {
                                         crate::chat::render_chat_messages(
                                             ui,
                                             self.state,
                                             *chat_id,
                                             ui.available_width(),
-                                        );
-                                    });
+                                        )
+                                    })
                                 });
                                 if let Some(highlight) = highlight {
                                     self.state.chat_highlights.insert(*chat_id, highlight);
                                 }
+                                // Last thing in the contents, after every nested ScrollArea.
+                                crate::chat::apply_chat_nav(ui, nav_id, &msg_tops);
                             });
-                        bulat::editor::scroll_to_bottom_button(ui, &scroll);
+                        crate::chat::chat_nav_buttons(ui, &scroll, nav_id);
                     }
 
                     Pane::Editor { path, content: _ } => {

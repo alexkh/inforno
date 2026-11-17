@@ -1,9 +1,12 @@
 [workspace]
 members = [
-    "inforno_core",
-    "inforno_gui",
+    "abc",
     "autorno",
     "bulat",
+    "engrave",
+    "inforno_core",
+    "inforno_gui",
+	"nulla_render",
     "vaultorno",
     "vaultorno_client",
     "vaultorno_inspect",

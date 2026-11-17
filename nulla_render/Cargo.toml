@@ -1,0 +1,12 @@
+[package]
+name = "nulla_render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+abc = { path = "../abc" }
+engrave = { path = "../engrave" }
+# The versions egui_extras 0.36 brings into Inforno, so it builds one copy.
+fontdb = "0.23.0"
+resvg = "0.45.1"
+tiny-skia = "0.11.4"

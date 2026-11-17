@@ -21,6 +21,7 @@ mod cell;
 mod content;
 mod latex;
 mod message;
+mod score;
 mod table;
 
 /// The duty the GUI itself acts under in a Realm: the VFS terminal it opens
@@ -203,21 +204,23 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
 
 // --- Message list ---
 
+/// Draws one chat and returns the screen-space top of each message row, in
+/// order, for `apply_chat_nav` (empty when nothing was drawn).
 #[tracing::instrument(skip_all)]
-pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) {
+pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total_width: f32) -> Vec<f32> {
     if std::env::var_os("NOCHAT").is_some() {
-        return;
+        return Vec::new();
     }
     let _render_span = tracing::info_span!("render_chat_messages", chat_id).entered();
 
     let max_msg_width = update_chat_width(ui, state, chat_id);
 
     if !state.open_chats.contains_key(&chat_id) {
-        return; // Chat not loaded yet
+        return Vec::new(); // Chat not loaded yet
     }
 
     let mut actions = ChatActions::default();
-    {
+    let msg_tops = {
         let mut ctx = RenderCtx {
             cache: &mut state.common_mark_cache,
             math_cache: state.math_cache.clone(),
@@ -230,12 +233,13 @@ pub fn render_chat_messages(ui: &mut egui::Ui, state: &mut State, chat_id: i64, 
         let msg_ui_map = &mut state.chat_msg_ui;
         let chat = &state.open_chats[&chat_id];
 
-        render_chat_body(ui, &mut ctx, &mut actions, msg_ui_map, chat_id, chat);
-    }
+        render_chat_body(ui, &mut ctx, &mut actions, msg_ui_map, chat_id, chat)
+    };
 
     apply_actions(ui, state, chat_id, actions);
 
     render_width_slider(ui, state, chat_id, total_width, max_msg_width);
+    msg_tops
 }
 
 /// Applies the Ctrl+[ / Ctrl+] width shortcuts and returns this chat's
@@ -260,7 +264,8 @@ fn update_chat_width(ui: &mut egui::Ui, state: &mut State, chat_id: i64) -> f32 
 
 /// Draws the Omnis (talker 0) timeline: user/system messages one per row,
 /// consecutive assistant replies side by side in a grid, note cells, and
-/// the appender at the bottom.
+/// the appender at the bottom. Returns the screen-space top of each row (a
+/// message, or a grid of replies), in order.
 fn render_chat_body(
     ui: &mut egui::Ui,
     ctx: &mut RenderCtx,
@@ -268,15 +273,16 @@ fn render_chat_body(
     msg_ui_map: &mut HashMap<i64, ChatMsgUi>,
     chat_id: i64,
     chat: &Chat,
-) {
+) -> Vec<f32> {
     let msg_pool = &chat.msg_pool;
+    let mut msg_tops = Vec::new();
 
     if msg_pool.is_empty() {
         // No early return: the appender still renders beneath the welcome note.
         cell::render_welcome(ui, ctx, actions, msg_ui_map);
     }
 
-    let Some(omnis) = chat.talkers.first() else { return };
+    let Some(omnis) = chat.talkers.first() else { return msg_tops };
     let _omnis_span = tracing::info_span!("process_omnis_messages", talker_id = omnis.id).entered();
 
     let mut assistant_batch: Vec<i64> = Vec::new();
@@ -291,6 +297,7 @@ fn render_chat_body(
                     message::render_assistant_grid(ui, ctx, actions, msg_pool, msg_ui_map, &assistant_batch);
                     assistant_batch.clear();
                 }
+                msg_tops.push(ui.cursor().top());
 
                 let msg_ui = msg_ui_map.entry(msg_id).or_default();
                 if msg.msg_role == MsgRole::Cell {
@@ -299,7 +306,14 @@ fn render_chat_body(
                     message::render_user_msg(ui, ctx, actions, msg, msg_ui);
                 }
             }
-            _ => assistant_batch.push(msg_id),
+            _ => {
+                // The grid is drawn here when the batch ends; nothing is
+                // drawn in between, so the cursor already marks its top.
+                if assistant_batch.is_empty() {
+                    msg_tops.push(ui.cursor().top());
+                }
+                assistant_batch.push(msg_id);
+            }
         }
     }
 
@@ -309,6 +323,7 @@ fn render_chat_body(
     }
 
     cell::render_appender(ui, ctx, actions, chat_id, chat);
+    msg_tops
 }
 
 /// Applies everything the renderers queued while the chat was borrowed.
@@ -438,4 +453,189 @@ fn render_width_slider(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total
             ui.ctx().request_repaint();
         }
     });
+}
+
+// --- Navigation buttons ---
+
+/// Where a chat navigation button takes the view.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChatNav {
+    /// The top of the chat.
+    Top,
+    /// Up: the start of the message being read, or of the previous one
+    /// when the view already starts there.
+    MessageBack,
+    /// Down: the start of the next message.
+    MessageForward,
+    /// The bottom of the chat.
+    Bottom,
+}
+
+/// Carries out a navigation button press from the last frame. Call at the
+/// END of the chat ScrollArea's contents, after every nested ScrollArea:
+/// egui hands a `scroll_to_rect` request to the first ScrollArea that ends
+/// after it. A request also beats the chat's stick-to-bottom, which a
+/// directly set offset wouldn't. `msg_tops` are the screen-space tops of
+/// the message rows, as `render_chat_messages` returns them.
+pub fn apply_chat_nav(ui: &egui::Ui, nav_id: egui::Id, msg_tops: &[f32]) {
+    let Some(nav) = ui.data_mut(|d| {
+        let nav = d.get_temp::<ChatNav>(nav_id);
+        d.remove::<ChatNav>(nav_id);
+        nav
+    }) else {
+        return;
+    };
+    let viewport = ui.clip_rect();
+    let target = match nav {
+        // Beyond either end is fine: the offset is clamped.
+        ChatNav::Top => Some((ui.max_rect().top(), egui::Align::TOP)),
+        ChatNav::Bottom => Some((ui.min_rect().bottom(), egui::Align::BOTTOM)),
+        ChatNav::MessageBack | ChatNav::MessageForward => {
+            // `scroll_to_rect` leaves an item spacing above its target.
+            let slack = ui.spacing().item_spacing.y + 2.0;
+            let forward = nav == ChatNav::MessageForward;
+            message_target(msg_tops, viewport.top(), slack, forward).map(|y| (y, egui::Align::TOP))
+        }
+    };
+    if let Some((y, align)) = target {
+        ui.scroll_to_rect(egui::Rect::from_x_y_ranges(viewport.x_range(), y..=y), Some(align));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Where a message button goes, given the rows' tops and the view's top. A
+/// row starting at the view's top, or up to `slack` below it, counts as
+/// where the view already is.
+/// - Back: the nearest row top above the view's top: the start of the
+///   message being read, or of the previous one when the view starts there.
+/// - Forward: the first row top below the view's top.
+///
+/// None when there's no such row.
+fn message_target(tops: &[f32], view_top: f32, slack: f32, forward: bool) -> Option<f32> {
+    if forward {
+        tops.iter().copied().find(|&t| t > view_top + slack)
+    } else {
+        tops.iter().copied().rev().find(|&t| t < view_top - 1.0)
+    }
+}
+
+/// Navigation buttons floating over the chat's bottom-left corner, two
+/// buttons' height above it (clear of the note appender's text), in a
+/// column: ⌃ to the top; < and >, half
+/// size and side by side, to the start of this message (or the previous
+/// one) and of the next one; ⌄ to the bottom. They fade in together while
+/// the pointer is near them. Call right after the chat's
+/// `ScrollArea::show`, with its output; a press is carried out on the next
+/// frame by `apply_chat_nav`.
+pub fn chat_nav_buttons<R>(ui: &egui::Ui, scroll: &egui::scroll_area::ScrollAreaOutput<R>, nav_id: egui::Id) {
+    const SIZE: f32 = 18.0; // fits in the chat's side padding
+    const HALF: f32 = SIZE / 2.0;
+    const INSET: f32 = 3.0;
+    const GAP: f32 = 4.0;
+    const REACH: f32 = 60.0; // how close the pointer must come to the buttons
+
+    let viewport = scroll.inner_rect;
+    // The column's bottom-left corner, two buttons' height above the chat's,
+    // so the column stays clear of the note appender's text.
+    let base = viewport.left_bottom() + egui::vec2(INSET, -INSET - 2.0 * SIZE);
+    let bottom_top = base.y - SIZE;
+    let row_top = bottom_top - GAP - HALF;
+    let top_top = row_top - GAP - SIZE;
+    let column = egui::Rect::from_min_max(egui::pos2(base.x, top_top), egui::pos2(base.x + SIZE, base.y));
+
+    let near = ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|p| viewport.contains(p) && column.distance_to_pos(p) < REACH);
+    let opacity = ui.ctx().animate_bool_with_time(nav_id.with("opacity"), near, 0.15);
+    if opacity == 0.0 {
+        return;
+    }
+
+    // The two half-size buttons share the middle row, a pixel apart.
+    let cx = base.x + SIZE / 2.0;
+    let buttons = [
+        (ChatNav::Top, egui::pos2(base.x, top_top), SIZE, "Scroll to the top"),
+        (ChatNav::MessageBack, egui::pos2(cx - 0.5 - HALF, row_top), HALF,
+            "Go to the start of this message (or the previous one)"),
+        (ChatNav::MessageForward, egui::pos2(cx + 0.5, row_top), HALF,
+            "Go to the start of the next message"),
+        (ChatNav::Bottom, egui::pos2(base.x, bottom_top), SIZE, "Scroll to the bottom"),
+    ];
+    for (slot, (nav, pos, size, tooltip)) in buttons.into_iter().enumerate() {
+        egui::Area::new(nav_id.with(slot))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                ui.multiply_opacity(opacity);
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+                let visuals = ui.style().interact(&response);
+                let painter = ui.painter();
+                painter.circle(rect.center(), size / 2.0, visuals.weak_bg_fill, visuals.bg_stroke);
+                paint_nav_icon(painter, rect.center(), nav, egui::Stroke::new(1.5, visuals.fg_stroke.color));
+
+                if response.on_hover_text(tooltip).clicked() {
+                    ui.data_mut(|d| d.insert_temp(nav_id, nav));
+                    ui.ctx().request_repaint();
+                }
+            });
+    }
+}
+
+/// The button's icon, drawn rather than a glyph so no font is needed: up
+/// chevron; small left and right chevrons for the half-size buttons; down
+/// chevron.
+fn paint_nav_icon(painter: &egui::Painter, c: egui::Pos2, nav: ChatNav, stroke: egui::Stroke) {
+    let v = egui::vec2;
+    let seg = |a: egui::Vec2, b: egui::Vec2| {
+        painter.line_segment([c + a, c + b], stroke);
+    };
+    match nav {
+        ChatNav::Top => {
+            seg(v(-4.0, 2.0), v(0.0, -2.0));
+            seg(v(0.0, -2.0), v(4.0, 2.0));
+        }
+        ChatNav::MessageBack => {
+            seg(v(1.0, -2.0), v(-1.0, 0.0));
+            seg(v(-1.0, 0.0), v(1.0, 2.0));
+        }
+        ChatNav::MessageForward => {
+            seg(v(-1.0, -2.0), v(1.0, 0.0));
+            seg(v(1.0, 0.0), v(-1.0, 2.0));
+        }
+        ChatNav::Bottom => {
+            seg(v(-4.0, -2.0), v(0.0, 2.0));
+            seg(v(0.0, 2.0), v(4.0, -2.0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_target;
+
+    const TOPS: [f32; 3] = [0.0, 100.0, 300.0];
+
+    #[test]
+    fn message_back() {
+        // Reading the middle of the second message: back to its top.
+        assert_eq!(message_target(&TOPS, 150.0, 5.0, false), Some(100.0));
+        // Already at its top, or within the slack: back to the previous one.
+        assert_eq!(message_target(&TOPS, 100.0, 5.0, false), Some(0.0));
+        assert_eq!(message_target(&TOPS, 96.0, 5.0, false), Some(0.0));
+        // At the first message's top: nowhere further up.
+        assert_eq!(message_target(&TOPS, 0.0, 5.0, false), None);
+    }
+
+    #[test]
+    fn message_forward() {
+        // Reading the middle of the second message: on to the third.
+        assert_eq!(message_target(&TOPS, 150.0, 5.0, true), Some(300.0));
+        // At its top, or within the slack: still the third.
+        assert_eq!(message_target(&TOPS, 100.0, 5.0, true), Some(300.0));
+        assert_eq!(message_target(&TOPS, 96.0, 5.0, true), Some(300.0));
+        // Above the first message (the welcome note): the first one.
+        assert_eq!(message_target(&TOPS, -50.0, 5.0, true), Some(0.0));
+        // At the last message's top: nowhere further down.
+        assert_eq!(message_target(&TOPS, 300.0, 5.0, true), None);
+    }
 }
