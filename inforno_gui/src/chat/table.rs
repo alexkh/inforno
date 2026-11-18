@@ -215,7 +215,7 @@ pub fn render_table(
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     mut render_cell: impl FnMut(&mut Ui, &str, egui::Id),
 ) {
-    let id = ui.id().with(("md_table", id_salt));
+    let id = ui.scope_id().with(("md_table", id_salt));
     let spacing = vec2(12.0, 6.0);
     let n_cols = table.header.len();
 
@@ -290,7 +290,7 @@ fn natural_widths(
     render_cell: &mut impl FnMut(&mut Ui, &str, egui::Id),
 ) -> Vec<Vec<f32>> {
     let row_height = ui.text_style_height(&egui::TextStyle::Body);
-    let cache_id = id.with(("natural_widths", egui::Id::new((&table.header, &table.rows)), row_height.to_bits()));
+    let cache_id = id.with(("natural_widths", egui::Id::unique((&table.header, &table.rows)), row_height.to_bits()));
     if let Some(widths) = ui.data(|d| d.get_temp::<Vec<Vec<f32>>>(cache_id)) {
         return widths;
     }

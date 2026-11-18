@@ -325,7 +325,7 @@ pub struct SyntaxCache {
 impl Syntax {
     /// Lazily loads a syntax plugin and caches it securely inside egui's context memory.
     pub fn get_or_load(ctx: &egui::Context, mime_type: &str) -> Self {
-        let cache_id = egui::Id::new("editor_syntax_cache");
+        let cache_id = egui::Id::unique("editor_syntax_cache");
 
         // 1. Check egui's internal memory cache for a hit using MIME type
         let cached_syntax = ctx.data_mut(|d| {

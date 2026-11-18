@@ -62,9 +62,8 @@ pub(super) fn render_msg_content(
                 let mime_type = resolve_mime(lang, filepath.as_deref());
                 if is_abc(lang) {
                     render_abc_block(
-                        ui, msg, msg_ui, i, code, filepath.as_deref(), mime_type,
+                        ui, actions, msg, msg_ui, i, code, filepath.as_deref(), mime_type,
                         ctx.project_root, ctx.active_realm, ctx.op_tx,
-                        &mut actions.comfy_workflow_request,
                     );
                     continue;
                 }
@@ -156,7 +155,7 @@ fn render_math(ui: &mut egui::Ui, math_cache: &MathCache, math: &str, is_inline:
         return;
     }
 
-    let uri = format!("bytes://math_{}.svg", egui::Id::new(&key).value());
+    let uri = format!("bytes://math_{}.svg", egui::Id::unique(&key).value());
     let image = egui::Image::new(egui::ImageSource::Bytes {
         uri: uri.into(),
         bytes: egui::load::Bytes::Shared(svg_bytes),
@@ -217,7 +216,7 @@ fn compiled_math(
     math: &str,
     is_inline: bool,
 ) -> (std::sync::Arc<[u8]>, MathLayout) {
-    let layout_id = egui::Id::new(("math_layout", key));
+    let layout_id = egui::Id::unique(("math_layout", key));
     let cached_bytes = math_cache.borrow().get(key).cloned();
     let cached_layout = ui.data(|d| d.get_temp::<MathLayout>(layout_id));
 
@@ -398,9 +397,11 @@ fn is_abc(lang: &str) -> bool {
 }
 
 /// An ABC block: the score, then its source as an ordinary code block (copy
-/// and file buttons included), folded away below it.
+/// and file buttons included), folded away below it. Clicking a mark of the
+/// score opens the score pane with the mark's text selected.
 fn render_abc_block(
     ui: &mut egui::Ui,
+    actions: &mut ChatActions,
     msg: &ChatMsg,
     msg_ui: &mut ChatMsgUi,
     chunk_idx: usize,
@@ -410,16 +411,24 @@ fn render_abc_block(
     project_root: &Option<PathBuf>,
     active_realm: &Option<ActiveRealm>,
     op_tx: &Sender<FileOpMsg>,
-    comfy_workflow_request: &mut Option<String>,
 ) {
     ui.add_space(6.0);
-    super::score::show_score(ui, egui::Id::new(("abc_score", msg.id, chunk_idx)), code);
+    let response = crate::score::show_score(ui, egui::Id::unique(("abc_score", msg.id, chunk_idx)), code);
+    if let Some(span) = response.clicked {
+        actions.score_pane_request = Some((code.to_string(), Some(span), false));
+    }
+    if let Some(right) = response.open_pane {
+        actions.score_pane_request = Some((code.to_string(), None, right));
+    }
+    if let Some(bytes) = response.save {
+        actions.score_save_request = Some(bytes);
+    }
     egui::CollapsingHeader::new(RichText::new("ABC source").weak())
         .id_salt(("abc_source", msg.id, chunk_idx))
         .show(ui, |ui| {
             render_code_block(
                 ui, msg, msg_ui, chunk_idx, code, filepath, mime_type,
-                project_root, active_realm, op_tx, comfy_workflow_request,
+                project_root, active_realm, op_tx, &mut actions.comfy_workflow_request,
             );
         });
     ui.add_space(6.0);
@@ -792,7 +801,7 @@ struct CachedDiffStatus {
 /// modification time or size changes (or the snippet does, as it's part of
 /// the key), so the frame loop doesn't read and search the file every frame.
 fn inline_diff_status(ui: &egui::Ui, code: &str, path: &Path) -> Option<std::sync::Arc<DiffStatus>> {
-    let id = egui::Id::new(("inline_diff_status", path, code));
+    let id = egui::Id::unique(("inline_diff_status", path, code));
     let file_stamp = std::fs::metadata(path).ok().map(|m| (m.modified().ok(), m.len()));
     if let Some(cached) = ui.data(|d| d.get_temp::<CachedDiffStatus>(id)) {
         if cached.file_stamp == file_stamp {

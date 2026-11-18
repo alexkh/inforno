@@ -2,6 +2,9 @@
 //! with resvg. It uses no GUI types, so apps on different egui versions can
 //! share it; each turns a [`Raster`] into its own texture.
 
+pub use abc;
+pub use engrave;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -140,11 +143,28 @@ impl Raster {
             .flat_map(|p| [255, 255, 255, p[3]])
             .collect()
     }
+
+    /// A PNG file of the picture on white paper.
+    pub fn png_on_paper(&self) -> Option<Vec<u8>> {
+        let size = tiny_skia::IntSize::from_wh(self.width, self.height)?;
+        // opaque, so premultiplied and unmultiplied are the same
+        let pixmap = tiny_skia::Pixmap::from_vec(self.on_paper(), size)?;
+        pixmap.encode_png().ok()
+    }
 }
 
 /// Draws an engraving at `pixels_per_space` pixels per staff space.
 pub fn rasterize(engraving: &Engraving, fonts: &Fonts, pixels_per_space: f32) -> Option<Raster> {
     rasterize_svg(&engrave::to_svg(engraving, 1.0), fonts, pixels_per_space)
+}
+
+/// The engraving as an SVG file that needs no fonts where it is opened:
+/// usvg lays the text out with `fonts` and writes it as outlines.
+pub fn standalone_svg(engraving: &Engraving, fonts: &Fonts) -> Option<String> {
+    let mut options = usvg::Options::default();
+    options.fontdb = fonts.db.clone();
+    let tree = usvg::Tree::from_str(&engrave::to_svg(engraving, 10.0), &options).ok()?;
+    Some(tree.to_string(&usvg::WriteOptions::default()))
 }
 
 /// Draws SVG at `scale` pixels per SVG unit, at most 8192 pixels on its
@@ -199,5 +219,8 @@ mod tests {
         assert!(r.pixels.chunks_exact(4).any(|p| p[3] > 0));
         assert!(r.white_mask().chunks_exact(4).all(|p| p[0] == 255));
         assert!(r.on_paper().chunks_exact(4).all(|p| p[3] == 255));
+        assert!(r.png_on_paper().is_some_and(|png| png.starts_with(b"\x89PNG")));
+        let svg = standalone_svg(&score.engraving, &Fonts::new(Vec::new())).expect("an SVG");
+        assert!(svg.contains("<svg"));
     }
 }

@@ -13,14 +13,16 @@ reqwest = { version = "0.13.4", features = ["blocking", "json"] }
 rand = "0.10.1"
 # walkers = "0.50.0"
 
-eframe = { version = "0.36.1", features = ["persistence"] }
-egui = "0.36.1"
+eframe = { version = "0.37.0", features = ["persistence"] }
+# 0.37 has no default features: keep the bundled fonts and the monochrome
+# emoji/icon fonts that 0.36's default fonts included.
+egui = { version = "0.37.0", features = ["default_fonts", "monochrome_emoji_fonts"] }
 env_logger = "0.11.10"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["full"] }
-egui_commonmark = { version = "0.25.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
-egui_extras = { version = "0.36.1", features = ["all_loaders", "default", "svg", "image"] }
-egui_tiles = "0.17.0"
+egui_commonmark = { version = "0.26.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
+egui_extras = { version = "0.37.0", features = ["all_loaders", "default", "svg", "image"] }
+egui_tiles = "0.18.0"
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 directories = "6.0.0"
@@ -56,8 +58,9 @@ globset = "0.4.18"
 toml = "1.1.2"
 nix = { version = "0.31.3", features = ["user", "mount", "sched", "process", "fs", "hostname"] }
 serde-saphyr = "1.2.0"
-egui-file-dialog = "0.15.0"
-egui-snarl = "0.12.0"
+egui-file-dialog = "0.16.0"
+# egui 0.37 port of zakarumych/egui-snarl (PR #106), until it is released.
+egui-snarl = { git = "https://github.com/alexkh/egui-snarl", rev = "6fcfd02ebf203deeac5ea33caab344003819bb22" }
 rucomfyui = { git = "https://github.com/alexkh/rucomfyui", branch = "main" }
 rustybuzz = "0.20.1"
 dhat = { version = "0.3.3", optional = true }

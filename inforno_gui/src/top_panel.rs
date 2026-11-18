@@ -50,17 +50,17 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
 
     // Intercept any startup errors and show them as a modal popup
-    if let Some(err) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("startup_error"))) {
+    if let Some(err) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique("startup_error"))) {
         state.error_msg = Some(err);
         state.is_modal_open = true;
 
-        if let Some(broken_yaml) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_yaml"))) {
+        if let Some(broken_yaml) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique("broken_realm_yaml"))) {
             state.realm_config_state.yaml_buffer = broken_yaml.clone();
             state.realm_config_state.original_yaml = broken_yaml;
             state.realm_config_state.cached_config = None;
             state.realm_config_state.is_fixing_broken_realm = true;
 
-            if let Some(broken_name) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::new("broken_realm_name"))) {
+            if let Some(broken_name) = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique("broken_realm_name"))) {
                 state.realm_config_state.realm_name = Some(broken_name);
             }
         }
@@ -99,7 +99,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
             // Scan the realms directory every 2 seconds to keep the list fresh
             let now = std::time::Instant::now();
             let (realms_cache, last_scan) = ctx.data_mut(|d| {
-                d.get_temp::<(Vec<(String, Vec<String>)>, std::time::Instant)>(egui::Id::new("realms_scan_cache"))
+                d.get_temp::<(Vec<(String, Vec<String>)>, std::time::Instant)>(egui::Id::unique("realms_scan_cache"))
                     .unwrap_or((vec![], now - std::time::Duration::from_secs(10)))
             });
 
@@ -127,7 +127,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                     }
                 }
                 new_realms.sort_by(|a, b| a.0.cmp(&b.0));
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new("realms_scan_cache"), (new_realms.clone(), now)));
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("realms_scan_cache"), (new_realms.clone(), now)));
             }
 
             ui.menu_button(t!("menu_folio"), |ui| {
@@ -250,7 +250,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 // --- ⚙ Autorno Daemon Status ---
                 let now = std::time::Instant::now();
                 let (is_running, last_check) = ctx.data_mut(|d| {
-                    d.get_temp::<(bool, std::time::Instant)>(egui::Id::new("autorno_status"))
+                    d.get_temp::<(bool, std::time::Instant)>(egui::Id::unique("autorno_status"))
                         .unwrap_or((false, now - std::time::Duration::from_secs(10)))
                 });
 
@@ -261,7 +261,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                         let socket_path = proj_dirs.cache_dir().join("autorno.sock");
                         new_running = std::os::unix::net::UnixStream::connect(socket_path).is_ok();
                     }
-                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (new_running, now)));
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("autorno_status"), (new_running, now)));
                 }
 
                 let (status_color, status_text) = if new_running {
@@ -282,7 +282,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                 let autorno_path = parent.join("autorno");
                                 let _ = std::process::Command::new(autorno_path).spawn();
                                 // Force an immediate re-check next frame
-                                ctx.data_mut(|d| d.insert_temp(egui::Id::new("autorno_status"), (false, now - std::time::Duration::from_secs(10))));
+                                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("autorno_status"), (false, now - std::time::Duration::from_secs(10))));
                             }
                         }
                     }
@@ -380,7 +380,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                             // --- 🔖 The Place (Workspace) ---
                             if !realm.raw_config.places.is_empty() {
 
-                                let cache_id = egui::Id::new("active_place").with(&realm.name);
+                                let cache_id = egui::Id::unique("active_place").with(&realm.name);
 
                                 // Retrieve selected place from cache, default to the FIRST place in the IndexMap
                                 let first_place_name = realm.raw_config.places.keys().next().unwrap().clone();

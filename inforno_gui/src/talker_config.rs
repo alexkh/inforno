@@ -27,7 +27,7 @@ pub fn ui_talker_config(ctx: &egui::Context, state: &mut State) {
     let mut should_close = false;
 
     Window::new(t!("talker_config_window_title"))
-    .id(egui::Id::new("talker_conf_win")) // Unique ID
+    .id(egui::Id::unique("talker_conf_win")) // Unique ID
     .collapsible(false)
     .resizable(true)
     .default_width(450.0)

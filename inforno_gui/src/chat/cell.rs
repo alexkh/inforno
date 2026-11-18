@@ -150,7 +150,7 @@ pub(super) fn render_note_cell(
     // Syntax detection runs once per message, then stays cached in UI state
     let is_rhai = *msg_ui.is_rhai.get_or_insert_with(|| is_likely_rhai(&note_content));
 
-    let edit_mode_id = ui.id().with(format!("note_edit_mode_{}", msg.id));
+    let edit_mode_id = ui.scope_id().with(format!("note_edit_mode_{}", msg.id));
     let mut is_edit_mode = ui.data(|d| d.get_temp::<bool>(edit_mode_id).unwrap_or(false));
 
     let max_w = cell_width(ctx);
@@ -364,9 +364,9 @@ pub(super) fn commit_draft(ui: &mut egui::Ui, state: &mut State, chat_id: i64, d
             state.active_chat_id = Some(actual_chat_id);
 
             ui.data_mut(|d| {
-                let mut upgrades = d.get_temp::<Vec<(i64, i64)>>(egui::Id::new("tab_upgrades")).unwrap_or_default();
+                let mut upgrades = d.get_temp::<Vec<(i64, i64)>>(egui::Id::unique("tab_upgrades")).unwrap_or_default();
                 upgrades.push((chat_id, actual_chat_id));
-                d.insert_temp(egui::Id::new("tab_upgrades"), upgrades);
+                d.insert_temp(egui::Id::unique("tab_upgrades"), upgrades);
             });
 
             crate::state::reload_db_chats(&state.db_conn, &mut state.db_chats);

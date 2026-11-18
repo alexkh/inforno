@@ -18,4 +18,9 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.95"
+
+[patch.crates-io]
+# egui 0.37 port of zakarumych/egui-scale (PR #8), until it is released.
+# Its version is 0.7.0, so the egui-snarl fork must ask for egui-scale "0.7".
+egui-scale = { git = "https://github.com/alexkh/egui-scale", rev = "07455a501306bffeb2361313d0f74c53f9fb7303" }

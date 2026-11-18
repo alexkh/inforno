@@ -12,6 +12,8 @@ pub enum Pane {
     Editor { path: PathBuf, content: String },
     Merge { path: PathBuf },
     SearchResults { query: String, results: Vec<inforno_core::common::SearchResult> },
+    /// ABC text and its score, side by side.
+    Score { source: String },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -97,6 +99,16 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
             Pane::SearchResults { query, .. } => {
                 format!("🔍 Search: {} ✖", query).into()
             }
+            Pane::Score { source } => {
+                // the tune's title, if it has one
+                let title = source
+                    .lines()
+                    .find_map(|l| l.strip_prefix("T:"))
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("Score");
+                format!("♫ {} ✖", title).into()
+            }
         }
     }
 
@@ -172,7 +184,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                     Pane::Chat { chat_id } => {
                         self.state.active_chat_id = Some(*chat_id);
                     }
-                    Pane::Editor { .. } | Pane::Merge { .. } | Pane::SearchResults { .. } => {
+                    Pane::Editor { .. } | Pane::Merge { .. } | Pane::SearchResults { .. } | Pane::Score { .. } => {
                         self.state.active_chat_id = None; // Disconnect bottom panel!
                     }
                 }
@@ -203,7 +215,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 match pane {
                     Pane::Chat { chat_id } => {
                         // Per pane (we're inside push_id(tile_id)): a press waits here for the next frame.
-                        let nav_id = ui.id().with("chat_nav");
+                        let nav_id = ui.scope_id().with("chat_nav");
                         let scroll = egui::ScrollArea::vertical()
                             .id_salt(format!("pane_scroll_{:?}", tile_id))
                             .stick_to_bottom(true)
@@ -263,7 +275,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                             // Let the embedded tool know the virtual filename and the ID string
                             app.left_filepath = Some(relative_path(path));
                             app.right_filepath = None;
-                            app.search_state_id = Some(egui::Id::new("tab_search").with(tile_id));
+                            app.search_state_id = Some(egui::Id::unique("tab_search").with(tile_id));
                             app.active = self.state.active_tile_id == Some(tile_id);
 
                             let (save_left, _) = app.show(ui);
@@ -318,6 +330,15 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                                         });
                                     }
                                 });
+                        }
+                    }
+
+                    Pane::Score { source } => {
+                        let response = crate::score::score_editor(ui, tile_id, source);
+                        if let Some(bytes) = response.save {
+                            self.state.pending_file_dialog_op = None;
+                            self.state.pending_score_export = Some(bytes);
+                            self.state.file_dialog.save_file();
                         }
                     }
                 }
@@ -650,5 +671,34 @@ pub fn open_merge_in_right_pane(state: &mut crate::state::State, path: PathBuf, 
 
 pub fn open_search_results_in_tab(state: &mut crate::state::State, query: String, results: Vec<inforno_core::common::SearchResult>) {
     spawn_in_tab(state, Pane::SearchResults { query, results });
+    state.active_chat_id = None;
+}
+
+/// Shows ABC text in a score pane, with `selection` selected in its text. A
+/// pane that already shows the same text is reused; otherwise a new one
+/// opens in the active tab group, or on the right when `right`.
+pub fn open_score(
+    state: &mut crate::state::State,
+    ctx: &egui::Context,
+    source: String,
+    selection: Option<nulla_render::abc::datatypes::Span>,
+    right: bool,
+) {
+    let existing = state.pane_tree.tiles.iter().find_map(|(id, tile)| match tile {
+        egui_tiles::Tile::Pane(Pane::Score { source: shown }) if *shown == source => Some(*id),
+        _ => None,
+    });
+    let tile_id = match existing {
+        Some(id) => {
+            state.pane_tree.make_active(|tid, _| tid == id);
+            state.active_tile_id = Some(id);
+            id
+        }
+        None if right => spawn_in_right_pane(state, Pane::Score { source: source.clone() }),
+        None => spawn_in_tab(state, Pane::Score { source: source.clone() }),
+    };
+    if let Some(span) = selection {
+        crate::score::select_in_editor(ctx, crate::score::editor_id(tile_id), &source, span);
+    }
     state.active_chat_id = None;
 }

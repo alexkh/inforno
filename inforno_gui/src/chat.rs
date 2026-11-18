@@ -21,7 +21,6 @@ mod cell;
 mod content;
 mod latex;
 mod message;
-mod score;
 mod table;
 
 /// The duty the GUI itself acts under in a Realm: the VFS terminal it opens
@@ -67,6 +66,10 @@ struct ChatActions {
     llm_prompt_request: Option<String>,
     /// "Open in Workflow Editor" was clicked on a ComfyUI JSON block.
     comfy_workflow_request: Option<String>,
+    /// A score to show in a score pane: (ABC text, text to select, open it on the right).
+    score_pane_request: Option<(String, Option<nulla_render::abc::datatypes::Span>, bool)>,
+    /// A score file (SVG or PNG) to save; a save dialog opens for it.
+    score_save_request: Option<Vec<u8>>,
     /// New appender text and whether it's now treated as Rhai.
     new_draft: Option<(String, bool)>,
     /// The appender lost focus (or Ctrl+Enter): commit it as a note cell.
@@ -85,7 +88,7 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
         // We replace it with a cheap, empty placeholder so the state remains valid.
         let mut tree = std::mem::replace(
             &mut state.pane_tree,
-            egui_tiles::Tree::empty("temp_tree")
+            egui_tiles::Tree::empty(egui::Id::unique("temp_tree"))
         );
 
         // 2. Create the behavior bridge WITH the new action queue
@@ -165,10 +168,15 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
         // 6. Put the updated tree back! (Safe because `behavior` is dead)
         state.pane_tree = tree;
 
+        // 6.1 Score panes asked for while the tree was out (clicks on chat scores)
+        for (source, selection, right) in std::mem::take(&mut state.pending_score_panes) {
+            crate::panes::open_score(state, ui.ctx(), source, selection, right);
+        }
+
         // 6.5 Process Tab Upgrades (e.g., Temporary Notebooks converting to saved Chats)
         let upgrades = ui.data_mut(|d| {
-            let u = d.get_temp::<Vec<(i64, i64)>>(egui::Id::new("tab_upgrades")).unwrap_or_default();
-            d.insert_temp(egui::Id::new("tab_upgrades"), Vec::<(i64, i64)>::new());
+            let u = d.get_temp::<Vec<(i64, i64)>>(egui::Id::unique("tab_upgrades")).unwrap_or_default();
+            d.insert_temp(egui::Id::unique("tab_upgrades"), Vec::<(i64, i64)>::new());
             u
         });
 
@@ -387,6 +395,17 @@ fn apply_actions(ui: &mut egui::Ui, state: &mut State, chat_id: i64, actions: Ch
         ui.ctx().request_repaint();
     }
 
+    // The pane tree is out of `state` while chats draw; `ui_chat` opens it.
+    if let Some(request) = actions.score_pane_request {
+        state.pending_score_panes.push(request);
+    }
+
+    if let Some(bytes) = actions.score_save_request {
+        state.pending_file_dialog_op = None;
+        state.pending_score_export = Some(bytes);
+        state.file_dialog.save_file();
+    }
+
     for (id, content) in actions.db_updates {
         let _ = inforno_core::db::mod_msg_content(&state.db_conn, id, &content);
     }
@@ -410,7 +429,7 @@ fn render_width_slider(ui: &mut egui::Ui, state: &mut State, chat_id: i64, total
         let is_hovered = pointer_pos.map_or(false, |pos| slider_rect.contains(pos));
 
         // Fetch the drag state of THIS specific slider from the previous frame
-        let state_id = ui.id().with("slider_drag_state");
+        let state_id = ui.scope_id().with("slider_drag_state");
         let was_dragged_last_frame = ui.data(|d| d.get_temp::<bool>(state_id).unwrap_or(false));
 
         let show_slider = is_hovered || was_dragged_last_frame;

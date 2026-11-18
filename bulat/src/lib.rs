@@ -553,7 +553,7 @@ impl DiffApp {
     pub fn show(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
         let mut save_left = false;
         let mut save_right = false;
-        let search_id = self.search_state_id.unwrap_or_else(|| ui.id().with("search"));
+        let search_id = self.search_state_id.unwrap_or_else(|| ui.scope_id().with("search"));
 
         render_settings_window(ui.ctx(), &mut self.show_settings, &mut self.theme);
         let request_search_focus = self.active && !self.embedded
@@ -574,7 +574,7 @@ impl DiffApp {
                     .to_string()
             });
 
-            egui::ComboBox::from_id_salt(ui.id().with("diff_mime_type_selector"))
+            egui::ComboBox::from_id_salt(ui.scope_id().with("diff_mime_type_selector"))
                 .selected_text(&current_mime)
                 .show_ui(ui, |ui| {
                     let supported_mimes = [
@@ -939,9 +939,9 @@ impl BulatEditorApp {
         let mut action = None;
 
         // One id shared by the search bar and the editor; taken from the outer ui,
-        // because `ui.id()` differs inside the toolbar's nested layouts.
-        let search_id = egui::Id::new("bulat_search").with(ui.id());
-        let editor_id = ui.id().with("bulat_editor");
+        // because `ui.scope_id()` differs inside the toolbar's nested layouts.
+        let search_id = egui::Id::unique("bulat_search").with(ui.scope_id());
+        let editor_id = ui.scope_id().with("bulat_editor");
         let request_search_focus = self.active
             && ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::F)));
 
@@ -1040,7 +1040,7 @@ impl BulatEditorApp {
         let syntax = crate::editor::Syntax::get_or_load(ui.ctx(), &active_mime);
 
         let editor_output = crate::editor::CodeEditor::default()
-            .with_search_state_id(egui::Id::new("bulat_search").with(ui.id()))
+            .with_search_state_id(egui::Id::unique("bulat_search").with(ui.scope_id()))
             .id_source(format!("{:?}", editor_id))
             .with_theme(self.current_theme.clone())
             .with_syntax(syntax)

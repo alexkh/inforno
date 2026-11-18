@@ -91,7 +91,7 @@ impl eframe::App for StandaloneBulat {
         let ctx = ui.ctx().clone();
         if ctx.current_pass_index() == 0 {
             const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
-            let id = egui::Id::new("frame_cap_last");
+            let id = egui::Id::unique("frame_cap_last");
             if let Some(last) = ctx.data(|d| d.get_temp::<std::time::Instant>(id)) {
                 let elapsed = last.elapsed();
                 if elapsed < MIN_FRAME {

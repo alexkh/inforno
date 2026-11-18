@@ -367,7 +367,7 @@ impl SnarlViewer<InfornoNode> for ComfyViewer {
 
         ui.separator();
         ui.label("ComfyUI");
-        let filter_id = ui.id().with("node_menu_filter");
+        let filter_id = ui.scope_id().with("node_menu_filter");
         let mut filter = ui.ctx().data_mut(|d| d.get_temp::<String>(filter_id).unwrap_or_default());
         ui.text_edit_singleline(&mut filter);
         ui.ctx().data_mut(|d| d.insert_temp(filter_id, filter.clone()));

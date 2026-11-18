@@ -93,7 +93,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                             if let Some(realm) = &state.active_realm {
                                 if !realm.raw_config.places.is_empty() {
-                                    let cache_id = egui::Id::new("active_place").with(&realm.name);
+                                    let cache_id = egui::Id::unique("active_place").with(&realm.name);
                                     let active_place_name = ctx.data_mut(|d| {
                                         let first = realm.raw_config.places.keys().next().unwrap().clone();
                                         d.get_temp::<String>(cache_id).unwrap_or(first)

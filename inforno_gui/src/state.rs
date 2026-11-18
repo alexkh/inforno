@@ -154,6 +154,11 @@ pub struct State {
     pub op_tx: Sender<FileOpMsg>,
     pub pending_file_dialog_op: Option<FileOp>,
     pub pending_export_content: Option<String>,
+    /// A score file (SVG or PNG) waiting for the save dialog to pick a path.
+    pub pending_score_export: Option<Vec<u8>>,
+    /// Score panes to open once the pane tree is back in place:
+    /// (ABC text, text to select, open on the right).
+    pub pending_score_panes: Vec<(String, Option<nulla_render::abc::datatypes::Span>, bool)>,
     pub is_in_home_folio: bool,
     pub folio: PathBuf,
     // when receiving reply from the LLM's we need to store them during
@@ -494,7 +499,7 @@ impl State {
 
             // FIX 1: Wrap the initial pane in a Tabs container!
             let tabs_container = tiles.insert_tab_tile(vec![chat_pane]);
-            pane_tree = egui_tiles::Tree::new("main_pane_tree", tabs_container, tiles);
+            pane_tree = egui_tiles::Tree::new(egui::Id::unique("main_pane_tree"), tabs_container, tiles);
         }
 
         // Find the first available pane to act as our active tile on startup
@@ -559,6 +564,8 @@ impl State {
             op_tx,
             pending_file_dialog_op: None,
             pending_export_content: None,
+            pending_score_export: None,
+            pending_score_panes: Vec::new(),
             is_in_home_folio: is_home,
             folio,
             chat_streaming_state: ChatStreamingState {
@@ -680,7 +687,7 @@ impl eframe::App for MyApp {
         // Testing aid: FRAMESTATS=1 prints, once a second, the frame rate and the
         // CPU time eframe measured per frame (UI code and tessellation, not GPU work)
         if std::env::var_os("FRAMESTATS").is_some() {
-            let id = egui::Id::new("frame_stats");
+            let id = egui::Id::unique("frame_stats");
             let now = ctx.input(|i| i.time);
             let (start, frames, cpu) = ctx.data(|d| d.get_temp::<(f64, u32, f32)>(id)).unwrap_or((now, 0, 0.0));
             let (frames, cpu) = (frames + 1, cpu + frame.info().cpu_usage.unwrap_or(0.0));
@@ -704,7 +711,7 @@ impl eframe::App for MyApp {
         // waits: a second pass (requested for layout) belongs to the same frame.
         if ctx.current_pass_index() == 0 {
             const MIN_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
-            let id = egui::Id::new("frame_cap_last");
+            let id = egui::Id::unique("frame_cap_last");
             if let Some(last) = ctx.data(|d| d.get_temp::<std::time::Instant>(id)) {
                 let elapsed = last.elapsed();
                 if elapsed < MIN_FRAME {
@@ -717,7 +724,7 @@ impl eframe::App for MyApp {
         // TEMP probe: window size history in logical pixels (points * zoom).
         {
             let size = ctx.content_rect().size() * ctx.zoom_factor();
-            let id = egui::Id::new("win_size_probe");
+            let id = egui::Id::unique("win_size_probe");
             let last: Option<egui::Vec2> = ctx.data(|d| d.get_temp(id));
             if last != Some(size) {
                 ctx.data_mut(|d| d.insert_temp(id, size));
@@ -731,9 +738,9 @@ impl eframe::App for MyApp {
         // TEMP probe: how big is egui's persisted Memory?
         {
             let t = ui.input(|i| i.time);
-            let last = ctx.data(|d| d.get_temp::<f64>(egui::Id::new("mem_probe_t")).unwrap_or(0.0));
+            let last = ctx.data(|d| d.get_temp::<f64>(egui::Id::unique("mem_probe_t")).unwrap_or(0.0));
             if t - last > 5.0 {
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new("mem_probe_t"), t));
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("mem_probe_t"), t));
                 if let Ok(s) = ctx.memory(|m| ron::to_string(m)) {
                     eprintln!("MEMPROBE egui_memory_ron={} KB", s.len() / 1024);
                     let _ = std::fs::write("/tmp/egui_mem.ron", s);
@@ -990,7 +997,14 @@ impl eframe::App for MyApp {
 
         // Handle single file selection (Open / Save) ---
         if let Some(path) = state.file_dialog.take_picked() {
-            if let Some(op) = state.pending_file_dialog_op.take() {
+            if state.pending_file_dialog_op.is_none()
+                && let Some(bytes) = state.pending_score_export.take()
+            {
+                // a score saved from a chat or a score pane
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    state.error_msg = Some(format!("Could not save the score: {}", e));
+                }
+            } else if let Some(op) = state.pending_file_dialog_op.take() {
                 // If it's an export, write it directly and skip the channel
                 if matches!(op, inforno_core::common::FileOp::ExportChat | inforno_core::common::FileOp::ExportNotebook) {
                     if let Some(content) = state.pending_export_content.take() {
@@ -1274,7 +1288,7 @@ fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crat
             }
         }
     }
-    egui_tiles::Tree::empty("main_pane_tree")
+    egui_tiles::Tree::empty(egui::Id::unique("main_pane_tree"))
 }
 
 // Call this function whenever you want to save the current window layout

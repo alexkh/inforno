@@ -115,7 +115,7 @@ pub fn autoscroll_while_dragging(ui: &egui::Ui) {
 /// away from the press point, and a later test would find this `ui` under it.
 fn drag_started_in(ui: &egui::Ui, content: egui::Rect) -> bool {
     let Some(origin) = ui.input(|i| i.pointer.press_origin()) else { return false };
-    let id = ui.id().with("drag_started_in");
+    let id = ui.scope_id().with("drag_started_in");
     if let Some((seen, here)) = ui.data(|d| d.get_temp::<(egui::Pos2, bool)>(id)) {
         if seen == origin {
             return here;
@@ -152,7 +152,7 @@ pub fn selectable_scroll_contents<R>(
 ) -> R {
     let viewport = ui.clip_rect();
     let origin = ui.max_rect().top(); // moves with the scroll offset
-    let id = ui.id().with("selection_span");
+    let id = ui.scope_id().with("selection_span");
     let scrollbar = ui.spacing().scroll.allocated_width();
     let content = viewport.with_max_x(viewport.max.x - scrollbar);
     let (press, pos, down, pressed) = ui.input(|i| {
@@ -240,7 +240,7 @@ pub fn scroll_to_bottom_button<R>(ui: &egui::Ui, scroll: &egui::scroll_area::Scr
 
     let viewport = scroll.inner_rect;
     let max_offset = (scroll.content_size.y - viewport.height()).max(0.0);
-    let at_bottom = scroll.state.offset.y >= max_offset - 1.0;
+    let at_bottom = scroll.state.clamped_offset().y >= max_offset - 1.0;
     let corner = viewport.left_bottom();
     let near = ui
         .input(|i| i.pointer.hover_pos())
@@ -269,12 +269,24 @@ pub fn scroll_to_bottom_button<R>(ui: &egui::Ui, scroll: &egui::scroll_area::Scr
             painter.line_segment([c + egui::vec2(0.0, 2.0), c + egui::vec2(4.0, -2.0)], stroke);
 
             if response.on_hover_text("Scroll to the bottom").clicked() {
-                let mut state = scroll.state;
-                state.offset.y = max_offset;
-                state.store(ui.ctx(), scroll.id);
+                // egui 0.37 can't set a ScrollArea's offset from outside it:
+                // leave a request for `scroll_to_bottom_if_requested`.
+                ui.data_mut(|d| d.insert_temp(scroll.id.with("scroll_to_bottom"), true));
                 ui.ctx().request_repaint();
             }
         });
+}
+
+/// Scrolls a vertical ScrollArea to the bottom if `scroll_to_bottom_button`
+/// was clicked for it. Call at the END of the ScrollArea's content, with the
+/// ScrollArea's id (`ScrollAreaOutput::id`).
+pub fn scroll_to_bottom_if_requested(ui: &egui::Ui, scroll_id: egui::Id) {
+    let key = scroll_id.with("scroll_to_bottom");
+    if ui.data_mut(|d| d.remove_temp::<bool>(key)).unwrap_or(false) {
+        let bottom = ui.min_rect().bottom();
+        let rect = egui::Rect::from_x_y_ranges(ui.clip_rect().x_range(), bottom..=bottom);
+        ui.scroll_to_rect(rect, Some(egui::Align::Max));
+    }
 }
 
 pub trait Editor: Hash {
@@ -634,7 +646,7 @@ impl CodeEditor {
         pub fn show(&mut self, ui: &mut egui::Ui, text: &mut dyn egui::TextBuffer) -> CodeEditorOutput {
         use egui::TextBuffer;
 
-        let state_id = self.search_state_id.unwrap_or_else(|| egui::Id::new(&self.id).with("code_editor_state"));
+        let state_id = self.search_state_id.unwrap_or_else(|| egui::Id::unique(&self.id).with("code_editor_state"));
         let mut state = ui.ctx().data_mut(|d| d.get_temp::<CodeEditorState>(state_id).unwrap_or_default());
 
         // Global fallback toggle via shortcut
@@ -814,7 +826,7 @@ impl CodeEditor {
                                 // Keep the cursor in view while typing, moving it or
                                 // drag-selecting. TextEdit asks for this itself, but its
                                 // request never gets past the horizontal ScrollArea.
-                                let cursor_key = egui::Id::new(&self.id).with("last_cursor_range");
+                                let cursor_key = egui::Id::unique(&self.id).with("last_cursor_range");
                                 let last_cursor = ui.data(|d| d.get_temp::<Option<egui::text::CCursorRange>>(cursor_key)).flatten();
                                 if output.response.has_focus()
                                     && (output.response.changed() || output.cursor_range != last_cursor)
@@ -848,7 +860,7 @@ impl CodeEditor {
                         h.scroll_to_rect(rect, align);
                     }
 
-                    current_hscroll_offset = h_scroll_output.state.offset.x;
+                    current_hscroll_offset = h_scroll_output.state.clamped_offset().x;
                     max_hscroll_offset = (h_scroll_output.content_size.x -
                             h_scroll_output.inner_rect.width()).max(0.0);
                 });
@@ -877,7 +889,7 @@ impl CodeEditor {
             }
 
             let scroll_output = scroll_area.show(ui, code_editor);
-            current_scroll_offset = scroll_output.state.offset.y;
+            current_scroll_offset = scroll_output.state.clamped_offset().y;
         } else {
             code_editor(ui);
             current_scroll_offset = 0.0;

@@ -31,7 +31,7 @@ impl SplitButton {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            id_salt: egui::Id::new("split_btn"),
+            id_salt: egui::Id::unique("split_btn"),
             arrow_width: None,
             main_tooltip: None,
             arrow_tooltip: None,
@@ -82,7 +82,7 @@ impl SplitButton {
 
     /// Provide a unique ID salt, critical for lists of buttons
     pub fn id_salt<T: std::hash::Hash + std::fmt::Debug>(mut self, salt: T) -> Self {
-        self.id_salt = egui::Id::new(salt);
+        self.id_salt = egui::Id::unique(salt);
         self
     }
 
@@ -166,7 +166,7 @@ impl SplitButton {
         let arrow_rect = Rect::from_min_max(egui::pos2(rect.max.x - active_arrow_w, rect.min.y), rect.max);
         let left_rect = Rect::from_min_max(rect.min, egui::pos2(rect.min.x + active_left_w, rect.max.y));
 
-        let base_id = ui.id().with(self.id_salt);
+        let base_id = ui.scope_id().with(self.id_salt);
         let main_response = ui.interact(main_rect, base_id.with("main"), Sense::click());
         let arrow_response = ui.interact(arrow_rect, base_id.with("arrow"), Sense::click());
         let left_response = ui.interact(left_rect, base_id.with("left"), Sense::click());

@@ -23,6 +23,7 @@ mod emoji_render;
 mod folio_convert;
 mod key_manager;
 mod panes;
+mod score;
 mod model_preset_editor;
 mod search_highlight;
 mod side_panel;
@@ -242,7 +243,7 @@ fn main() -> eframe::Result {
                                     Err(reason) => {
                                         let err_msg = format!("Realm '{}' has no default Folio yet ({}); will prompt to create one.", realm_name, reason);
                                         eprintln!("{}", err_msg);
-                                        cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                                        cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("startup_error"), err_msg));
                                         realm_awaiting_folio = Some(realm_name.clone());
                                     }
                                 }
@@ -251,16 +252,16 @@ fn main() -> eframe::Result {
                                 let err_msg = format!("Failed to parse realm2.yml for realm '{}':\n{}", realm_name, e);
                                 eprintln!("{}", err_msg);
                                 cc.egui_ctx.data_mut(|d| {
-                                    d.insert_temp(egui::Id::new("startup_error"), err_msg);
-                                    d.insert_temp(egui::Id::new("broken_realm_yaml"), config_str);
-                                    d.insert_temp(egui::Id::new("broken_realm_name"), realm_name.clone());
+                                    d.insert_temp(egui::Id::unique("startup_error"), err_msg);
+                                    d.insert_temp(egui::Id::unique("broken_realm_yaml"), config_str);
+                                    d.insert_temp(egui::Id::unique("broken_realm_name"), realm_name.clone());
                                 });
                             }
                         },
                         Err(e) => {
                             let err_msg = format!("Realm '{}' not found or could not be read at {:?}\nError: {}", realm_name, yaml_path, e);
                             eprintln!("{}", err_msg);
-                            cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::new("startup_error"), err_msg));
+                            cc.egui_ctx.data_mut(|d| d.insert_temp(egui::Id::unique("startup_error"), err_msg));
                         }
                     }
                 }
