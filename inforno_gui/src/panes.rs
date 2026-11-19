@@ -22,6 +22,35 @@ pub enum SplitAction {
     Down,
 }
 
+/// A pane shown in a window of its own, inside the main one, instead of as
+/// a tab. It keeps the id it had in the tree: egui_tiles never hands out an
+/// id twice (its counter only grows), so `editor_apps`, `merge_apps` and the
+/// pane's widget state stay keyed by it, and docking puts it back under the
+/// same id.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FloatingPane {
+    pub id: TileId,
+    pub pane: Pane,
+    /// The window's outer rect, in points.
+    pub rect: egui::Rect,
+    /// The tab group it came from: "Dock as tab" goes back there if it still exists.
+    pub home: Option<TileId>,
+}
+
+/// What a floating window's buttons asked for.
+#[derive(Clone, Copy)]
+pub enum FloatingAction {
+    /// "Dock as tab"
+    Dock(TileId),
+    /// The window's ✖
+    Close(TileId),
+}
+
+/// The egui id of a floating pane's window (also its layer's id).
+pub fn floating_window_id(tile_id: TileId) -> egui::Id {
+    egui::Id::unique(("floating_pane", tile_id))
+}
+
 /// This is the bridge between egui_tiles and your application state.
 pub struct PaneBehavior<'a> {
     pub state: &'a mut crate::state::State,
@@ -31,6 +60,8 @@ pub struct PaneBehavior<'a> {
     pub close_requests: Vec<egui_tiles::TileId>,
     // Tuple of (chat_id, open_in_right_pane)
     pub open_chat_requests: Vec<(i64, bool)>,
+    /// Tabs to turn into floating windows
+    pub float_requests: Vec<TileId>,
 }
 
 impl<'a> Behavior<Pane> for PaneBehavior<'a> {
@@ -51,6 +82,12 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 }
                 if ui.button("⊟").on_hover_text("Split Down").clicked() {
                     self.split_requests.push((active_pane.clone(), SplitAction::Down));
+                }
+                // Score panes first; the other pane types follow once these work.
+                if matches!(active_pane, Pane::Score { .. })
+                    && ui.button("🗗").on_hover_text("Float in a window").clicked()
+                {
+                    self.float_requests.push(active_id);
                 }
             }
         }
@@ -162,6 +199,21 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
     }
 
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
+        self.pane_contents(ui, tile_id, pane);
+        UiResponse::None
+    }
+
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        let mut opts = egui_tiles::SimplificationOptions::default();
+        opts.all_panes_must_have_tabs = true;
+        opts
+    }
+}
+
+impl PaneBehavior<'_> {
+    /// What a pane shows, wherever it is: in a tab (`pane_ui`) or in a
+    /// floating window (`floating_ui`). Keyed by `tile_id` either way.
+    pub fn pane_contents(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) {
         let is_active = self.state.active_tile_id == Some(tile_id);
 
             // Define our highlight border. If active, use the theme's hyperlink/accent color.
@@ -344,14 +396,43 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 }
             });
         });
-
-        UiResponse::None
     }
 
-    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
-        let mut opts = egui_tiles::SimplificationOptions::default();
-        opts.all_panes_must_have_tabs = true;
-        opts
+    /// Draws each floating pane in a window of its own, inside the main one,
+    /// with the same contents its tab would have. Returns what the windows'
+    /// buttons asked for; `ui_chat` carries that out once the tree is back.
+    pub fn floating_ui(&mut self, ctx: &egui::Context, floating: &mut [FloatingPane]) -> Vec<FloatingAction> {
+        let enabled = !self.state.is_modal_open;
+        let mut actions = Vec::new();
+        for fp in floating.iter_mut() {
+            let title = self.tab_title_for_pane(&fp.pane);
+            let title = title.text().trim_end_matches('✖').trim_end().to_owned();
+            let mut open = true;
+            let shown = egui::Window::new(title)
+                .id(floating_window_id(fp.id))
+                .default_rect(fp.rect)
+                .collapsible(false)
+                .resizable(true)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    if !enabled {
+                        ui.disable();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        if ui.small_button("🗖 Dock as tab").on_hover_text("Put this window back as a tab").clicked() {
+                            actions.push(FloatingAction::Dock(fp.id));
+                        }
+                    });
+                    self.pane_contents(ui, fp.id, &mut fp.pane);
+                });
+            if let Some(shown) = shown {
+                fp.rect = shown.response.rect;
+            }
+            if !open {
+                actions.push(FloatingAction::Close(fp.id));
+            }
+        }
+        actions
     }
 }
 
@@ -424,7 +505,8 @@ pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>) -> (
 
 /// Core engine logic to spawn a pane into the currently active tab container.
 fn spawn_in_tab(state: &mut crate::state::State, new_pane: Pane) -> egui_tiles::TileId {
-    let prev_active_id = state.active_tile_id;
+    // A floating pane isn't in the tree, so it can't anchor a new tab.
+    let prev_active_id = state.active_tile_id.filter(|id| state.pane_tree.tiles.get(*id).is_some());
     let new_tile_id = state.pane_tree.tiles.insert_pane(new_pane);
 
     if let Some(ptid) = prev_active_id {
@@ -495,7 +577,8 @@ fn spawn_in_tab(state: &mut crate::state::State, new_pane: Pane) -> egui_tiles::
 
 /// Core engine logic to spawn a pane into the column to the right (or create one).
 fn spawn_in_right_pane(state: &mut crate::state::State, new_pane: Pane) -> egui_tiles::TileId {
-    let active_id = match state.active_tile_id {
+    // A floating pane isn't in the tree, so it has no right neighbour.
+    let active_id = match state.active_tile_id.filter(|id| state.pane_tree.tiles.get(*id).is_some()) {
         Some(id) => id,
         None => {
             // Fallback to normal open if nothing is active
@@ -688,17 +771,85 @@ pub fn open_score(
         egui_tiles::Tile::Pane(Pane::Score { source: shown }) if *shown == source => Some(*id),
         _ => None,
     });
-    let tile_id = match existing {
-        Some(id) => {
+    let floating = state.floating_panes.iter().find_map(|f| match &f.pane {
+        Pane::Score { source: shown } if *shown == source => Some(f.id),
+        _ => None,
+    });
+    let tile_id = match (existing, floating) {
+        (Some(id), _) => {
             state.pane_tree.make_active(|tid, _| tid == id);
             state.active_tile_id = Some(id);
             id
         }
-        None if right => spawn_in_right_pane(state, Pane::Score { source: source.clone() }),
-        None => spawn_in_tab(state, Pane::Score { source: source.clone() }),
+        (None, Some(id)) => {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, floating_window_id(id)));
+            state.active_tile_id = Some(id);
+            id
+        }
+        (None, None) if right => spawn_in_right_pane(state, Pane::Score { source: source.clone() }),
+        (None, None) => spawn_in_tab(state, Pane::Score { source: source.clone() }),
     };
     if let Some(span) = selection {
         crate::score::select_in_editor(ctx, crate::score::editor_id(tile_id), &source, span);
     }
     state.active_chat_id = None;
+}
+
+// --- FLOATING WINDOWS ---
+
+/// Takes the tab `tile_id` out of the tree into a floating window, under the
+/// same id. The window starts over where the tab was, a little offset.
+pub fn float_pane(tree: &mut egui_tiles::Tree<Pane>, tile_id: TileId) -> Option<FloatingPane> {
+    if !matches!(tree.tiles.get(tile_id), Some(egui_tiles::Tile::Pane(_))) {
+        return None;
+    }
+    let rect = match tree.tiles.rect(tile_id) {
+        Some(r) => egui::Rect::from_min_size(
+            r.min + egui::vec2(24.0, 24.0),
+            r.size().min(egui::vec2(900.0, 700.0)),
+        ),
+        None => egui::Rect::from_min_size(egui::pos2(120.0, 120.0), egui::vec2(720.0, 480.0)),
+    };
+    let home = tree.tiles.parent_of(tile_id);
+    match tree.remove_recursively(tile_id).pop() {
+        Some(egui_tiles::Tile::Pane(pane)) => Some(FloatingPane { id: tile_id, pane, rect, home }),
+        _ => None,
+    }
+}
+
+/// Puts a floating pane back into the tree as the active tab, under its own
+/// id: in the tab group it came from if that still exists, else the root's
+/// (or any) tab group, else a new one.
+pub fn dock_pane(tree: &mut egui_tiles::Tree<Pane>, floating: FloatingPane) {
+    use egui_tiles::{Container, Tile};
+
+    fn is_tabs(tree: &egui_tiles::Tree<Pane>, tid: TileId) -> bool {
+        matches!(tree.tiles.get(tid), Some(Tile::Container(Container::Tabs(_))))
+    }
+
+    let FloatingPane { id, pane, home, .. } = floating;
+    let target = home
+        .filter(|&tid| is_tabs(tree, tid))
+        .or(tree.root.filter(|&tid| is_tabs(tree, tid)))
+        .or_else(|| {
+            tree.tiles.iter().find_map(|(tid, tile)| {
+                matches!(tile, Tile::Container(Container::Tabs(_))).then_some(*tid)
+            })
+        });
+
+    tree.tiles.insert(id, Tile::Pane(pane));
+    match (target, tree.root) {
+        (Some(tabs_id), _) => {
+            if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(tabs_id) {
+                tabs.add_child(id);
+                tabs.set_active(id);
+            }
+        }
+        (None, None) => tree.root = Some(tree.tiles.insert_tab_tile(vec![id])),
+        (None, Some(root)) => {
+            let tabs = tree.tiles.insert_tab_tile(vec![id]);
+            tree.root = Some(tree.tiles.insert_horizontal_tile(vec![root, tabs]));
+        }
+    }
+    tree.make_active(|tid, _| tid == id);
 }

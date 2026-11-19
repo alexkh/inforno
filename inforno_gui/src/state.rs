@@ -181,6 +181,8 @@ pub struct State {
     pub editor_apps: std::collections::HashMap<egui_tiles::TileId, bulat::BulatEditorApp>,
     pub file_dialog: egui_file_dialog::FileDialog,
     pub pane_tree: egui_tiles::Tree<crate::panes::Pane>,
+    /// Panes shown in windows of their own instead of as tabs.
+    pub floating_panes: Vec<crate::panes::FloatingPane>,
     pub search_query: String,
     pub chat_widths: std::collections::HashMap<i64, f32>,
     /// Search term highlighted in a chat opened from the search results, by chat id
@@ -594,6 +596,7 @@ impl State {
             editor_apps: std::collections::HashMap::new(),
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
+            floating_panes: Vec::new(),
             search_query: String::new(),
             chat_widths: std::collections::HashMap::new(),
             chat_highlights: std::collections::HashMap::new(),

@@ -97,10 +97,16 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
             split_requests: Vec::new(),
             close_requests: Vec::new(),
             open_chat_requests: Vec::new(),
+            float_requests: Vec::new(),
         };
 
         // 3. Render the layout
         tree.ui(&mut behavior, ui);
+
+        // 3.1 Panes floating in windows over the main one, drawn by the same
+        // behavior. Their list is out of `state` while they draw, like the tree.
+        let mut floating = std::mem::take(&mut behavior.state.floating_panes);
+        let floating_actions = behavior.floating_ui(ui.ctx(), &mut floating);
 
         // --- Layout Auto-Fix Pass ---
         // When a user drags the active tab out of a container to split the screen,
@@ -130,6 +136,7 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
         let split_requests = behavior.split_requests;
         let close_requests = behavior.close_requests;
         let open_chat_requests = behavior.open_chat_requests;
+        let float_requests = behavior.float_requests;
 
         // 4. Process any requested splits safely
         for (new_pane, direction) in split_requests {
@@ -160,13 +167,49 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
             }
 
             state.merge_apps.remove(&dead_id);
+            state.editor_apps.remove(&dead_id);
 
             // This safely removes the tab and cleans up its parent containers
             tree.remove_recursively(dead_id);
         }
 
-        // 6. Put the updated tree back! (Safe because `behavior` is dead)
+        // 5.1 Floating windows: docked back as tabs, or closed
+        for action in floating_actions {
+            match action {
+                crate::panes::FloatingAction::Dock(id) => {
+                    if let Some(i) = floating.iter().position(|f| f.id == id) {
+                        crate::panes::dock_pane(&mut tree, floating.remove(i));
+                        state.active_tile_id = Some(id);
+                        state.active_chat_id = match tree.tiles.get(id) {
+                            Some(egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id })) => Some(*chat_id),
+                            _ => None,
+                        };
+                        ui.ctx().request_repaint();
+                    }
+                }
+                crate::panes::FloatingAction::Close(id) => {
+                    floating.retain(|f| f.id != id);
+                    if state.active_tile_id == Some(id) {
+                        state.active_tile_id = None;
+                        state.active_chat_id = None;
+                    }
+                    state.merge_apps.remove(&id);
+                    state.editor_apps.remove(&id);
+                }
+            }
+        }
+
+        // 5.2 Tabs turned into floating windows ("Float" in the tab bar)
+        for tile_id in float_requests {
+            if let Some(fp) = crate::panes::float_pane(&mut tree, tile_id) {
+                floating.push(fp);
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // 6. Put the updated tree and the floating panes back! (Safe because `behavior` is dead)
         state.pane_tree = tree;
+        state.floating_panes = floating;
 
         // 6.1 Score panes asked for while the tree was out (clicks on chat scores)
         for (source, selection, right) in std::mem::take(&mut state.pending_score_panes) {
