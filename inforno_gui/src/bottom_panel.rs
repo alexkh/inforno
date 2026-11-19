@@ -68,7 +68,7 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                     ui.vertical(|ui| {
                         // Toggle Button (System prompt)
-                        if ui.add(crate::emoji_render::emoji_button_widget(ui, '💻').small().selected(
+                        if ui.add(egui::Button::new("💻").small().selected(
                                 state.bottom_panel_state.show_system_prompt))
                                 .on_hover_text(t!("toggle_system_prompt"))
                                 .clicked()
@@ -79,15 +79,18 @@ pub fn ui_bottom_panel(ui: &mut egui::Ui, state: &mut State) {
 
                         ui.add_space(4.0);
 
-                        // Attachment Menu Button
+                        // Attachment Menu Button, with the number of pending attachments
                         let attach_count = state.bottom_panel_state.pending_attachments.len();
-                        let attach_trailing = if attach_count > 0 {
-                            Some(egui::RichText::new(format!("{}", attach_count)).color(egui::Color32::GREEN).into())
+                        let attach_button = if attach_count > 0 {
+                            egui::containers::menu::MenuButton::new((
+                                "📎",
+                                egui::RichText::new(format!("{}", attach_count)).color(egui::Color32::GREEN),
+                            ))
                         } else {
-                            None
+                            egui::containers::menu::MenuButton::new("📎")
                         };
 
-                        crate::emoji_render::emoji_menu_button(ui, '📎', attach_trailing).ui(ui, |ui| {
+                        attach_button.ui(ui, |ui| {
                             // Dynamically resolve the currently selected place to a local filesystem path
                             let mut current_root = state.project_root.clone();
 
@@ -444,7 +447,7 @@ fn render_talker(
     }
 
     // wrench menu here 🔧
-    if crate::emoji_render::emoji_button(ui, "🔧").on_hover_text("Modify this model preset").clicked() {
+    if ui.button("🔧").on_hover_text("Modify this model preset").clicked() {
         // A. Get the current preset data
         if let Some(_current_preset) = presets.get(talker.preset_selection.id) {
             if let Some(talker_preset) = talker.preset.as_ref() {

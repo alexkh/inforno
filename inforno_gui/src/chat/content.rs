@@ -116,7 +116,6 @@ fn render_markdown(
     }
 
     let local_math_cache = math_cache.clone();
-    let emojified = crate::emoji_render::emojify_markdown(md_text);
 
     // Unique egui ID context per markdown block (or table cell)
     ui.push_id(id_salt, |ui| {
@@ -130,17 +129,12 @@ fn render_markdown(
             .render_math_fn(Some(&mut move |ui, math, is_inline| {
                 render_math(ui, &local_math_cache, math, is_inline);
             }))
-            .show(ui, cache, &emojified);
+            .show(ui, cache, md_text);
     });
 }
 
-/// Math hook for CommonMarkViewer. Also renders `$emoji:...$` placeholders
-/// produced by `emojify_markdown`.
+/// Math hook for CommonMarkViewer.
 fn render_math(ui: &mut egui::Ui, math_cache: &MathCache, math: &str, is_inline: bool) {
-    if let Some(codes) = math.strip_prefix("emoji:") {
-        crate::emoji_render::emoji_inline(ui, codes);
-        return;
-    }
 
     // `$x$` and `$$x$$` render differently, so the mode is part of the key
     // (both for our cache and for egui's texture cache, which keys by URI).
@@ -343,7 +337,7 @@ fn render_rhai_block(
         .fill(ui.visuals().extreme_bg_color)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                crate::emoji_render::emoji_label(ui, "📜 Rhai Script");
+                ui.label("📜 Rhai Script");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🗐").on_hover_text("Copy to clipboard").clicked() {
                         ui.ctx().copy_text(code.to_string());
@@ -556,7 +550,7 @@ fn render_comfy_workflow_button(ui: &mut egui::Ui, code: &str, comfy_workflow_re
     }
 
     ui.horizontal(|ui| {
-        crate::emoji_render::emoji_label(ui, "🧩 ComfyUI Workflow");
+        ui.label("🧩 ComfyUI Workflow");
         if ui.button("Open in Workflow Editor").clicked() {
             *comfy_workflow_request = Some(sanitized.clone());
         }

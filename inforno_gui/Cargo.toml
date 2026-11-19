@@ -26,7 +26,6 @@ egui_tiles = "0.18.0"
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 directories = "6.0.0"
-ttf-parser = "0.25"
 thiserror = "2.0.18"
 secrecy = "0.10.3"
 openrouter-rs = "0.10.0"
@@ -62,7 +61,6 @@ egui-file-dialog = "0.16.0"
 # egui 0.37 port of zakarumych/egui-snarl (PR #106), until it is released.
 egui-snarl = { git = "https://github.com/alexkh/egui-snarl", rev = "6fcfd02ebf203deeac5ea33caab344003819bb22" }
 rucomfyui = { git = "https://github.com/alexkh/rucomfyui", branch = "main" }
-rustybuzz = "0.20.1"
 dhat = { version = "0.3.3", optional = true }
 ctap-hid-fido2 = "3.6.0"
 chacha20poly1305 = "0.11.0"

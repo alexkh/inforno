@@ -19,7 +19,6 @@ mod talker_config;
 mod autocomplete;
 mod bottom_panel;
 mod chat;
-mod emoji_render;
 mod folio_convert;
 mod key_manager;
 mod panes;
@@ -357,10 +356,34 @@ fn configure_fonts(ctx: &egui::Context) {
         vec.push("noto_sans_cjk_regular".to_owned());
     }
 
-    // 2. Load the font data
-    // easiest way: embed it in the binary so you don't have file path issues
-    // NotoColorEmoji is intentionally NOT registered here: egui cannot draw
-    // color bitmap glyphs. Color emoji go through `emoji_render` instead.
+    // Color emoji. egui 0.37 draws color bitmap fonts itself (epaint's
+    // `color_fonts`, which eframe's default `system_fonts` turns on) and
+    // shapes each grapheme cluster with harfrust, so ZWJ sequences, flags
+    // and skin tones come out as single glyphs. A cluster gets the first
+    // font in the family that has its first character, so this goes in
+    // front of the monochrome NotoEmoji-Regular.
+    fonts.font_data.insert(
+        "noto_color_emoji".to_owned(),
+        egui::FontData::from_static(include_bytes!(
+                "../assets/fonts/NotoColorEmoji.ttf"))
+            .tweak(egui::FontTweak { scale: 0.9, ..Default::default() })
+            .into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(vec) = fonts.families.get_mut(&family) {
+            let at = vec.iter().position(|name| name == "NotoEmoji-Regular").unwrap_or(vec.len());
+            vec.insert(at, "noto_color_emoji".to_owned());
+        }
+    }
+    // "monochrome": Proportional without the color emoji, for emoji that
+    // must take the text color (a red or green 🔑, say). Use it with
+    // `RichText::family(egui::FontFamily::Name("monochrome".into()))`.
+    let monochrome: Vec<String> = fonts.families[&egui::FontFamily::Proportional]
+        .iter()
+        .filter(|name| name.as_str() != "noto_color_emoji")
+        .cloned()
+        .collect();
+    fonts.families.insert(egui::FontFamily::Name("monochrome".into()), monochrome);
 
     // 4. Apply the new configuration
     ctx.set_fonts(fonts);

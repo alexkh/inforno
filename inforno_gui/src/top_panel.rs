@@ -2,7 +2,7 @@ use egui::{Color32, RichText};
 use rust_i18n::t;
 
 use inforno_core::{common::{FileOp, FileOpMsg}, db::reset_folio_db};
-use crate::{emoji_render::emoji_label, state::{State, err_color}};
+use crate::state::{State, err_color};
 use crate::mybtn;
 
 fn switch_to_realm_folio(state: &mut State, realm_name: &str, folio_key: &str) {
@@ -301,19 +301,19 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                 .clicked() {
                 state.show_key_manager = !state.show_key_manager;
             }
+            let key_icon = RichText::new("🔑").family(egui::FontFamily::Name("monochrome".into()));
             if state.openrouter_api_key.is_set {
-                ui.label(RichText::new("🔑")
-                .color(Color32::from_rgb(0, 220, 0)).strong());
+                ui.label(key_icon.color(Color32::from_rgb(0, 220, 0)).strong());
             } else {
-                ui.colored_label(err_color(), "🔑");
+                ui.colored_label(err_color(), key_icon);
             }
 
 
-            if ui.add(crate::emoji_render::emoji_button_widget(ui, '🌙')).clicked() {
+            if ui.button("🌙").clicked() {
                 ctx.set_theme(egui::Theme::Dark);
             }
 
-            if ui.add(crate::emoji_render::emoji_button_widget(ui, '🔆')).clicked() {
+            if ui.button("🔆").clicked() {
                 ctx.set_theme(egui::Theme::Light);
             }
 
@@ -465,7 +465,7 @@ pub fn ui_top_panel(ui: &mut egui::Ui, state: &mut State) {
                                         }
                                     }
                                 }
-                            emoji_label(ui, "🏰");
+                            ui.label("🏰");
 
                             #[cfg(target_os = "linux")]
                             {
