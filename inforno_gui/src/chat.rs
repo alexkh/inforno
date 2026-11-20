@@ -180,6 +180,9 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
                     if let Some(i) = floating.iter().position(|f| f.id == id) {
                         crate::panes::dock_pane(&mut tree, floating.remove(i));
                         state.active_tile_id = Some(id);
+                        if let Some(egui_tiles::Tile::Pane(crate::panes::Pane::Score { .. })) = tree.tiles.get(id) {
+                            crate::score::restore_selection(ui.ctx(), crate::score::editor_id(id));
+                        }
                         state.active_chat_id = match tree.tiles.get(id) {
                             Some(egui_tiles::Tile::Pane(crate::panes::Pane::Chat { chat_id })) => Some(*chat_id),
                             _ => None,
@@ -202,6 +205,9 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
         // 5.2 Tabs turned into floating windows ("Float" in the tab bar)
         for tile_id in float_requests {
             if let Some(fp) = crate::panes::float_pane(&mut tree, tile_id) {
+                if matches!(fp.pane, crate::panes::Pane::Score { .. }) {
+                    crate::score::restore_selection(ui.ctx(), crate::score::editor_id(tile_id));
+                }
                 floating.push(fp);
                 ui.ctx().request_repaint();
             }

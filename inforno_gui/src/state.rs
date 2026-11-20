@@ -490,19 +490,14 @@ impl State {
         // create the communication channel for streaming chat messages
         let (chat_tx, chat_rx) = channel();
 
-        // attempt to load the layout from the .ron file
-        let mut pane_tree = load_layout_from_ron(&project_root);
-
-        if pane_tree.is_empty() {
-            let mut tiles = egui_tiles::Tiles::default();
-            let chat_pane = tiles.insert_pane(crate::panes::Pane::Chat {
-                chat_id: active_chat_id.unwrap_or(0)
-            });
-
-            // FIX 1: Wrap the initial pane in a Tabs container!
-            let tabs_container = tiles.insert_tab_tile(vec![chat_pane]);
-            pane_tree = egui_tiles::Tree::new(egui::Id::unique("main_pane_tree"), tabs_container, tiles);
-        }
+        // Inforno keeps no layout between runs (a stale one could leave it in
+        // a confusing state that restarting wouldn't fix): one chat tab.
+        let mut tiles = egui_tiles::Tiles::default();
+        let chat_pane = tiles.insert_pane(crate::panes::Pane::Chat {
+            chat_id: active_chat_id.unwrap_or(0)
+        });
+        let tabs_container = tiles.insert_tab_tile(vec![chat_pane]);
+        let mut pane_tree = egui_tiles::Tree::new(egui::Id::unique("main_pane_tree"), tabs_container, tiles);
 
         // Find the first available pane to act as our active tile on startup
         let mut initial_active_tile = None;
@@ -1277,31 +1272,3 @@ macro_rules! mybtn {
     };
 }
 
-// Helper to construct the path to the layout.ron file
-fn get_layout_path(project_root: &Option<PathBuf>) -> Option<PathBuf> {
-    project_root.as_ref().map(|root| root.join(".inforno").join("layout.ron"))
-}
-
-// Loads the layout from disk, returning an empty tree if it fails
-fn load_layout_from_ron(project_root: &Option<PathBuf>) -> egui_tiles::Tree<crate::panes::Pane> {
-    if let Some(path) = get_layout_path(project_root) {
-        if let Ok(file_content) = std::fs::read_to_string(path) {
-            if let Ok(tree) = ron::from_str(&file_content) {
-                return tree;
-            }
-        }
-    }
-    egui_tiles::Tree::empty(egui::Id::unique("main_pane_tree"))
-}
-
-// Call this function whenever you want to save the current window layout
-// TODO: not wired up yet — `load_layout_from_ron` reads layout.ron on startup,
-// but nothing ever writes it, so pane layouts don't currently persist.
-#[allow(dead_code)]
-pub fn save_layout_to_ron(state: &State) {
-    if let Some(path) = get_layout_path(&state.project_root) {
-        if let Ok(ron_string) = ron::ser::to_string_pretty(&state.pane_tree, ron::ser::PrettyConfig::default()) {
-            let _ = std::fs::write(path, ron_string);
-        }
-    }
-}

@@ -92,16 +92,22 @@ pub fn score_editor(ui: &mut egui::Ui, tile_id: egui_tiles::TileId, source: &mut
     let selection = editor_selection(ui.ctx(), editor_id, source);
     let mut out = ScoreResponse::default();
     ui.columns(2, |columns| {
-        egui::ScrollArea::vertical()
-            .id_salt("score_source")
-            .show(&mut columns[0], |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(source)
-                        .id(editor_id)
-                        .code_editor()
-                        .desired_width(f32::INFINITY),
-                );
-            });
+        // bulat's code editor, its TextEdit pinned to `editor_id`: a selection
+        // can be set before it's shown (`select_in_editor`), and its state
+        // survives the pane moving between a tab and a window.
+        let ui = &mut columns[0];
+        let mut editor = bulat::editor::CodeEditor::default()
+            .id_source(format!("score_editor_{tile_id:?}"))
+            .with_text_edit_id(editor_id)
+            .with_ui_fontsize(ui)
+            .with_row_height(ui.text_style_height(&egui::TextStyle::Monospace))
+            .with_theme(bulat::editor::ColorTheme::SV)
+            .with_syntax(bulat::editor::Syntax::abc())
+            .with_numlines(true)
+            .v_auto_shrink(false);
+        if editor.show(ui, source).output.response.has_focus() {
+            keep_selection(ui.ctx(), editor_id);
+        }
         egui::ScrollArea::vertical()
             .id_salt("score_picture")
             .show(&mut columns[1], |ui| {
@@ -120,17 +126,46 @@ pub fn select_in_editor(ctx: &egui::Context, editor_id: egui::Id, source: &str, 
     let mut state = egui::TextEdit::load_state(ctx, editor_id).unwrap_or_default();
     let a = char_index(source, span.start);
     let b = char_index(source, span.end);
-    state
-        .cursor
-        .set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
+    let range = CCursorRange::two(CCursor::new(a), CCursor::new(b));
+    state.cursor.set_char_range(Some(range));
+    state.store(ctx, editor_id);
+    ctx.data_mut(|d| d.insert_temp(kept_selection_id(editor_id), range));
+    ctx.memory_mut(|m| m.request_focus(editor_id));
+}
+
+/// Puts the selection `keep_selection` saved back into the text editor
+/// `editor_id` and focuses it: for when its pane moved (docked or floated),
+/// which took the focus away and so shrank the selection.
+pub fn restore_selection(ctx: &egui::Context, editor_id: egui::Id) {
+    let Some(range) = ctx.data(|d| d.get_temp::<CCursorRange>(kept_selection_id(editor_id))) else {
+        return;
+    };
+    let mut state = egui::TextEdit::load_state(ctx, editor_id).unwrap_or_default();
+    state.cursor.set_char_range(Some(range));
     state.store(ctx, editor_id);
     ctx.memory_mut(|m| m.request_focus(editor_id));
 }
 
-/// The byte range selected in the text editor `editor_id`, if it has a cursor.
+/// Saves the selection of the focused text editor `editor_id`. egui 0.37
+/// shrinks a TextEdit's selection to its cursor whenever it loses focus, so
+/// clicking anywhere else would lose which notes were selected.
+fn keep_selection(ctx: &egui::Context, editor_id: egui::Id) {
+    if let Some(range) = egui::TextEdit::load_state(ctx, editor_id).and_then(|s| s.cursor.char_range()) {
+        ctx.data_mut(|d| d.insert_temp(kept_selection_id(editor_id), range));
+    }
+}
+
+/// Where `keep_selection` saves the selection of the text editor `editor_id`.
+fn kept_selection_id(editor_id: egui::Id) -> egui::Id {
+    editor_id.with("kept_selection")
+}
+
+/// The byte range selected in the text editor `editor_id`: what it last had
+/// selected while focused (see `keep_selection`), else its cursor.
 fn editor_selection(ctx: &egui::Context, editor_id: egui::Id, source: &str) -> Option<Span> {
-    let state = egui::TextEdit::load_state(ctx, editor_id)?;
-    let range = state.cursor.char_range()?;
+    let range = ctx
+        .data(|d| d.get_temp::<CCursorRange>(kept_selection_id(editor_id)))
+        .or_else(|| egui::TextEdit::load_state(ctx, editor_id)?.cursor.char_range())?;
     let a: usize = range.primary.index.into();
     let b: usize = range.secondary.index.into();
     Some(Span::new(byte_index(source, a.min(b)), byte_index(source, a.max(b))))

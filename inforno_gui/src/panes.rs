@@ -27,7 +27,8 @@ pub enum SplitAction {
 /// id twice (its counter only grows), so `editor_apps`, `merge_apps` and the
 /// pane's widget state stay keyed by it, and docking puts it back under the
 /// same id.
-#[derive(Clone, Serialize, Deserialize)]
+/// Kept for this run only: Inforno saves no layout.
+#[derive(Clone)]
 pub struct FloatingPane {
     pub id: TileId,
     pub pane: Pane,

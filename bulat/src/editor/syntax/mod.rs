@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod abc;
 pub mod c;
 pub mod rust;
 pub mod loader;
@@ -129,6 +130,7 @@ impl Syntax {
             "toml" => "application/toml",
             "yaml" | "yml" => "application/yaml",
             "sh" | "bash" | "shell" => "application/x-sh",
+            "abc" | "abci" => "text/vnd.abc",
             _ => {
                 // Fallback to the standard extension guesser just in case it recognizes it
                 Self::guess_mime_from_ext(&clean_lang)
@@ -152,6 +154,7 @@ impl Syntax {
             "html" | "htm" => "text/html",
             "css" => "text/css",
             "sh" | "bash" => "application/x-sh",
+            "abc" => "text/vnd.abc",
             _ => "text/plain",
         }
     }
@@ -170,6 +173,7 @@ impl Syntax {
             "application/x-rhai" => Self::rhai(),
             "text/markdown" => Self::markdown(),
             "application/yaml" | "application/toml" => Self::yaml(),
+            "text/vnd.abc" => Self::abc(),
             // Fallback to plain text for unconfigured types
             _ => Self::text(),
         }

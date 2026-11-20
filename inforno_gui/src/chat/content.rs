@@ -529,6 +529,7 @@ fn language_label(mime_type: &str) -> &'static str {
         "application/json" => "📦 JSON",
         "application/toml" | "application/yaml" => "⚙️ Config",
         "application/x-sh" => "🐚 Shell",
+        "text/vnd.abc" => "♫ ABC",
         _ => "📄 Text",
     }
 }

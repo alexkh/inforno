@@ -331,6 +331,8 @@ pub struct CodeEditor {
     pub search_term: String,
     pub search_state_id: Option<egui::Id>,
     pub active_search_match_bytes: Option<std::ops::Range<usize>>,
+    /// The text's TextEdit id, if pinned (see `with_text_edit_id`).
+    text_edit_id: Option<egui::Id>,
 }
 
 impl Hash for CodeEditor {
@@ -368,6 +370,7 @@ impl Default for CodeEditor {
             search_term: String::new(),
             search_state_id: None,
             active_search_match_bytes: None,
+            text_edit_id: None,
         }
     }
 }
@@ -541,6 +544,16 @@ impl CodeEditor {
     pub fn with_search_state_id(self, id: egui::Id) -> Self {
         CodeEditor {
             search_state_id: Some(id),
+            ..self
+        }
+    }
+
+    /// Gives the text's TextEdit this exact id, instead of one derived from
+    /// the parent `Ui`. Its state (cursor, selection, undo) then stays the
+    /// same wherever the editor is drawn, and can be set before it's shown.
+    pub fn with_text_edit_id(self, id: egui::Id) -> Self {
+        CodeEditor {
+            text_edit_id: Some(id),
             ..self
         }
     }
@@ -814,8 +827,12 @@ impl CodeEditor {
                                     };
 
                                 // --- 3. DRAW TEXT ---
-                                let output = egui::TextEdit::multiline(text)
-                                    .id_source(&self.id)
+                                let text_edit = egui::TextEdit::multiline(text);
+                                let text_edit = match self.text_edit_id {
+                                    Some(id) => text_edit.id(id),
+                                    None => text_edit.id_source(&self.id),
+                                };
+                                let output = text_edit
                                     .lock_focus(true)
                                     .desired_rows(self.rows)
                                     .frame(egui::Frame::new())
