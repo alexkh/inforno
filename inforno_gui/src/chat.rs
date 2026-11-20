@@ -237,6 +237,13 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
                     }
                 }
             }
+            for fp in state.floating_panes.iter_mut() {
+                if let crate::panes::Pane::Chat { chat_id: id } = &mut fp.pane {
+                    if *id == old_id {
+                        *id = new_id;
+                    }
+                }
+            }
             // Safely drop the old ghost chat from memory now that tabs are updated
             state.open_chats.remove(&old_id);
         }

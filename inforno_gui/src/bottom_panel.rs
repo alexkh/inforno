@@ -670,6 +670,13 @@ pub fn submit_prompt(state: &mut State, ctx: &egui::Context) {
                 }
             }
         }
+        for fp in state.floating_panes.iter_mut() {
+            if let crate::panes::Pane::Chat { chat_id } = &mut fp.pane {
+                if *chat_id == old_chat_id {
+                    *chat_id = new_active_id;
+                }
+            }
+        }
     }
 
     if state.bottom_panel_state.show_system_prompt {

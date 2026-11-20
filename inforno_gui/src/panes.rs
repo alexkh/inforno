@@ -84,10 +84,7 @@ impl<'a> Behavior<Pane> for PaneBehavior<'a> {
                 if ui.button("⊟").on_hover_text("Split Down").clicked() {
                     self.split_requests.push((active_pane.clone(), SplitAction::Down));
                 }
-                // Score panes first; the other pane types follow once these work.
-                if matches!(active_pane, Pane::Score { .. })
-                    && ui.button("🗗").on_hover_text("Float in a window").clicked()
-                {
+                if ui.button("🗗").on_hover_text("Float in a window").clicked() {
                     self.float_requests.push(active_id);
                 }
             }
@@ -403,6 +400,9 @@ impl PaneBehavior<'_> {
     /// with the same contents its tab would have. Returns what the windows'
     /// buttons asked for; `ui_chat` carries that out once the tree is back.
     pub fn floating_ui(&mut self, ctx: &egui::Context, floating: &mut [FloatingPane]) -> Vec<FloatingAction> {
+        if let Some(id) = self.state.raise_window.take() {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, floating_window_id(id)));
+        }
         let enabled = !self.state.is_modal_open;
         let mut actions = Vec::new();
         for fp in floating.iter_mut() {
@@ -437,7 +437,7 @@ impl PaneBehavior<'_> {
     }
 }
 
-pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>) -> (
+pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>, floating: &[FloatingPane]) -> (
     std::collections::HashMap<egui_tiles::TileId, String>,
     std::collections::HashMap<i64, Vec<String>>
 ) {
@@ -496,6 +496,15 @@ pub fn compute_tile_locations(tree: &egui_tiles::Tree<Pane>) -> (
                     chat_locations.entry(*chat_id).or_insert_with(Vec::new).push(label);
                 }
             }
+        }
+    }
+
+    // 4. Floating windows: W1, W2 ...
+    for (i, fp) in floating.iter().enumerate() {
+        let label = format!("W{}", i + 1);
+        tile_labels.insert(fp.id, label.clone());
+        if let Pane::Chat { chat_id } = &fp.pane {
+            chat_locations.entry(*chat_id).or_insert_with(Vec::new).push(label);
         }
     }
 
@@ -707,6 +716,18 @@ pub fn open_chat_in_tab(state: &mut crate::state::State, chat_id: i64) {
 
     if let Some(tile_id) = found_tile_id {
         state.pane_tree.make_active(|tid, _| tid == tile_id);
+        state.active_tile_id = Some(tile_id);
+        state.active_chat_id = Some(chat_id);
+        return;
+    }
+
+    // Open in a floating window: bring that to the front instead.
+    let floating = state.floating_panes.iter().find_map(|f| match &f.pane {
+        Pane::Chat { chat_id: id } if *id == chat_id => Some(f.id),
+        _ => None,
+    });
+    if let Some(tile_id) = floating {
+        state.raise_window = Some(tile_id);
         state.active_tile_id = Some(tile_id);
         state.active_chat_id = Some(chat_id);
         return;

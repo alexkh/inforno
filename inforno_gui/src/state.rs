@@ -183,6 +183,8 @@ pub struct State {
     pub pane_tree: egui_tiles::Tree<crate::panes::Pane>,
     /// Panes shown in windows of their own instead of as tabs.
     pub floating_panes: Vec<crate::panes::FloatingPane>,
+    /// A floating window to bring to the front on the next frame.
+    pub raise_window: Option<egui_tiles::TileId>,
     pub search_query: String,
     pub chat_widths: std::collections::HashMap<i64, f32>,
     /// Search term highlighted in a chat opened from the search results, by chat id
@@ -592,6 +594,7 @@ impl State {
             file_dialog: egui_file_dialog::FileDialog::new(),
             pane_tree,
             floating_panes: Vec::new(),
+            raise_window: None,
             search_query: String::new(),
             chat_widths: std::collections::HashMap::new(),
             chat_highlights: std::collections::HashMap::new(),
@@ -641,6 +644,7 @@ impl eframe::App for MyApp {
         eframe::set_value(storage, "zoom", &self.ctx.zoom_factor());
         let theme = if self.ctx.theme() == egui::Theme::Light { "light" } else { "dark" };
         eframe::set_value(storage, "theme", &theme.to_string());
+        eframe::set_value(storage, "score_paper", &crate::score::paper_mode(&self.ctx));
         /*
         eprintln!(
             "WINPROBE native_ppp={:?} zoom={} ppp={} inner_rect={:?} monitor={:?}",
@@ -760,7 +764,7 @@ impl eframe::App for MyApp {
         let state = &mut self.state;
 
         // Generate our Tile Map ---
-        let (labels, locs) = crate::panes::compute_tile_locations(&state.pane_tree);
+        let (labels, locs) = crate::panes::compute_tile_locations(&state.pane_tree, &state.floating_panes);
         state.tile_labels = labels;
         state.chat_locations = locs;
 

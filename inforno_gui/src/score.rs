@@ -6,8 +6,9 @@
 //! app. A block is drawn only once it scrolls into view; until then it holds
 //! a placeholder of about the right height. When the text, the column width
 //! or the display scale changes, the old picture stays (scaled to fit) until
-//! the new one is ready. Pictures are white and tinted with the text colour,
-//! like math, so a theme change needs no new picture.
+//! the new one is ready. Pictures are white masks tinted with the ink: white
+//! on a dark theme, black on a light one, or black on white paper when
+//! "On white paper" is on. So a theme change needs no new picture.
 //!
 //! Hovering a mark of the score outlines it and shows its ABC text. Clicking
 //! it selects that text: in the score pane directly, from a chat by opening
@@ -18,6 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use egui::RichText;
+use egui::emath::GuiRounding;
 use egui::text::{CCursor, CCursorRange};
 use nulla_render::abc::datatypes::Span;
 use nulla_render::engrave::{self, Engraving, Hit};
@@ -31,9 +33,13 @@ const POINTS_PER_SPACE: f32 = 8.0;
 /// shows it scaled down.
 const MIN_WIDTH: f32 = 40.0;
 
-/// How far the column may change width, in staff spaces, before the page is
-/// engraved again. In between, the picture is scaled to fit.
+/// How much wider than the page the column may get, in staff spaces, before
+/// the page is engraved again to fill it. A narrower column always gets a
+/// new page: scaling a picture down blurs it.
 const WIDTH_SLACK: f32 = 4.0;
+
+/// White paper around a score in paper mode, in points.
+const PAPER_MARGIN: f32 = 8.0;
 
 /// How many pictures are drawn at the same time, across all chats and panes.
 const MAX_JOBS: usize = 2;
@@ -58,6 +64,30 @@ fn fonts() -> &'static Fonts {
         ];
         Fonts::new(files.map(|bytes| FontSource::Data(bytes.to_vec())))
     })
+}
+
+//------------------------------------------------------------------------------
+fn paper_mode_id() -> egui::Id {
+    egui::Id::unique("score_paper_mode")
+}
+
+/// Whether scores are drawn black on white paper, whatever the theme.
+pub fn paper_mode(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(paper_mode_id())).unwrap_or(false)
+}
+
+pub fn set_paper_mode(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(paper_mode_id(), on));
+}
+
+/// The ink: black on paper, otherwise white on a dark theme and black on a
+/// light one. Full contrast: grey ink looks out of focus.
+fn ink_color(ui: &egui::Ui, paper: bool) -> egui::Color32 {
+    if paper || !ui.visuals().dark_mode {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -200,11 +230,14 @@ struct Drawn {
 }
 
 impl Drawn {
-    /// The picture still shows this text at this width and scale.
+    /// The picture still shows this text at this width and scale. A page
+    /// wider than the room would have to be scaled down, which blurs it, so
+    /// only a page up to `WIDTH_SLACK` narrower than the room fits.
     fn fits(&self, code_hash: u64, width: f32, ppp: f32) -> bool {
         self.code_hash == code_hash
             && self.pixels_per_point == ppp
-            && (self.width - width).abs() <= WIDTH_SLACK
+            && self.width <= width
+            && width - self.width <= WIDTH_SLACK
     }
 
     /// Size in staff spaces.
@@ -253,9 +286,13 @@ fn score_view(
 ) -> ScoreResponse {
     let mut out = ScoreResponse::default();
     let ppp = ui.ctx().pixels_per_point();
+    let paper = paper_mode(ui.ctx());
+    let margin = if paper { PAPER_MARGIN } else { 0.0 };
     let available = ui.available_width();
     let available = if available.is_finite() { available } else { 800.0 };
-    let width = (available / POINTS_PER_SPACE).max(MIN_WIDTH);
+    // room for the picture, inside the paper's margin
+    let room = (available - 2.0 * margin).max(1.0);
+    let width = (room / POINTS_PER_SPACE).max(MIN_WIDTH);
     let code_hash = hash(code);
 
     let mut state = ui.data(|d| d.get_temp::<BlockState>(id)).unwrap_or_default();
@@ -266,27 +303,41 @@ fn score_view(
     let warn = ui.visuals().warn_fg_color;
 
     if state.shown.is_some() || state.failed.is_none() {
-        // the picture, or a placeholder of about the right size
+        // the picture at one texel per pixel (its own size, in points), or a
+        // placeholder of about the right size
         let size = match &state.shown {
-            Some(drawn) => drawn.size() * POINTS_PER_SPACE,
-            None => egui::vec2(available, estimated_height(code) * POINTS_PER_SPACE),
+            Some(drawn) => drawn
+                .texture
+                .as_ref()
+                .map_or(drawn.size() * POINTS_PER_SPACE, |t| t.size_vec2() / drawn.pixels_per_point),
+            None => egui::vec2(room, estimated_height(code) * POINTS_PER_SPACE),
         };
-        let size = if size.x > available { size * (available / size.x) } else { size };
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let size = if size.x > room { size * (room / size.x) } else { size };
+        let (outer, response) =
+            ui.allocate_exact_size(size + egui::Vec2::splat(2.0 * margin), egui::Sense::click());
+        // On whole pixels: a picture placed between pixels is smeared over
+        // two of them and looks out of focus.
+        let rect = egui::Rect::from_min_size(
+            (outer.min + egui::Vec2::splat(margin)).round_to_pixels(ppp),
+            size,
+        );
 
         let current = state.shown.as_ref().is_some_and(|d| d.fits(code_hash, width, ppp));
-        if !current && state.job.is_none() && state.failed.is_none() && ui.is_rect_visible(rect) {
+        if !current && state.job.is_none() && state.failed.is_none() && ui.is_rect_visible(outer) {
             state.job = start(ui.ctx(), code, code_hash, width, ppp);
         }
 
+        if paper {
+            ui.painter().rect_filled(outer, 2.0, egui::Color32::WHITE);
+        }
         match state.shown.as_ref().and_then(|d| d.texture.as_ref()) {
             Some(texture) => {
-                let ink = ui.visuals().text_color();
-                egui::Image::new(texture).tint(ink).paint_at(ui, rect);
+                egui::Image::new(texture).tint(ink_color(ui, paper)).paint_at(ui, rect);
             }
-            None => {
+            None if !paper => {
                 ui.painter().rect_filled(rect, 4.0, ui.visuals().faint_bg_color);
             }
+            None => {}
         }
 
         if let Some(drawn) = &state.shown {
@@ -406,6 +457,12 @@ fn interact(
         if ui.button("Save as PNG…").clicked() {
             out.save = nulla_render::rasterize(&drawn.engraving, fonts(), EXPORT_PIXELS_PER_SPACE)
                 .and_then(|r| r.png_on_paper());
+            ui.close();
+        }
+        ui.separator();
+        let mut paper = paper_mode(ui.ctx());
+        if ui.checkbox(&mut paper, "On white paper").on_hover_text("All scores, black on white, whatever the theme").clicked() {
+            set_paper_mode(ui.ctx(), paper);
             ui.close();
         }
         if in_chat {

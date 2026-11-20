@@ -171,6 +171,9 @@ fn main() -> eframe::Result {
                     Some("dark") => cc.egui_ctx.set_theme(egui::Theme::Dark),
                     _ => {}
                 }
+                if let Some(paper) = eframe::get_value::<bool>(storage, "score_paper") {
+                    crate::score::set_paper_mode(&cc.egui_ctx, paper);
+                }
             }
 
             // theme persistence
