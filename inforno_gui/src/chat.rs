@@ -453,6 +453,11 @@ fn apply_actions(ui: &mut egui::Ui, state: &mut State, chat_id: i64, actions: Ch
 
     // The pane tree is out of `state` while chats draw; `ui_chat` opens it.
     if let Some(request) = actions.score_pane_request {
+        // A popup opens centered on this chat's view (its clip rect here).
+        if request.2 == crate::panes::ScorePlace::Window {
+            let over = ui.clip_rect();
+            ui.data_mut(|d| d.insert_temp(crate::panes::score_popup_over_id(&request.0), over));
+        }
         state.pending_score_panes.push(request);
     }
 

@@ -57,10 +57,16 @@ pub fn pane_scope_id(tile_id: TileId) -> egui::Id {
     egui::Id::unique(("pane_scope", tile_id))
 }
 
+/// Where `apply_actions` leaves the view rect of the chat a score popup was
+/// asked from, keyed by the score's text, for `open_score` to center it on.
+pub fn score_popup_over_id(source: &str) -> egui::Id {
+    egui::Id::new(("score_popup_over", source))
+}
+
 /// Where a score asked for from a chat opens.
 #[derive(Clone, Copy, PartialEq)]
 pub enum ScorePlace {
-    /// A floating window by the pointer: a click on a note.
+    /// A floating window centered on the chat: a click on a note.
     Window,
     /// A tab in the active tab group.
     Tab,
@@ -811,6 +817,13 @@ pub fn open_score(
     selection: Option<nulla_render::abc::datatypes::Span>,
     place: ScorePlace,
 ) {
+    // the view of the chat this was asked from, if a popup was asked for
+    let over_id = score_popup_over_id(&source);
+    let over = ctx.data_mut(|d| {
+        let over = d.get_temp::<egui::Rect>(over_id);
+        d.remove::<egui::Rect>(over_id);
+        over
+    });
     let existing = state.pane_tree.tiles.iter().find_map(|(id, tile)| match tile {
         egui_tiles::Tile::Pane(Pane::Score { source: shown }) if *shown == source => Some(*id),
         _ => None,
@@ -833,7 +846,7 @@ pub fn open_score(
         (None, None) => {
             let pane = Pane::Score { source: source.clone() };
             match place {
-                ScorePlace::Window => spawn_floating(state, ctx, pane, score_window_size(ctx)),
+                ScorePlace::Window => spawn_floating(state, ctx, pane, over, score_window_size(ctx)),
                 ScorePlace::Tab => spawn_in_tab(state, pane),
                 ScorePlace::Right => spawn_in_right_pane(state, pane),
             }
@@ -850,22 +863,33 @@ pub fn open_score(
 
 // --- FLOATING WINDOWS ---
 
-/// Opens `pane` in a new floating window of `size`, by the pointer and
-/// inside the main window. Its id comes from the tree, which never hands
-/// that id out again, so it can be docked later.
-fn spawn_floating(state: &mut crate::state::State, ctx: &egui::Context, pane: Pane, size: egui::Vec2) -> TileId {
+/// Opens `pane` in a new floating window of `size`, centered on `over` (else
+/// by the pointer) and inside the main window: moved to fit, not shrunk. Its
+/// id comes from the tree, which never hands that id out again, so it can be
+/// docked later.
+fn spawn_floating(
+    state: &mut crate::state::State,
+    ctx: &egui::Context,
+    pane: Pane,
+    over: Option<egui::Rect>,
+    size: egui::Vec2,
+) -> TileId {
     let id = state.pane_tree.tiles.next_free_id();
     let screen = ctx.content_rect();
     let size = size.min(screen.size());
-    let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(screen.min) + egui::vec2(16.0, 16.0);
-    let rect = egui::Rect::from_min_size(at.min(screen.max - size).max(screen.min), size);
+    let min = match over {
+        Some(chat) => chat.center() - size / 2.0,
+        None => ctx.input(|i| i.pointer.latest_pos()).unwrap_or(screen.min) + egui::vec2(16.0, 16.0),
+    };
+    let rect = egui::Rect::from_min_size(min.min(screen.max - size).max(screen.min), size);
     state.floating_panes.push(FloatingPane { id, pane, rect, home: None });
     state.active_tile_id = Some(id);
     id
 }
 
-/// A score window big enough for its text and its score side by side: most
-/// of the main window, up to 1200 × 800 points.
+/// A score window big enough for its text and its score side by side: 80% of
+/// the main window's width, up to 1200 points, and 75% of its height, up to
+/// 800 points.
 fn score_window_size(ctx: &egui::Context) -> egui::Vec2 {
     let screen = ctx.content_rect().size();
     egui::vec2((screen.x * 0.8).min(1200.0), (screen.y * 0.75).min(800.0))
