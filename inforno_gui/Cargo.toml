@@ -20,8 +20,10 @@ egui = { version = "0.37.0", features = ["default_fonts", "monochrome_emoji_font
 env_logger = "0.11.10"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.52.3", features = ["full"] }
-egui_commonmark = { version = "0.26.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "fetch", "svg"] }
-egui_extras = { version = "0.37.0", features = ["all_loaders", "default", "svg", "image"] }
+egui_commonmark = { version = "0.26.0", features = ["load-images", "pulldown_cmark", "better_syntax_highlighting", "document-features", "embedded_image", "macros", "svg"] }
+# No "http" loader (in "all_loaders" before): nothing a message renders may
+# reach the network. Remote images load only on a click (see content.rs).
+egui_extras = { version = "0.37.0", features = ["default", "file", "image", "svg"] }
 egui_tiles = "0.18.0"
 ollama-rs = { version = "0.3.4", features = ["stream"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
