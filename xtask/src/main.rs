@@ -54,6 +54,8 @@ usage: cargo xtask <task> [options]
 tasks:
   build   build the release binaries, then sign their statements
   sign    sign the statements of release binaries already built
+  check   check the build for what must not be in it (an http image
+          loader); build and sign run it first
 
 options:
   --key PATH   key for ssh-keygen -Y sign (default ~/.ssh/vaultorno_sign_sk)
@@ -64,6 +66,10 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("build") => parse(&args[1..]).and_then(|o| run(&o, true)),
         Some("sign") => parse(&args[1..]).and_then(|o| run(&o, false)),
+        Some("check") => match &args[1..] {
+            [] => check(&workspace_root()),
+            [other, ..] => Err(format!("check takes no options, not {other:?}")),
+        },
         Some("help" | "--help" | "-h") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -145,6 +151,10 @@ fn run(opts: &Options, build: bool) -> Result<(), String> {
         }
         members.push((package, *lockers));
     }
+    // Before building, and before signing what's built: nothing a message
+    // renders may reach the network.
+    let names: Vec<&str> = members.iter().map(|(p, _)| p.name.as_str()).collect();
+    check_no_fetch(&root, &names)?;
     if build {
         let mut cmd = cargo(&root);
         cmd.args(["build", "--release"]);
@@ -179,6 +189,77 @@ fn run(opts: &Options, build: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Crate features that would let rendered text reach the network, as
+/// (crate, feature): egui_extras' http loader downloads any image a message
+/// names, and egui_commonmark's "fetch" turns that loader on.
+const FORBIDDEN_FEATURES: &[(&str, &str)] = &[("egui_extras", "http"), ("egui_commonmark", "fetch")];
+
+/// Crates that must not be in the build at all: the one that loader
+/// downloads with.
+const FORBIDDEN_CRATES: &[&str] = &["ehttp"];
+
+/// `cargo xtask check`: what `build` and `sign` check first, for the
+/// workspace members they build.
+fn check(root: &Path) -> Result<(), String> {
+    let (_, packages) = metadata(root)?;
+    let names = MEMBERS
+        .iter()
+        .map(|(dir, _)| {
+            packages
+                .get(Path::new(dir))
+                .map(|p| p.name.as_str())
+                .ok_or_else(|| format!("the workspace has no member in {dir}/"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    check_no_fetch(root, &names)
+}
+
+/// Fails if an http image loader is in the build of `packages`, for any
+/// target: a forbidden feature turned on, or a forbidden crate pulled in.
+/// Cargo merges features across the whole dependency tree, so any crate can
+/// bring them back; the error shows the tree, and with it which crate did.
+fn check_no_fetch(root: &Path, packages: &[&str]) -> Result<(), String> {
+    for (krate, feature) in FORBIDDEN_FEATURES {
+        let marker = format!("{krate} feature \"{feature}\"");
+        if let Some(tree) = cargo_tree(root, packages, &["-e", "features", "-i", krate])?
+            && tree.contains(&marker)
+        {
+            return Err(format!("{krate}'s \"{feature}\" is back in the build:\n{tree}"));
+        }
+    }
+    for krate in FORBIDDEN_CRATES {
+        if let Some(tree) = cargo_tree(root, packages, &["-i", krate])? {
+            return Err(format!("{krate} is back in the build:\n{tree}"));
+        }
+    }
+    println!("OK: no http image loader in the build of {}", packages.join(", "));
+    Ok(())
+}
+
+/// `cargo tree --target all` for `packages` with `args`, or None when the
+/// crate asked about with `-i` isn't in the tree at all. Any other failure
+/// is an error, so a check that can't run never passes.
+fn cargo_tree(root: &Path, packages: &[&str], args: &[&str]) -> Result<Option<String>, String> {
+    let mut cmd = cargo(root);
+    cmd.args(["tree", "--target", "all"]);
+    for package in packages {
+        cmd.args(["--package", package]);
+    }
+    let out = cmd
+        .args(args)
+        .output()
+        .map_err(|e| format!("can't run cargo tree: {e}"))?;
+    if out.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("did not match any packages") {
+        Ok(None)
+    } else {
+        Err(format!("cargo tree failed:\n{stderr}"))
+    }
 }
 
 /// Hashes `release/<bin>`, signs a statement for it, checks the signature as

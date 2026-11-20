@@ -1,29 +1,39 @@
 # Inforno workspace tasks: run `make <target>` from the workspace root.
-# Recipe lines start with a TAB, not spaces.
+# Recipe lines start with a TAB, not spaces. The checks live in xtask
+# (`cargo xtask check`); every build here goes through them.
 
 CARGO    ?= cargo
 PKG      := inforno
 ICON     := inforno_gui/assets/icon.ico
 WIN_GNU  := x86_64-pc-windows-gnu
 WIN_MSVC := x86_64-pc-windows-msvc
+# Options for the signing tasks, e.g. make release XTASK_ARGS="--days 30"
+XTASK_ARGS ?=
 
-# `cargo tree` for the app, over every target platform at once (Linux,
-# Windows, and the web build later).
-TREE = $(CARGO) tree -p $(PKG) --target all
+.PHONY: run build release sign check win xwin test test_vfsmask
 
-.PHONY: run build win xwin test test_vfsmask check-no-fetch
-
-run: check-no-fetch
+run: check
 	$(CARGO) run --release -p $(PKG)
 
-build: check-no-fetch
+build: check
 	$(CARGO) build --release -p $(PKG)
 
-win: check-no-fetch
+# Release binaries plus signed vaultorno statements (xtask checks first).
+release:
+	$(CARGO) xtask build $(XTASK_ARGS)
+
+# Signs the statements of the release binaries already built.
+sign:
+	$(CARGO) xtask sign $(XTASK_ARGS)
+
+check:
+	$(CARGO) xtask check
+
+win: check
 	$(CARGO) build --release -p $(PKG) --target $(WIN_GNU)
 	rcedit target/$(WIN_GNU)/release/inforno.exe --set-icon $(ICON)
 
-xwin: check-no-fetch
+xwin: check
 	$(CARGO) xwin build --release -p $(PKG) --target $(WIN_MSVC)
 	rcedit target/$(WIN_MSVC)/release/inforno.exe --set-icon $(ICON)
 
@@ -33,25 +43,3 @@ test:
 
 test_vfsmask:
 	$(CARGO) test --release -p inforno_core test_vfsmask_permissions -- --nocapture
-
-# Fails if an http image loader is back in the build: egui_extras' "http",
-# egui_commonmark's "fetch", or the ehttp crate they download with. Cargo
-# merges features across the whole dependency tree, so any crate can bring
-# them back. Nothing a message renders may reach the network.
-check-no-fetch:
-	@if $(TREE) -e features -i egui_extras | grep -q 'feature "http"'; then \
-		echo "egui_extras' http loader is back:"; \
-		$(TREE) -e features -i egui_extras; \
-		exit 1; \
-	fi
-	@if $(TREE) -e features -i egui_commonmark | grep -q 'feature "fetch"'; then \
-		echo "egui_commonmark's fetch is back:"; \
-		$(TREE) -e features -i egui_commonmark; \
-		exit 1; \
-	fi
-	@if $(TREE) -i ehttp >/dev/null 2>&1; then \
-		echo "ehttp is back:"; \
-		$(TREE) -i ehttp; \
-		exit 1; \
-	fi
-	@echo "OK: no http image loader in the build"
