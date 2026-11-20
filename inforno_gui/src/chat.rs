@@ -66,8 +66,8 @@ struct ChatActions {
     llm_prompt_request: Option<String>,
     /// "Open in Workflow Editor" was clicked on a ComfyUI JSON block.
     comfy_workflow_request: Option<String>,
-    /// A score to show in a score pane: (ABC text, text to select, open it on the right).
-    score_pane_request: Option<(String, Option<nulla_render::abc::datatypes::Span>, bool)>,
+    /// A score to show in a score pane: (ABC text, text to select, where it opens).
+    score_pane_request: Option<(String, Option<nulla_render::abc::datatypes::Span>, crate::panes::ScorePlace)>,
     /// A score file (SVG or PNG) to save; a save dialog opens for it.
     score_save_request: Option<Vec<u8>>,
     /// New appender text and whether it's now treated as Rhai.
@@ -218,8 +218,8 @@ pub fn ui_chat(ui: &mut egui::Ui, state: &mut State) {
         state.floating_panes = floating;
 
         // 6.1 Score panes asked for while the tree was out (clicks on chat scores)
-        for (source, selection, right) in std::mem::take(&mut state.pending_score_panes) {
-            crate::panes::open_score(state, ui.ctx(), source, selection, right);
+        for (source, selection, place) in std::mem::take(&mut state.pending_score_panes) {
+            crate::panes::open_score(state, ui.ctx(), source, selection, place);
         }
 
         // 6.5 Process Tab Upgrades (e.g., Temporary Notebooks converting to saved Chats)

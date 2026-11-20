@@ -154,7 +154,7 @@ fn render_math(ui: &mut egui::Ui, math_cache: &MathCache, math: &str, is_inline:
         uri: uri.into(),
         bytes: egui::load::Bytes::Shared(svg_bytes),
     })
-    .tint(ui.visuals().text_color());
+    .tint(math_ink(ui));
 
     // egui points per Typst pt. The body *row* height is the reference, the
     // same one EGUI_BASELINE_IN_ROW is measured against.
@@ -198,6 +198,16 @@ const SVG_PX_PER_PT: f32 = 96.0 / 72.0;
 /// Values for Ubuntu-Light, egui's default proportional font (932, -189, 28
 /// per 1000 units). With a different body font, recompute from its metrics.
 const EGUI_BASELINE_IN_ROW: f32 = 932.0 / 1149.0;
+
+/// Full-contrast ink for math: white on a dark theme, black on a light one.
+/// Sub- and superscripts are small, and grey ink lets them fade.
+fn math_ink(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::BLACK
+    }
+}
 
 /// Returns the formula's SVG bytes and layout numbers, compiling on first
 /// use. The bytes live in `math_cache`; the layout lives in egui's temp
@@ -251,7 +261,7 @@ fn paint_inline_math(ui: &mut egui::Ui, image: &egui::Image<'_>, layout: &MathLa
     // Rasterize once at the full size; each piece paints its slice of it.
     let full_size = size * shrink;
     let texture = image.clone().fit_to_exact_size(full_size).load_for_size(ui.ctx(), full_size);
-    let tint = ui.visuals().text_color();
+    let tint = math_ink(ui);
 
     for w in cuts.windows(2) {
         let piece_size = egui::vec2(w[1] - w[0], size.y) * shrink;
@@ -409,10 +419,11 @@ fn render_abc_block(
     ui.add_space(6.0);
     let response = crate::score::show_score(ui, egui::Id::unique(("abc_score", msg.id, chunk_idx)), code);
     if let Some(span) = response.clicked {
-        actions.score_pane_request = Some((code.to_string(), Some(span), false));
+        actions.score_pane_request = Some((code.to_string(), Some(span), crate::panes::ScorePlace::Window));
     }
     if let Some(right) = response.open_pane {
-        actions.score_pane_request = Some((code.to_string(), None, right));
+        let place = if right { crate::panes::ScorePlace::Right } else { crate::panes::ScorePlace::Tab };
+        actions.score_pane_request = Some((code.to_string(), None, place));
     }
     if let Some(bytes) = response.save {
         actions.score_save_request = Some(bytes);

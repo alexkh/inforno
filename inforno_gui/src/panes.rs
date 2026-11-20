@@ -52,6 +52,22 @@ pub fn floating_window_id(tile_id: TileId) -> egui::Id {
     egui::Id::unique(("floating_pane", tile_id))
 }
 
+/// The scope of a pane's widgets: the same wherever the pane is drawn.
+pub fn pane_scope_id(tile_id: TileId) -> egui::Id {
+    egui::Id::unique(("pane_scope", tile_id))
+}
+
+/// Where a score asked for from a chat opens.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ScorePlace {
+    /// A floating window by the pointer: a click on a note.
+    Window,
+    /// A tab in the active tab group.
+    Tab,
+    /// A tab in the group on the right.
+    Right,
+}
+
 /// This is the bridge between egui_tiles and your application state.
 pub struct PaneBehavior<'a> {
     pub state: &'a mut crate::state::State,
@@ -252,8 +268,12 @@ impl PaneBehavior<'_> {
                 );
             }
 
-            // SANDBOX ALL IDS TO PREVENT COLLISIONS BETWEEN DUPLICATE PANES
-            ui.push_id(tile_id, |ui| {
+            // Every pane's widgets get ids of their own, the same wherever the
+            // pane is drawn. Splitting the screen or floating the pane moves
+            // it in the ui tree, and ids derived from there would change and
+            // lose its state: a chat's ScrollArea would start over, stuck to
+            // the bottom.
+            ui.scope_builder(egui::UiBuilder::new().scope_id(pane_scope_id(tile_id)), |ui| {
                 // Clone the root and realm to avoid holding a borrow over self.state during UI interactions
                 let proj_root = self.state.project_root.clone();
                 let active_realm = self.state.active_realm.clone();
@@ -780,14 +800,14 @@ pub fn open_search_results_in_tab(state: &mut crate::state::State, query: String
 }
 
 /// Shows ABC text in a score pane, with `selection` selected in its text. A
-/// pane that already shows the same text is reused; otherwise a new one
-/// opens in the active tab group, or on the right when `right`.
+/// tab or window that already shows the same text is reused; otherwise a
+/// new one opens at `place`.
 pub fn open_score(
     state: &mut crate::state::State,
     ctx: &egui::Context,
     source: String,
     selection: Option<nulla_render::abc::datatypes::Span>,
-    right: bool,
+    place: ScorePlace,
 ) {
     let existing = state.pane_tree.tiles.iter().find_map(|(id, tile)| match tile {
         egui_tiles::Tile::Pane(Pane::Score { source: shown }) if *shown == source => Some(*id),
@@ -808,8 +828,14 @@ pub fn open_score(
             state.active_tile_id = Some(id);
             id
         }
-        (None, None) if right => spawn_in_right_pane(state, Pane::Score { source: source.clone() }),
-        (None, None) => spawn_in_tab(state, Pane::Score { source: source.clone() }),
+        (None, None) => {
+            let pane = Pane::Score { source: source.clone() };
+            match place {
+                ScorePlace::Window => spawn_floating(state, ctx, pane),
+                ScorePlace::Tab => spawn_in_tab(state, pane),
+                ScorePlace::Right => spawn_in_right_pane(state, pane),
+            }
+        }
     };
     if let Some(span) = selection {
         crate::score::select_in_editor(ctx, crate::score::editor_id(tile_id), &source, span);
@@ -818,6 +844,17 @@ pub fn open_score(
 }
 
 // --- FLOATING WINDOWS ---
+
+/// Opens `pane` in a new floating window by the pointer. Its id comes from
+/// the tree, which never hands that id out again, so it can be docked later.
+fn spawn_floating(state: &mut crate::state::State, ctx: &egui::Context, pane: Pane) -> TileId {
+    let id = state.pane_tree.tiles.next_free_id();
+    let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(egui::pos2(120.0, 120.0));
+    let rect = egui::Rect::from_min_size(at + egui::vec2(16.0, 16.0), egui::vec2(640.0, 440.0));
+    state.floating_panes.push(FloatingPane { id, pane, rect, home: None });
+    state.active_tile_id = Some(id);
+    id
+}
 
 /// Takes the tab `tile_id` out of the tree into a floating window, under the
 /// same id. The window starts over where the tab was, a little offset.

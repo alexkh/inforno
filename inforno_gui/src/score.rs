@@ -25,8 +25,10 @@ use nulla_render::abc::datatypes::Span;
 use nulla_render::engrave::{self, Engraving, Hit};
 use nulla_render::{FontSource, Fonts, Score};
 
-/// Screen points per staff space. Lyrics (1.6 spaces) come out a little
-/// smaller than body text.
+/// About this many screen points per staff space: scores are drawn at a
+/// whole number of pixels per space (`nulla_render::whole_pixels_per_space`),
+/// so their lines lie on the pixel grid. Lyrics (1.6 spaces) come out a
+/// little smaller than body text.
 const POINTS_PER_SPACE: f32 = 8.0;
 
 /// The narrowest page that is engraved, in staff spaces. A narrower column
@@ -292,7 +294,9 @@ fn score_view(
     let available = if available.is_finite() { available } else { 800.0 };
     // room for the picture, inside the paper's margin
     let room = (available - 2.0 * margin).max(1.0);
-    let width = (room / POINTS_PER_SPACE).max(MIN_WIDTH);
+    // points per staff space as drawn: a whole number of pixels per space
+    let pps = nulla_render::whole_pixels_per_space(POINTS_PER_SPACE * ppp) / ppp;
+    let width = (room / pps).max(MIN_WIDTH);
     let code_hash = hash(code);
 
     let mut state = ui.data(|d| d.get_temp::<BlockState>(id)).unwrap_or_default();
@@ -309,8 +313,8 @@ fn score_view(
             Some(drawn) => drawn
                 .texture
                 .as_ref()
-                .map_or(drawn.size() * POINTS_PER_SPACE, |t| t.size_vec2() / drawn.pixels_per_point),
-            None => egui::vec2(room, estimated_height(code) * POINTS_PER_SPACE),
+                .map_or(drawn.size() * pps, |t| t.size_vec2() / drawn.pixels_per_point),
+            None => egui::vec2(room, estimated_height(code) * pps),
         };
         let size = if size.x > room { size * (room / size.x) } else { size };
         let (outer, response) =

@@ -23,7 +23,7 @@ mod voices;
 
 use abc::datatypes::{Diagnostic, Document, Span};
 
-pub use svg::to_svg;
+pub use svg::{to_pixel_svg, to_svg};
 
 #[derive(Clone, Debug)]
 pub struct Options {

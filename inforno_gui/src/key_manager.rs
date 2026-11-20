@@ -80,7 +80,7 @@ pub fn ui_key_manager(ctx: &egui::Context, state: &mut State) {
             let response = ui.add(
                 TextEdit::singleline(&mut state.api_key_entered)
                     .desired_width(15.0)
-                    .horizontal_align(egui::Align::Center)
+                    .align(egui::Align2::CENTER_TOP)
             );
             response.request_focus();
 

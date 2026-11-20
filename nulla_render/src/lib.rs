@@ -153,9 +153,25 @@ impl Raster {
     }
 }
 
-/// Draws an engraving at `pixels_per_space` pixels per staff space.
+/// The whole number of pixels per staff space that [`rasterize`] draws at
+/// when asked for `requested`: the staff lines are then the same number of
+/// pixels apart everywhere, and lie on the pixel grid.
+pub fn whole_pixels_per_space(requested: f32) -> f32 {
+    requested.round().max(4.0)
+}
+
+/// Draws an engraving at about `pixels_per_space` pixels per staff space:
+/// at [`whole_pixels_per_space`], or fewer to stay within 8192 pixels, with
+/// its straight lines on the pixel grid (see `engrave::to_pixel_svg`).
 pub fn rasterize(engraving: &Engraving, fonts: &Fonts, pixels_per_space: f32) -> Option<Raster> {
-    rasterize_svg(&engrave::to_svg(engraving, 1.0), fonts, pixels_per_space)
+    let longest = engraving.width.max(engraving.height).max(1.0);
+    let s = whole_pixels_per_space(pixels_per_space)
+        .min((8192.0 / longest).floor())
+        .max(1.0);
+    let mut raster = rasterize_svg(&engrave::to_pixel_svg(engraving, s), fonts, 1.0)?;
+    // in staff spaces, as the field says, not in the SVG's pixels
+    raster.size = (engraving.width, engraving.height);
+    Some(raster)
 }
 
 /// The engraving as an SVG file that needs no fonts where it is opened:

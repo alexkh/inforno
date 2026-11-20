@@ -157,8 +157,8 @@ pub struct State {
     /// A score file (SVG or PNG) waiting for the save dialog to pick a path.
     pub pending_score_export: Option<Vec<u8>>,
     /// Score panes to open once the pane tree is back in place:
-    /// (ABC text, text to select, open on the right).
-    pub pending_score_panes: Vec<(String, Option<nulla_render::abc::datatypes::Span>, bool)>,
+    /// (ABC text, text to select, where it opens).
+    pub pending_score_panes: Vec<(String, Option<nulla_render::abc::datatypes::Span>, crate::panes::ScorePlace)>,
     pub is_in_home_folio: bool,
     pub folio: PathBuf,
     // when receiving reply from the LLM's we need to store them during
