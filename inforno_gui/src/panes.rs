@@ -286,6 +286,7 @@ impl PaneBehavior<'_> {
                     Pane::Chat { chat_id } => {
                         // Per pane (we're inside push_id(tile_id)): a press waits here for the next frame.
                         let nav_id = ui.scope_id().with("chat_nav");
+                        let anchor_id = ui.scope_id().with("chat_anchor");
                         let scroll = egui::ScrollArea::vertical()
                             .id_salt(format!("pane_scroll_{:?}", tile_id))
                             .stick_to_bottom(true)
@@ -305,8 +306,9 @@ impl PaneBehavior<'_> {
                                 if let Some(highlight) = highlight {
                                     self.state.chat_highlights.insert(*chat_id, highlight);
                                 }
-                                // Last thing in the contents, after every nested ScrollArea.
+                                // Last things in the contents, after every nested ScrollArea.
                                 crate::chat::apply_chat_nav(ui, nav_id, &msg_tops);
+                                crate::chat::keep_chat_anchor(ui, anchor_id, &msg_tops);
                             });
                         crate::chat::chat_nav_buttons(ui, &scroll, nav_id);
                     }
@@ -782,16 +784,16 @@ pub fn open_editor_in_right_pane(state: &mut crate::state::State, path: PathBuf,
     state.active_chat_id = None;
 }
 
+/// The prompt stays with the chat the merge came from.
 pub fn open_merge_in_tab(state: &mut crate::state::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_tab(state, Pane::Merge { path });
     state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
-    state.active_chat_id = None;
 }
 
+/// The prompt stays with the chat the merge came from.
 pub fn open_merge_in_right_pane(state: &mut crate::state::State, path: PathBuf, left: String, right: String) {
     let new_tile_id = spawn_in_right_pane(state, Pane::Merge { path });
     state.merge_apps.insert(new_tile_id, bulat::DiffApp::new(left, right));
-    state.active_chat_id = None;
 }
 
 pub fn open_search_results_in_tab(state: &mut crate::state::State, query: String, results: Vec<inforno_core::common::SearchResult>) {
@@ -831,7 +833,7 @@ pub fn open_score(
         (None, None) => {
             let pane = Pane::Score { source: source.clone() };
             match place {
-                ScorePlace::Window => spawn_floating(state, ctx, pane),
+                ScorePlace::Window => spawn_floating(state, ctx, pane, score_window_size(ctx)),
                 ScorePlace::Tab => spawn_in_tab(state, pane),
                 ScorePlace::Right => spawn_in_right_pane(state, pane),
             }
@@ -840,20 +842,33 @@ pub fn open_score(
     if let Some(span) = selection {
         crate::score::select_in_editor(ctx, crate::score::editor_id(tile_id), &source, span);
     }
-    state.active_chat_id = None;
+    // A score in a window is a quick look: the prompt stays with the chat.
+    if place != ScorePlace::Window {
+        state.active_chat_id = None;
+    }
 }
 
 // --- FLOATING WINDOWS ---
 
-/// Opens `pane` in a new floating window by the pointer. Its id comes from
-/// the tree, which never hands that id out again, so it can be docked later.
-fn spawn_floating(state: &mut crate::state::State, ctx: &egui::Context, pane: Pane) -> TileId {
+/// Opens `pane` in a new floating window of `size`, by the pointer and
+/// inside the main window. Its id comes from the tree, which never hands
+/// that id out again, so it can be docked later.
+fn spawn_floating(state: &mut crate::state::State, ctx: &egui::Context, pane: Pane, size: egui::Vec2) -> TileId {
     let id = state.pane_tree.tiles.next_free_id();
-    let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(egui::pos2(120.0, 120.0));
-    let rect = egui::Rect::from_min_size(at + egui::vec2(16.0, 16.0), egui::vec2(640.0, 440.0));
+    let screen = ctx.content_rect();
+    let size = size.min(screen.size());
+    let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(screen.min) + egui::vec2(16.0, 16.0);
+    let rect = egui::Rect::from_min_size(at.min(screen.max - size).max(screen.min), size);
     state.floating_panes.push(FloatingPane { id, pane, rect, home: None });
     state.active_tile_id = Some(id);
     id
+}
+
+/// A score window big enough for its text and its score side by side: most
+/// of the main window, up to 1200 × 800 points.
+fn score_window_size(ctx: &egui::Context) -> egui::Vec2 {
+    let screen = ctx.content_rect().size();
+    egui::vec2((screen.x * 0.8).min(1200.0), (screen.y * 0.75).min(800.0))
 }
 
 /// Takes the tab `tile_id` out of the tree into a floating window, under the

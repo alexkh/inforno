@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 
 use bulat::editor::{CodeEditor, ColorTheme, Syntax};
 use egui::RichText;
+use egui::emath::GuiRounding;
 use egui_commonmark::CommonMarkViewer;
 use regex::Regex;
 use rust_i18n::t;
@@ -179,9 +180,13 @@ fn paint_display_math(ui: &mut egui::Ui, image: &egui::Image<'_>, size: egui::Ve
     // report the formula's own width rather than the whole line.
     let line_width = if ui.is_sizing_pass() { size.x } else { ui.max_rect().width() };
     let size = size * (line_width / size.x).min(1.0);
+    // a whole number of pixels, on whole pixels: one texel to each pixel
+    let ppp = ui.ctx().pixels_per_point();
+    let size = (size * ppp).round().max(egui::Vec2::splat(1.0)) / ppp;
     let padding = 0.3 * row_height;
     let (slot, _) = ui.allocate_exact_size(egui::vec2(line_width, size.y + 2.0 * padding), egui::Sense::hover());
-    image.paint_at(ui, egui::Rect::from_center_size(slot.center(), size));
+    let rect = egui::Rect::from_min_size((slot.center() - size / 2.0).round_to_pixels(ppp), size);
+    image.paint_at(ui, rect);
 }
 
 /// Typst's 11pt text is drawn at this fraction of the egui body row height.
@@ -258,16 +263,25 @@ fn paint_inline_math(ui: &mut egui::Ui, image: &egui::Image<'_>, layout: &MathLa
     let widest = cuts.windows(2).map(|w| w[1] - w[0]).fold(0.0, f32::max);
     let shrink = if wraps && widest > line_width { line_width / widest } else { 1.0 };
 
-    // Rasterize once at the full size; each piece paints its slice of it.
-    let full_size = size * shrink;
+    // Rasterize once, a whole number of pixels in size; each piece paints its
+    // slice of it, cut at whole pixels and placed on whole pixels, so every
+    // texel lands on one pixel of the screen.
+    let ppp = ui.ctx().pixels_per_point();
+    let full_px = (size * shrink * ppp).round().max(egui::Vec2::splat(1.0));
+    let full_size = full_px / ppp;
     let texture = image.clone().fit_to_exact_size(full_size).load_for_size(ui.ctx(), full_size);
     let tint = math_ink(ui);
+    let cuts_px: Vec<f32> = cuts.iter().map(|c| (c / size.x * full_px.x).round()).collect();
 
-    for w in cuts.windows(2) {
-        let piece_size = egui::vec2(w[1] - w[0], size.y) * shrink;
+    for w in cuts_px.windows(2) {
+        if w[1] <= w[0] {
+            continue;
+        }
+        let piece_size = egui::vec2((w[1] - w[0]) / ppp, full_size.y);
         let rect = place_inline_piece(ui, piece_size, layout.baseline_pt * pt_to_ui * shrink, row_height);
+        let rect = egui::Rect::from_min_size(rect.min.round_to_pixels(ppp), piece_size);
         if let Ok(egui::load::TexturePoll::Ready { texture }) = &texture {
-            let uv = egui::Rect::from_min_max(egui::pos2(w[0] / size.x, 0.0), egui::pos2(w[1] / size.x, 1.0));
+            let uv = egui::Rect::from_min_max(egui::pos2(w[0] / full_px.x, 0.0), egui::pos2(w[1] / full_px.x, 1.0));
             ui.painter().image(texture.id, rect, uv, tint);
         }
     }

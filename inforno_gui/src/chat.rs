@@ -578,6 +578,58 @@ pub fn apply_chat_nav(ui: &egui::Ui, nav_id: egui::Id, msg_tops: &[f32]) {
     }
 }
 
+/// Where the view of a chat starts, kept from one frame to the next by
+/// `keep_chat_anchor`.
+#[derive(Clone, Copy)]
+struct ChatAnchor {
+    /// Width of the view.
+    width: f32,
+    /// The row the view starts in (0 is the content above the first
+    /// message), and how far into it, as a fraction of its height.
+    row: usize,
+    fraction: f32,
+    /// The view is at the bottom; stick-to-bottom keeps it there.
+    at_bottom: bool,
+}
+
+/// Keeps a chat's view on the same text while the chat's width changes (a
+/// splitter dragged, a window resized). The text reflows, and the same
+/// offset would show other text, so the view goes back to the same place in
+/// the message it started in, as a fraction of that message's height. Call
+/// at the END of the chat ScrollArea's contents, like `apply_chat_nav`.
+pub fn keep_chat_anchor(ui: &egui::Ui, anchor_id: egui::Id, msg_tops: &[f32]) {
+    let viewport = ui.clip_rect();
+    // the content's top, each message row's top, and the content's end
+    let rows: Vec<f32> = std::iter::once(ui.max_rect().top())
+        .chain(msg_tops.iter().copied())
+        .chain(std::iter::once(ui.min_rect().bottom()))
+        .collect();
+    let width = viewport.width();
+
+    let previous = ui.data(|d| d.get_temp::<ChatAnchor>(anchor_id));
+    if let Some(prev) = previous
+        && (prev.width - width).abs() > 0.5
+        && !prev.at_bottom
+        && prev.row + 1 < rows.len()
+    {
+        let (top, end) = (rows[prev.row], rows[prev.row + 1]);
+        let delta = top + prev.fraction * (end - top) - viewport.top();
+        if delta.abs() > 0.5 {
+            ui.scroll_with_delta_animation(egui::vec2(0.0, -delta), egui::style::ScrollAnimation::none());
+            ui.ctx().request_repaint();
+        }
+        // the same place until the width settles: the text moves only next frame
+        ui.data_mut(|d| d.insert_temp(anchor_id, ChatAnchor { width, ..prev }));
+        return;
+    }
+
+    let row = rows[..rows.len() - 1].iter().rposition(|&t| t <= viewport.top()).unwrap_or(0);
+    let (top, end) = (rows[row], rows[row + 1]);
+    let fraction = ((viewport.top() - top) / (end - top).max(1.0)).clamp(0.0, 1.0);
+    let at_bottom = ui.min_rect().bottom() <= viewport.bottom() + 1.0;
+    ui.data_mut(|d| d.insert_temp(anchor_id, ChatAnchor { width, row, fraction, at_bottom }));
+}
+
 /// Where a message button goes, given the rows' tops and the view's top. A
 /// row starting at the view's top, or up to `slack` below it, counts as
 /// where the view already is.
